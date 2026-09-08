@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docforge"
+version = "0.1.0"
+description = "Assemble Markdown, LaTeX, and AI-generated art into auditable DOCX"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "M.Y.G." }]
+keywords = ["docx", "markdown", "latex", "word", "ooxml", "proposal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Office/Business :: Office Suites",
+]
+dependencies = [
+    "lxml>=4.9",
+    "python-docx>=1.1",
+    "Pillow>=9.0",
+]
+# Optional feature groups.  The CLI entry points import their feature module
+# lazily, so the minimum install (docforge) stays small.
+[project.optional-dependencies]
+tex = ["bibtexparser>=1.4", "numpy>=1.20"]
+plot = ["matplotlib>=3.6", "numpy>=1.20"]
+aigc = ["openai>=1.30", "python-dotenv>=1.0", "google-genai>=1.0"]
+tests = [
+    "pytest>=7.0",
+    "matplotlib>=3.6",
+    "numpy>=1.20",
+    "openai>=1.30",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+docforge = "docforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
