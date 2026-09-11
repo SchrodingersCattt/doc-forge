@@ -36,6 +36,20 @@ Python 3.10+.
 # Markdown -> DOCX (merged blocks)
 docforge md2docx section_01.md section_02.md -o proposal.docx --title "..."
 
+# Markdown -> DOCX using an existing Word template and ordered references
+docforge md2docx 01.abstract.md 02.main.md -o main.docx \
+  --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
+  --bibliography 07.references.json --style template \
+  --font "Times New Roman" --east-asia-font "Times New Roman" \
+  --line-numbers on --columns two --force
+
+# Supporting information can request a readable one-column body
+docforge md2docx 06.supporting-information.md -o si.docx \
+  --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
+  --bibliography 07.references.json --citation-base main-paph2.manifest.json \
+  --style template --font "Times New Roman" --east-asia-font "Times New Roman" \
+  --line-numbers on --columns one --force
+
 # Word tracked-changes redline against a reviewed DOCX
 docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
 
@@ -54,6 +68,46 @@ docforge check output.docx --verify-clean
 ```
 
 All paths are explicit; nothing is inferred from the current directory.
+
+Template assembly replaces sample body content while retaining the supplied
+template's styles, section geometry, headers, footers, numbering, and embedded assets.
+
+Inline figures use ordinary Markdown plus a following caption paragraph, for example:
+`![Figure 1](figures/structure.png)` followed by `Figure 1. Caption text.`.
+When the template contains figure sections, docforge reuses their inline drawing
+slots and the surrounding one-column/two-column section properties; the image
+and caption remain separate Word paragraphs.
+
+Inline TeX formulae use ordinary Word runs rather than OMML, so variables are
+italic, ``\mathrm{...}`` text and numerals are upright, and ``^``/``_`` become
+true Word superscript/subscript run properties. For example,
+``$t_{\mathrm{chem}}$`` renders as an italic *t* with an upright subscript.
+A standalone display block delimited by ``$$`` is rendered as native OMML and
+receives an automatic sequential number, e.g. ``$$`` / ``k = Ae^{-E_a/RT}`` /
+``$$`` becomes equation (1). The tabulated number is retargeted to the active
+body-column width when a template is used. Unicode chemical scripts in ordinary
+text are converted to the same Word run properties during the final audit.
+
+Lines beginning with `! ` or `！ ` are treated as source comments and omitted by
+default; `--keep-comments` preserves them as TODO notes. An image alt-text option
+such as `![Figure 1|columns=double](figure.png)` requests a two-column image
+section. Without an image option, template mode uses the template's figure-slot
+section (MolCrysKit is single-column for figures and two-column for body text),
+while `--columns one|two` changes body sections. Continuous `<w:sectPr>`
+properties are copied section by section, including their headers/footers and
+column definitions.
+
+For a Supporting Information build, pass the main manifest with
+`--citation-base`: citations present in the main document reuse their numeric
+labels; keys that occur only in SI receive `S1`, `S2`, and so on. The main and SI
+bibliographies therefore share a single ordered JSON source while keeping SI-only
+entries visibly separate.
+`--metadata` reads simple level-one Markdown fields (`TITLE`, `AUTHOR`,
+`AFFILIATION`, `Acknowledgement`, and `Code Availability`). Citation tokens
+(`\\cite{key}` and `\\citep{key}`) are converted to numbered references from
+the insertion order of the JSON bibliography. Unknown keys fail the build.
+Each template output receives adjacent `.manifest.json` and `.sha256` audit
+files.
 
 ## Library layout
 
@@ -88,3 +142,21 @@ pytest
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+
+
+## Template assembly arguments
+
+Metadata keeps authors and contact lines separate. Use an EMAILS heading, or put
+email lines in the AUTHOR section, with one marker-preserving address per line.
+The current PAP-H2 metadata uses *email@example.org; a second address may use
+**email2@example.org. At most two contact lines are accepted, and docforge does
+not infer a corresponding-author mapping.
+
+The template assembly CLI accepts --font and --east-asia-font for explicit
+generated-run font overrides. --style template preserves the styles discovered
+from the supplied DOCX; alternatively --style PATH.json supplies a semantic
+role-to-existing-style mapping such as {"body": "TA_Main_Text1"}. The
+--line-numbers option is template, on, or off and applies to every retained
+front, body, figure, and terminal section. All four rendering arguments are
+written to the assembly manifest.

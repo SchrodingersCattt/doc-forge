@@ -19,15 +19,16 @@ from typing import Iterable
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, RGBColor
+from docx.shared import Cm, Inches, Pt, RGBColor
 
 import lxml.etree as etree
 
 from .blocks import Block, SectionSource
+from ..tex.tokenize import tokenize_tex
 
 __all__ = [
     "Block",
@@ -54,6 +55,7 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 REFERENCE_RE = re.compile(r"^\[(\d+)\]\s+(.*)$")
 IMAGE_RE = re.compile(r"^!\[(?P<caption>[^\]]*)\]\((?P<path>[^)]+)\)$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+BANG_COMMENT_RE = re.compile(r"^[!！](?:\s+|$)")
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
@@ -76,6 +78,7 @@ UNICODE_SCRIPT_CHARS = frozenset(
     chr(codepoint) for codepoint in (*UNICODE_SUBSCRIPT_MAP.keys(), *UNICODE_SUPERSCRIPT_MAP.keys())
 )
 EN_DASH_ENTITY_RE = re.compile(r"&(?:ndash|#8211|#x0*2013);", re.IGNORECASE)
+BOND_HYPHEN_RE = re.compile(r"(?<![A-Za-z])([A-Z][a-z]?)-([A-Z][a-z]?)(?=(?:[0-9]|[\s,.;:)\]/]|$))")
 
 
 # ── parsing ────────────────────────────────────────────────────────────────
@@ -88,7 +91,8 @@ def normalize_text(value: str) -> str:
 def normalize_typography(value: str) -> str:
     """Normalize dash entities and convert em dashes to en dashes."""
     value = EN_DASH_ENTITY_RE.sub("\u2013", value)
-    return value.replace("\u2014", "\u2013")
+    value = value.replace("\u2014", "\u2013")
+    return BOND_HYPHEN_RE.sub(r"\1–\2", value)
 
 
 def clean_markdown(text: str, strip_comments: bool) -> str:
@@ -136,6 +140,12 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             flush_paragraph()
             i += 1
             continue
+        if BANG_COMMENT_RE.match(stripped) and not stripped.startswith("!["):
+            flush_paragraph()
+            if not strip_comments:
+                blocks.append(Block("paragraph", f"[TODO: {stripped[1:].strip()}]"))
+            i += 1
+            continue
         heading = HEADING_RE.match(stripped)
         if heading:
             flush_paragraph()
@@ -146,7 +156,21 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         if image:
             flush_paragraph()
             image_path = (path.parent / image.group("path").strip()).resolve()
-            blocks.append(Block("image", text=image.group("caption").strip(), path=str(image_path)))
+            raw_caption = image.group("caption").strip()
+            caption_parts = [part.strip() for part in raw_caption.split("|")]
+            options: list[tuple[str, str]] = []
+            if len(caption_parts) > 1:
+                kept = [caption_parts[0]]
+                for part in caption_parts[1:]:
+                    if "=" not in part:
+                        kept.append(part)
+                        continue
+                    key, value = (piece.strip() for piece in part.split("=", 1))
+                    options.append((key.lower(), value.lower()))
+                raw_caption = " | ".join(kept)
+            blocks.append(
+                Block("image", text=raw_caption, path=str(image_path), options=tuple(options))
+            )
             i += 1
             continue
         if stripped.startswith("```"):
@@ -278,14 +302,28 @@ def set_highlight(run, fill: str = "FFF2CC") -> None:
     shading.set(qn("w:fill"), fill)
 
 
-def append_inline_math(paragraph, expression: str) -> None:
-    """Append ``m:oMath`` inline equation from the documented math subset."""
-    from .omml import normalize_math_source, parse_math_omml
+def append_inline_math(
+    paragraph, expression: str, *, bold_default: bool = False, size: float = 11.0
+) -> None:
+    """Render inline TeX as ordinary Word runs with true script formatting.
 
-    math = OxmlElement("m:oMath")
-    for element in parse_math_omml(normalize_math_source(expression)):
-        math.append(element)
-    paragraph._p.append(math)
+    Inline formulae are intentionally not OMML objects.  Variables retain the
+    normal italic convention, ``\mathrm`` text and numerals remain upright,
+    and ``^``/``_`` become Word ``w:vertAlign`` run properties.  Standalone
+    display formulae use :func:`add_equation` and native OMML instead.
+    """
+    for span in tokenize_tex(f"${expression}$"):
+        run = paragraph.add_run(span.text)
+        run.bold = bold_default or span.bold
+        run.italic = span.italic
+        run.font.subscript = span.subscript
+        run.font.superscript = span.superscript
+        set_run_font(run, size=size)
+        if span.color:
+            try:
+                run.font.color.rgb = RGBColor.from_string(span.color)
+            except ValueError:
+                pass
 
 
 def add_inline(
@@ -324,7 +362,7 @@ def add_inline(
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
         elif token.startswith("$"):
-            append_inline_math(paragraph, token[1:-1])
+            append_inline_math(paragraph, token[1:-1], bold_default=bold_default, size=size)
         position = match.end()
     if position < len(text):
         run = paragraph.add_run(text[position:])
@@ -398,7 +436,7 @@ def add_code_block(doc: DocumentType, text: str) -> None:
     set_highlight(run, "F2F2F2")
 
 
-def add_equation(doc: DocumentType, text: str) -> None:
+def add_equation(doc: DocumentType, text: str, *, number: int | None = None) -> None:
     from .omml import normalize_math_source, parse_math_omml
 
     paragraph = doc.add_paragraph()
@@ -410,6 +448,14 @@ def add_equation(doc: DocumentType, text: str) -> None:
         math.append(element)
     math_paragraph.append(math)
     paragraph._p.append(math_paragraph)
+    if number is not None:
+        # A right tab keeps the number at the edge of the receiving column;
+        # template assembly retargets this tab to the actual column width.
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
+        tab = paragraph.add_run("\t")
+        set_run_font(tab, size=11.0)
+        marker = paragraph.add_run(f"({number})")
+        set_run_font(marker, size=11.0)
 
 
 def add_quote(doc: DocumentType, text: str) -> None:
@@ -487,6 +533,45 @@ def set_cell_shading(cell, fill: str) -> None:
     shading.set(qn("w:fill"), fill)
 
 
+def set_table_three_line_borders(table) -> None:
+    """Apply a journal-style three-line table with no fill or vertical rules."""
+    table_properties = table._tbl.tblPr
+    borders = table_properties.find(qn("w:tblBorders"))
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        table_properties.append(borders)
+    for side in ("top", "bottom", "left", "right", "insideH", "insideV"):
+        node = borders.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            borders.append(node)
+        if side in {"top", "bottom"}:
+            node.set(qn("w:val"), "single")
+            node.set(qn("w:sz"), "10")
+            node.set(qn("w:space"), "0")
+            node.set(qn("w:color"), "000000")
+        else:
+            node.set(qn("w:val"), "nil")
+            for attribute in ("sz", "space", "color"):
+                node.attrib.pop(qn(f"w:{attribute}"), None)
+    if not table.rows:
+        return
+    for cell in table.rows[0].cells:
+        cell_properties = cell._tc.get_or_add_tcPr()
+        cell_borders = cell_properties.find(qn("w:tcBorders"))
+        if cell_borders is None:
+            cell_borders = OxmlElement("w:tcBorders")
+            cell_properties.append(cell_borders)
+        bottom = cell_borders.find(qn("w:bottom"))
+        if bottom is None:
+            bottom = OxmlElement("w:bottom")
+            cell_borders.append(bottom)
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")
+        bottom.set(qn("w:space"), "0")
+        bottom.set(qn("w:color"), "000000")
+
+
 def set_repeat_table_header(row) -> None:
     tr_pr = row._tr.get_or_add_trPr()
     header = OxmlElement("w:tblHeader")
@@ -512,14 +597,13 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
                 set_paragraph_spacing(paragraph, after=0, line=1.05)
                 for run in paragraph.runs:
                     set_run_font(run, size=9.5)
-            if row_index == 0:
-                set_cell_shading(row.cells[col_index], "D9EAF7")
         if row_index == 0:
             set_repeat_table_header(row)
+    set_table_three_line_borders(table)
     doc.add_paragraph()
 
 
-def add_block(doc: DocumentType, block: Block) -> None:
+def add_block(doc: DocumentType, block: Block, *, equation_number: int | None = None) -> None:
     if block.kind == "heading":
         add_heading(doc, block.text, block.level)
     elif block.kind == "paragraph":
@@ -533,7 +617,7 @@ def add_block(doc: DocumentType, block: Block) -> None:
     elif block.kind == "code":
         add_code_block(doc, block.text)
     elif block.kind == "equation":
-        add_equation(doc, block.text)
+        add_equation(doc, block.text, number=equation_number)
     elif block.kind == "table":
         add_table(doc, block.rows)
     elif block.kind == "quote":
@@ -761,13 +845,28 @@ def verify_image_relationships(path: Path) -> None:
             raise RuntimeError(f"Generated DOCX contains an unresolved image relationship: {rid}")
 
 
-def render_blocks_to_doc(blocks: Iterable[Block], *, title: str = "") -> DocumentType:
+def render_blocks_to_doc(
+    blocks: Iterable[Block],
+    *,
+    title: str = "",
+    equation_start: int = 1,
+    heading_before: float | None = None,
+) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
     doc = make_empty_doc()
     if title:
         add_heading(doc, title, 1)
+    equation_number = equation_start
     for block in blocks:
-        add_block(doc, block)
+        add_block(
+            doc,
+            block,
+            equation_number=equation_number if block.kind == "equation" else None,
+        )
+        if block.kind == "heading" and heading_before is not None and doc.paragraphs:
+            doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
+        if block.kind == "equation":
+            equation_number += 1
     return doc
 
 
@@ -1167,4 +1266,3 @@ def verify_retained_metadata(
     missing = [label for label, value in required.items() if not value or value not in retained_text]
     if missing:
         raise RuntimeError(f"Generated DOCX lost retained metadata fields: {', '.join(missing)}")
-

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from docforge.markdown.blocks import Block
+from docforge.markdown.launcher import normalize_typography, parse_markdown, render_blocks_to_doc
 
 
 class BlockTests(unittest.TestCase):
@@ -19,6 +21,21 @@ class BlockTests(unittest.TestCase):
         block = Block("heading", "Title", level=1)
         self.assertEqual(block.rows, ())
         self.assertEqual(block.path, "")
+
+    def test_bang_comments_are_ignored_and_image_options_are_parsed(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text(
+                "! internal Chinese blueprint\n\nVisible paragraph.\n\n"
+                "![Figure 1|columns=single](figure.png)\n\n"
+                "Figure 1. Caption.\n",
+                encoding="utf-8",
+            )
+            blocks = parse_markdown(path)
+            self.assertEqual([block.kind for block in blocks], ["paragraph", "image", "paragraph"])
+            self.assertEqual(blocks[1].options, (("columns", "single"),))
+            kept = parse_markdown(path, strip_comments=False)
+            self.assertIn("[TODO: internal Chinese blueprint]", [block.text for block in kept])
 
 
 class OmmlTests(unittest.TestCase):
@@ -52,6 +69,79 @@ class OmmlTests(unittest.TestCase):
         elements = parse_math_omml(r"\frac{1}{2}")
         self.assertEqual(elements[0].tag.rsplit("}", 1)[-1], "f")
 
+    def test_inline_math_uses_ordinary_runs_and_true_scripts(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"The clock is $t_{\mathrm{chem}}$ and $ClO_4^-$. ")]
+        )
+        paragraph = document.paragraphs[0]
+        self.assertNotIn("oMath", paragraph._p.xml)
+        self.assertTrue(any(run.text == "t" and run.italic for run in paragraph.runs))
+        self.assertTrue(any(run.text == "chem" and run.font.subscript for run in paragraph.runs))
+        self.assertTrue(any(run.text == "4" and run.font.subscript for run in paragraph.runs))
+        self.assertTrue(any(run.text == "–" and run.font.superscript for run in paragraph.runs))
+
+    def test_display_equations_are_omml_and_numbered(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("equation", r"E = mc^2"), Block("equation", r"a = b")]
+        )
+        xml = document._element.xml
+        self.assertEqual(xml.count("<m:oMathPara"), 2)
+        self.assertIn("(1)", xml)
+        self.assertIn("(2)", xml)
+        self.assertEqual(
+            [run.text for paragraph in document.paragraphs for run in paragraph.runs if run.text],
+            ["\t", "(1)", "\t", "(2)"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_chemical_formula_and_space_group_markup(tmp_path: Path) -> None:
+    document = render_blocks_to_doc(
+        [Block("paragraph", r"$\mathrm{H_2dabco^{2+}}$ adopts $Pa\bar{3}$.")]
+    )
+    paragraph = document.paragraphs[0]
+    assert any(run.text == "2" and run.font.subscript for run in paragraph.runs)
+    assert any(run.text == "2+" and run.font.superscript for run in paragraph.runs)
+    assert any(run.text == "3̅" and not run.italic for run in paragraph.runs)
+
+def test_default_table_uses_three_line_rules() -> None:
+    document = render_blocks_to_doc(
+        [Block("table", rows=(("A", "B"), ("1", "2")))]
+    )
+    table = document.tables[0]
+    borders = table._tbl.tblPr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblBorders")
+    assert borders is not None
+    top = borders.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}top")
+    bottom = borders.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}bottom")
+    inside_h = borders.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}insideH")
+    inside_v = borders.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}insideV")
+    assert top.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz") == "10"
+    assert bottom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz") == "10"
+    assert inside_h.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") == "nil"
+    assert inside_v.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") == "nil"
+    header_borders = table.rows[0].cells[0]._tc.tcPr.find(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tcBorders"
+    )
+    header_bottom = header_borders.find(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}bottom"
+    )
+    assert header_bottom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz") == "6"
+
+def test_chemical_bond_hyphens_use_en_dash() -> None:
+    value = normalize_typography("N-H, C-N, K-Cl6, A-X12, HClO4-forming, PAP-H2")
+    assert value == "N–H, C–N, K–Cl6, A–X12, HClO4-forming, PAP-H2"
+
+
+def test_scientific_units_and_r_squared_use_true_scripts() -> None:
+    document = render_blocks_to_doc(
+        [Block("paragraph", r"$R^2$; $\mathrm{cm^3\,mol^{-1}\,s^{-1}}$; $C_2(10\,\mathrm{ps})$.")]
+    )
+    runs = document.paragraphs[0].runs
+    assert any(run.text == "R" and run.italic for run in runs)
+    assert any(run.text == "2" and run.font.superscript for run in runs)
+    assert any(run.text == "3" and run.font.superscript for run in runs)
+    assert sum(run.font.superscript is True and run.text == "–1" for run in runs) == 2
+    assert any(run.text == "C" and run.italic for run in runs)
+    assert any(run.text == "2" and run.font.subscript for run in runs)

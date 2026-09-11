@@ -1,6 +1,6 @@
 # Agent guide for `docforge`
 
-docforge 是项目无关的通用 Python 包：把 Markdown、LaTeX 和 AI 生成图整理为可审计的 Word 文档。本仓库是独立 git 仓库（GitHub: SchrodingersCattt/docforge），作为 submodule 挂载到使用它的研究仓库（如 pap-h2 的 `algorithm/docforge`）。
+docforge 是项目无关的通用 Python 包：把 Markdown、LaTeX 和 AI 生成图整理为可审计的 Word 文档。docforge 可以单独发布为 Python 包；在消费方仓库中也可以直接跟踪源码树。消费方通过显式 CLI 输入模板、Markdown 和 bibliography，不依赖固定项目路径。
 
 ## 包边界
 
@@ -25,6 +25,18 @@ python -m py_compile src/docforge/**/*.py   # 快速语法检查
 - 保持类型标注 `from __future__ import annotations`，dataclass 建模（`Block`、`Span`、`PromptSpec` 等）。
 - 改动后跑 `pytest`；涉及 DOCX/跟踪修订的行为变更需补测试。
 - 提交信息用英语，一句话说明做了什么；默认直接在 `main` 上维护。
+
+## Template-backed Markdown
+
+- `docforge.markdown.template` contains only project-agnostic template
+  assembly: semantic style discovery, section-preserving body replacement,
+  ordered citation expansion, and output audit sidecars.
+- Consumers provide their own Markdown paths, metadata, bibliography, and
+  template. Do not add journal-specific filenames, scientific labels, or
+  project paths to the package.
+- Template outputs must pass structural checks and a render review; generated
+  DOCX files and their render intermediates belong to the consumer's temporary
+  workspace, not this package.
 
 ## 不在这里的事情
 

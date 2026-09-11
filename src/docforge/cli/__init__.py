@@ -24,6 +24,17 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
     md.add_argument("--keep-comments", action="store_true", help="Keep Markdown HTML comments as red TODO notes")
     md.add_argument("--title", help="Optional title for a standalone document")
+    md.add_argument("--template", type=Path, help="DOCX template to preserve while assembling Markdown")
+    md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
+    md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
+    md.add_argument("--citation-base", type=Path, help="Existing main-manuscript manifest whose citation numbers SI should reuse")
+    md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
+    md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
+    md.add_argument("--east-asia-font", dest="east_asia_font", help="Explicit East Asian font override for generated text")
+    md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
+    md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
+    md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
+    md.add_argument("--no-title", action="store_true", help="Omit the visible title block while retaining metadata provenance")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
     md.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
@@ -61,13 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", help="Validate a generated DOCX (headings, images, clean review state)")
     check.add_argument("docx", type=Path, help="DOCX to validate")
     check.add_argument("--verify-clean", action="store_true", help="Require accepted revisions and no comments")
+    check.add_argument("--verify-template", action="store_true", help="Check template placeholders, citations, sections, and image parts")
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(raw_argv)
+    args._command_argv = ["docforge", *raw_argv]
     try:
         if args.command == "md2docx":
             return _cmd_md2docx(args)
@@ -93,6 +107,53 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
 
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
+    if args.template is not None:
+        from ..markdown import assemble_markdown_template, write_assembly_sidecars
+
+        if args.metadata is None:
+            raise ValueError("Template assembly requires --metadata")
+        result = assemble_markdown_template(
+            args.inputs,
+            template_path=args.template,
+            output=args.output,
+            metadata_path=args.metadata,
+            bibliography_path=args.bibliography,
+            citation_base_path=args.citation_base,
+            title=args.title or "",
+            keep_comments=args.keep_comments,
+            skip_images=args.skip_images,
+            columns=args.columns,
+            font_family=args.font_family,
+            east_asia_font=args.east_asia_font,
+            style_profile=args.style_profile,
+            line_numbers=args.line_numbers,
+            include_title=not args.no_title,
+            heading_before=args.heading_before,
+            force=args.force,
+        )
+        manifest, checksum = write_assembly_sidecars(
+            result,
+            inputs=args.inputs,
+            template_path=args.template,
+            metadata_path=args.metadata,
+            bibliography_path=args.bibliography,
+            citation_base_path=args.citation_base,
+            command=args._command_argv,
+        )
+        print(result.output)
+        print(manifest)
+        print(checksum)
+        return 0
+    if (
+        args.metadata is not None
+        or args.bibliography is not None
+        or args.citation_base is not None
+        or args.font_family is not None
+        or args.east_asia_font is not None
+        or args.style_profile != "template"
+        or args.line_numbers != "template"
+    ):
+        raise ValueError("Metadata, bibliography, style, font, and line-number options require --template")
     blocks = [
         block
         for path in args.inputs
@@ -100,7 +161,7 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
     ]
     if args.skip_images:
         blocks = [block for block in blocks if block.kind != "image"]
-    doc = render_blocks_to_doc(blocks, title=args.title)
+    doc = render_blocks_to_doc(blocks, title="" if args.no_title else args.title, heading_before=args.heading_before)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(args.output))
     convert_unicode_scripts_in_docx(args.output)
@@ -224,6 +285,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
     verify_image_relationships(args.docx)
     if args.verify_clean:
         verify_clean_review_state(args.docx)
+    if args.verify_template:
+        from ..markdown import verify_template_output
+
+        verify_template_output(args.docx)
     print(f"OK {args.docx}")
     return 0
 

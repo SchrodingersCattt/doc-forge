@@ -529,6 +529,7 @@ def _tex_hl_name(name: str) -> str:
 
 def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = s.replace("~", "\u00A0")
+    s = re.sub(r"\\bar\{([^{}]*)\}", lambda m: "".join(ch + "\u0305" for ch in m.group(1)), s)
     s = s.replace("---", "—")
     s = s.replace("--", "–")
     s = s.replace("``", "\u201C")

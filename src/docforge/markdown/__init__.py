@@ -26,6 +26,17 @@ from .launcher import (
     document_contains_em_dash,
     document_contains_hyphenated_numeric_range,
 )
+from .template import (
+    AssemblyResult,
+    ManuscriptMetadata,
+    assemble_markdown_template,
+    discover_template_styles,
+    load_bibliography,
+    parse_metadata,
+    sha256_file,
+    verify_template_output,
+    write_assembly_sidecars,
+)
 
 __all__ = [
     "Block",
@@ -52,4 +63,13 @@ __all__ = [
     "convert_unicode_scripts_in_docx",
     "document_contains_em_dash",
     "document_contains_hyphenated_numeric_range",
+    "AssemblyResult",
+    "ManuscriptMetadata",
+    "assemble_markdown_template",
+    "discover_template_styles",
+    "load_bibliography",
+    "parse_metadata",
+    "sha256_file",
+    "verify_template_output",
+    "write_assembly_sidecars",
 ]

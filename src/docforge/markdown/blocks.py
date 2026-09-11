@@ -26,6 +26,7 @@ class Block:
     rows: tuple[tuple[str, ...], ...] = ()
     language: str = ""
     path: str = ""
+    options: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -35,6 +36,7 @@ class Block:
             "rows": [list(row) for row in self.rows],
             "language": self.language,
             "path": self.path,
+            "options": [list(item) for item in self.options],
         }
 
 
