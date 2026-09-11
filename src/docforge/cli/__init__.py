@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
-    md.add_argument("--no-title", action="store_true", help="Omit the visible title block while retaining metadata provenance")
+    md.add_argument("--no-title", action="store_true", help="Remove level-one Markdown headings; retain the metadata title block")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
     md.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
@@ -127,7 +127,8 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             east_asia_font=args.east_asia_font,
             style_profile=args.style_profile,
             line_numbers=args.line_numbers,
-            include_title=not args.no_title,
+            include_title=True,
+            strip_level_one_headings=args.no_title,
             heading_before=args.heading_before,
             force=args.force,
         )
@@ -161,7 +162,12 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
     ]
     if args.skip_images:
         blocks = [block for block in blocks if block.kind != "image"]
-    doc = render_blocks_to_doc(blocks, title="" if args.no_title else args.title, heading_before=args.heading_before)
+    if args.no_title:
+        blocks = [
+            block for block in blocks
+            if not (block.kind == "heading" and block.level == 1)
+        ]
+    doc = render_blocks_to_doc(blocks, title=args.title, heading_before=args.heading_before)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(args.output))
     convert_unicode_scripts_in_docx(args.output)

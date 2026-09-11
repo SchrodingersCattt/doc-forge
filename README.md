@@ -149,14 +149,23 @@ MIT — see [LICENSE](LICENSE).
 
 Metadata keeps authors and contact lines separate. Use an EMAILS heading, or put
 email lines in the AUTHOR section, with one marker-preserving address per line.
-The current PAP-H2 metadata uses *email@example.org; a second address may use
-**email2@example.org. At most two contact lines are accepted, and docforge does
-not infer a corresponding-author mapping.
+At most two contact lines are accepted, and docforge does not infer a
+corresponding-author mapping.
 
 The template assembly CLI accepts --font and --east-asia-font for explicit
 generated-run font overrides. --style template preserves the styles discovered
 from the supplied DOCX; alternatively --style PATH.json supplies a semantic
 role-to-existing-style mapping such as {"body": "TA_Main_Text1"}. The
 --line-numbers option is template, on, or off and applies to every retained
-front, body, figure, and terminal section. All four rendering arguments are
-written to the assembly manifest.
+front, body, figure, and terminal section. --heading-before sets explicit
+heading spacing before in points. --no-title removes level-one Markdown
+headings, including the generated References/Acknowledgment/Code Availability
+headings, while retaining the metadata title block. These rendering arguments
+are written to the assembly manifest.
+
+The generic rule is level-based rather than filename-based: any input Markdown
+file may contain level-one headings, and --no-title removes them uniformly.
+References are generated from the ordered bibliography JSON; when
+--citation-base points to the main manifest, citations shared with the main
+document retain their numeric labels and SI-only entries receive S1, S2, and
+so on.

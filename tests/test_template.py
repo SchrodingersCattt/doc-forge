@@ -298,6 +298,37 @@ def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tm
     assert tab is not None and int(tab.get(qn("w:pos"))) > 0
 
 
+def test_no_title_strips_level_one_and_generated_reference_heading(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Introduction\n\nBody \\citep{ref}.\n\n## Detail\n\nMore.\n",
+        encoding="utf-8",
+    )
+    bibliography = tmp_path / "references.json"
+    bibliography.write_text('{"ref": "Author. Journal. 2026."}', encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        bibliography_path=bibliography,
+        strip_level_one_headings=True,
+    )
+    text = "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
+    assert result.strip_level_one_headings is True
+    assert "A title" in text
+    assert "Body [1]." in text
+    assert "Detail" in text
+    assert "Introduction" not in text
+    assert "References" not in text
+    assert "1.\tAuthor." in text
+
+
 def test_unfilled_optional_metadata_is_omitted(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _template(template)
@@ -332,7 +363,7 @@ def test_template_rendering_args_override_font_style_and_line_numbers(tmp_path: 
         east_asia_font="SimSun",
         style_profile=str(style),
         line_numbers="on",
-        include_title=False,
+        strip_level_one_headings=True,
         heading_before=6,
     )
     document = Document(output)
@@ -340,10 +371,13 @@ def test_template_rendering_args_override_font_style_and_line_numbers(tmp_path: 
     assert result.font_family == "Arial"
     assert result.east_asia_font == "SimSun"
     assert result.line_numbers == "on"
-    assert result.include_title is False
+    assert result.include_title is True
+    assert result.strip_level_one_headings is True
     assert result.heading_before == 6
     assert all(section._sectPr.find(qn("w:lnNumType")) is not None for section in document.sections)
-    assert "A-Site-Dependent" not in "\n".join(p.text for p in document.paragraphs)
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "A title" in text
+    assert "Introduction" not in text
     text_runs = [run for paragraph in document.paragraphs for run in paragraph.runs if run.text]
     assert text_runs
     for run in text_runs:

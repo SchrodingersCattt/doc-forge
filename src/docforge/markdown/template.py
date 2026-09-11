@@ -99,6 +99,7 @@ class AssemblyResult:
     line_numbers: str = "template"
     contacts: tuple[str, ...] = ()
     include_title: bool = True
+    strip_level_one_headings: bool = False
     heading_before: float | None = None
     section_sources: tuple[int, ...] = ()
     figures: tuple[Mapping[str, object], ...] = ()
@@ -1322,6 +1323,7 @@ def assemble_markdown_template(
     style_profile: str = "template",
     line_numbers: str = "template",
     include_title: bool = True,
+    strip_level_one_headings: bool = False,
     heading_before: float | None = None,
     force: bool = False,
 ) -> AssemblyResult:
@@ -1362,6 +1364,11 @@ def assemble_markdown_template(
     used, mapping = _citation_plan(cited, bibliography, citation_base)
     rendered = _replace_block_citations(blocks, mapping, superscript=citation_superscript)
     abstract, body_blocks = _extract_abstract(rendered)
+    if strip_level_one_headings:
+        body_blocks = tuple(
+            block for block in body_blocks
+            if not (block.kind == "heading" and block.level == 1)
+        )
 
     metadata = parse_metadata(metadata_path) if metadata_path else ManuscriptMetadata()
     resolved_title = title.strip() or metadata.title
@@ -1552,16 +1559,19 @@ def assemble_markdown_template(
         body_index += 1
 
     if _is_filled_metadata(metadata.acknowledgement):
-        output_nodes.append(_new_paragraph(template, styles["heading_1"], "Acknowledgment", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
+        if not strip_level_one_headings:
+            output_nodes.append(_new_paragraph(template, styles["heading_1"], "Acknowledgment", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body")))
     if _is_filled_metadata(metadata.code_availability):
-        output_nodes.append(_new_paragraph(template, styles["heading_1"], "Code Availability", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
+        if not strip_level_one_headings:
+            output_nodes.append(_new_paragraph(template, styles["heading_1"], "Code Availability", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body")))
     if used:
-        reference_prototype = prototypes.paragraphs.get("references_heading")
-        if reference_prototype is None:
-            reference_prototype = prototypes.paragraphs.get("heading_1")
-        output_nodes.append(_new_paragraph(template, styles["references_heading"], "References", prototype=reference_prototype, uppercase=True))
+        if not strip_level_one_headings:
+            reference_prototype = prototypes.paragraphs.get("references_heading")
+            if reference_prototype is None:
+                reference_prototype = prototypes.paragraphs.get("heading_1")
+            output_nodes.append(_new_paragraph(template, styles["references_heading"], "References", prototype=reference_prototype, uppercase=True))
         for key in used:
             output_nodes.append(
                 _new_paragraph(template, styles["reference"], f"{mapping[key]}.\t{bibliography[key]}", prototype=prototypes.paragraphs.get("reference"))
@@ -1625,6 +1635,7 @@ def assemble_markdown_template(
         line_numbers=line_numbers,
         contacts=metadata.contacts,
         include_title=include_title,
+        strip_level_one_headings=strip_level_one_headings,
         heading_before=heading_before,
         section_sources=tuple(section_sources),
         figures=tuple(figures),
@@ -1676,6 +1687,7 @@ def write_assembly_sidecars(
             "style_profile": result.style_profile,
             "line_numbers": result.line_numbers,
             "include_title": result.include_title,
+            "strip_level_one_headings": result.strip_level_one_headings,
             "heading_before": result.heading_before
         },
         "citation_map": dict(result.citation_map),
