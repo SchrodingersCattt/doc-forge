@@ -48,7 +48,7 @@ docforge md2docx 06.supporting-information.md -o si.docx \
   --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
   --bibliography 07.references.json --citation-base main-paph2.manifest.json \
   --style template --font "Times New Roman" --east-asia-font "Times New Roman" \
-  --line-numbers on --columns one --force
+  --line-numbers on --columns one --numbering-prefix S --force
 
 # Word tracked-changes redline against a reviewed DOCX
 docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
@@ -96,6 +96,8 @@ section (MolCrysKit is single-column for figures and two-column for body text),
 while `--columns one|two` changes body sections. Continuous `<w:sectPr>`
 properties are copied section by section, including their headers/footers and
 column definitions.
+
+For SI output, pass --numbering-prefix S to apply the S prefix to figure captions, explicit Table: captions, and display-equation numbers.
 
 For a Supporting Information build, pass the main manifest with
 `--citation-base`: citations present in the main document reuse their numeric

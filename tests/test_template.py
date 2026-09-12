@@ -385,3 +385,47 @@ def test_template_rendering_args_override_font_style_and_line_numbers(tmp_path: 
         assert fonts.get(qn("w:ascii")) == "Arial"
         assert fonts.get(qn("w:hAnsi")) == "Arial"
         assert fonts.get(qn("w:eastAsia")) == "SimSun"
+
+
+def test_si_numbering_prefixes_figures_tables_and_equations(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "si.md"
+    source.write_text(
+        "# Supporting Information\n\n"
+        "![Figure 9](source.png)\n\n"
+        "Figure 9. Example figure.\n\n"
+        "Table: Example values.\n\n"
+        "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+        "$$\nE = mc^2\n$$\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "si.docx"
+    result = assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        numbering_prefix="S",
+    )
+    document = Document(output)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "Figure S1." in text
+    assert "Table S1." in text
+    assert "(S1)" in text
+    assert result.figures[0]["label"] == "Figure S1"
+    assert result.tables[0]["label"] == "Table S1"
+    assert result.numbering_prefix == "S"
+
+
+def test_main_numbering_prefix_remains_numeric_by_default(tmp_path: Path) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("$$\na = b\n$$\n", encoding="utf-8")
+    from docforge.markdown import parse_markdown, render_blocks_to_doc
+    document = render_blocks_to_doc(parse_markdown(source))
+    assert "(1)" in "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "(S1)" not in document._element.xml

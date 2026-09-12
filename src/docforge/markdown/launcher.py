@@ -40,6 +40,7 @@ __all__ = [
     "add_list_paragraph",
     "add_code_block",
     "add_equation",
+    "add_table_caption",
     "add_quote",
     "add_image",
     "add_separator",
@@ -53,6 +54,7 @@ ORDERED_RE = re.compile(r"^(\s*)(\d+)\.\s+(.*)$")
 BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 REFERENCE_RE = re.compile(r"^\[(\d+)\]\s+(.*)$")
+TABLE_CAPTION_RE = re.compile(r"^Table\s*:\s*(.+)$", re.IGNORECASE)
 IMAGE_RE = re.compile(r"^!\[(?P<caption>[^\]]*)\]\((?P<path>[^)]+)\)$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BANG_COMMENT_RE = re.compile(r"^[!！](?:\s+|$)")
@@ -233,6 +235,12 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         if REFERENCE_RE.match(stripped):
             flush_paragraph()
             blocks.append(Block("reference", stripped))
+            i += 1
+            continue
+        table_caption = TABLE_CAPTION_RE.match(stripped)
+        if table_caption:
+            flush_paragraph()
+            blocks.append(Block("table_caption", table_caption.group(1).strip()))
             i += 1
             continue
         paragraph_lines.append(line)
@@ -436,7 +444,13 @@ def add_code_block(doc: DocumentType, text: str) -> None:
     set_highlight(run, "F2F2F2")
 
 
-def add_equation(doc: DocumentType, text: str, *, number: int | None = None) -> None:
+def add_equation(
+    doc: DocumentType,
+    text: str,
+    *,
+    number: int | None = None,
+    number_prefix: str = "",
+) -> None:
     from .omml import normalize_math_source, parse_math_omml
 
     paragraph = doc.add_paragraph()
@@ -454,8 +468,24 @@ def add_equation(doc: DocumentType, text: str, *, number: int | None = None) -> 
         paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
         tab = paragraph.add_run("\t")
         set_run_font(tab, size=11.0)
-        marker = paragraph.add_run(f"({number})")
+        marker = paragraph.add_run(f"({number_prefix}{number})")
         set_run_font(marker, size=11.0)
+
+
+def add_table_caption(
+    doc: DocumentType,
+    text: str,
+    *,
+    number: int | None = None,
+    number_prefix: str = "",
+) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_paragraph_spacing(paragraph, before=3, after=2, line=1.0)
+    label = f"Table {number_prefix}{number}. " if number is not None else "Table. "
+    add_inline(paragraph, label + text, bold_default=False, size=10.0)
+    for run in paragraph.runs:
+        set_run_font(run, size=10.0)
 
 
 def add_quote(doc: DocumentType, text: str) -> None:
@@ -603,7 +633,14 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
     doc.add_paragraph()
 
 
-def add_block(doc: DocumentType, block: Block, *, equation_number: int | None = None) -> None:
+def add_block(
+    doc: DocumentType,
+    block: Block,
+    *,
+    equation_number: int | None = None,
+    table_number: int | None = None,
+    number_prefix: str = "",
+) -> None:
     if block.kind == "heading":
         add_heading(doc, block.text, block.level)
     elif block.kind == "paragraph":
@@ -617,7 +654,9 @@ def add_block(doc: DocumentType, block: Block, *, equation_number: int | None = 
     elif block.kind == "code":
         add_code_block(doc, block.text)
     elif block.kind == "equation":
-        add_equation(doc, block.text, number=equation_number)
+        add_equation(doc, block.text, number=equation_number, number_prefix=number_prefix)
+    elif block.kind == "table_caption":
+        add_table_caption(doc, block.text, number=table_number, number_prefix=number_prefix)
     elif block.kind == "table":
         add_table(doc, block.rows)
     elif block.kind == "quote":
@@ -850,6 +889,7 @@ def render_blocks_to_doc(
     *,
     title: str = "",
     equation_start: int = 1,
+    number_prefix: str = "",
     heading_before: float | None = None,
 ) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
@@ -857,16 +897,21 @@ def render_blocks_to_doc(
     if title:
         add_heading(doc, title, 1)
     equation_number = equation_start
+    table_number = 1
     for block in blocks:
         add_block(
             doc,
             block,
             equation_number=equation_number if block.kind == "equation" else None,
+            table_number=table_number if block.kind == "table_caption" else None,
+            number_prefix=number_prefix,
         )
         if block.kind == "heading" and heading_before is not None and doc.paragraphs:
             doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
         if block.kind == "equation":
             equation_number += 1
+        if block.kind == "table_caption":
+            table_number += 1
     return doc
 
 

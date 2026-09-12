@@ -103,6 +103,8 @@ class AssemblyResult:
     heading_before: float | None = None
     section_sources: tuple[int, ...] = ()
     figures: tuple[Mapping[str, object], ...] = ()
+    tables: tuple[Mapping[str, object], ...] = ()
+    numbering_prefix: str = ""
 
 
 def sha256_file(path: Path) -> str:
@@ -863,6 +865,18 @@ FIGURE_CAPTION_RE = re.compile(r"\s*(?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:|]?
 FIGURE_CAPTION_SLOT_RE = re.compile(
     r"\s*\[(?:Figure|Scheme|Chart)\s+Caption\]", re.IGNORECASE
 )
+CAPTION_LABEL_RE = re.compile(
+    r"^\s*(Figure|Scheme|Chart)\s+[A-Za-z]*\d+\s*[.:]?\s*",
+    re.IGNORECASE,
+)
+
+
+def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
+    match = CAPTION_LABEL_RE.match(caption)
+    kind = match.group(1).capitalize() if match else "Figure"
+    body = caption[match.end():].strip() if match else caption.strip()
+    label = f"{kind} {prefix}{number}"
+    return label, f"{label}. {body}".rstrip()
 
 
 def _is_figure_caption_text(text: str) -> bool:
@@ -966,9 +980,21 @@ def _clone_rendered_block(
     prototypes: _TemplatePrototypes,
     *,
     equation_number: int | None = None,
+    table_number: int | None = None,
+    number_prefix: str = "",
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
+    if block.kind == "table_caption":
+        label = f"Table {number_prefix}{table_number}. " if table_number is not None else "Table. "
+        return [
+            _new_paragraph(
+                target,
+                styles["caption"],
+                label + block.text,
+                prototype=p.get("caption"),
+            )
+        ]
     if block.kind in {"paragraph", "reference"}:
         return [_new_paragraph(target, styles["body"], block.text, prototype=p.get("body"))]
     if block.kind == "heading":
@@ -976,7 +1002,7 @@ def _clone_rendered_block(
         role = f"heading_{level}"
         return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False, uppercase=level == 1)]
     if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet", "code", "equation", "table", "separator"}:
-        generated = render_blocks_to_doc([block], equation_start=equation_number or 1)
+        generated = render_blocks_to_doc([block], equation_start=equation_number or 1, number_prefix=number_prefix)
         result: list = []
         width = _body_column_width_twips(target)
         for child in generated._element.body.iterchildren():
@@ -1036,6 +1062,7 @@ def _clone_figure(
     caption_style_id: str,
     figure_number: int,
     section_width_twips: int | None = None,
+    number_prefix: str = "",
 ) -> list:
     image_path = Path(image.path)
     if not image_path.is_file():
@@ -1097,7 +1124,8 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_path.read_bytes()))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
-    caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption)
+    _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
+    caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption_text)
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
     return [paragraph, cap]
 
@@ -1325,6 +1353,7 @@ def assemble_markdown_template(
     include_title: bool = True,
     strip_level_one_headings: bool = False,
     heading_before: float | None = None,
+    numbering_prefix: str = "",
     force: bool = False,
 ) -> AssemblyResult:
     if output.exists() and not force:
@@ -1345,6 +1374,8 @@ def assemble_markdown_template(
         raise ValueError("columns must be one of: template, one, two")
     if heading_before is not None and heading_before < 0:
         raise ValueError("heading_before must be nonnegative")
+    if not re.fullmatch(r"[A-Za-z]*", numbering_prefix):
+        raise ValueError("numbering_prefix must contain only ASCII letters")
 
     template = Document(template_path)
     citation_superscript = _template_uses_superscript_citations(template)
@@ -1460,9 +1491,11 @@ def assemble_markdown_template(
 
     groups = _figure_groups(body_blocks)
     figures: list[dict[str, object]] = []
+    tables: list[dict[str, object]] = []
     body_index = 0
     figure_index = 0
     equation_index = 1
+    table_index = 1
     for text_blocks, image, caption in groups:
         selected_body = body_regions[min(body_index, len(body_regions) - 1)]
         section = adjusted(selected_body.section)
@@ -1476,12 +1509,18 @@ def assemble_markdown_template(
                 styles,
                 prototypes,
                 equation_number=equation_index if block.kind == "equation" else None,
+                table_number=table_index if block.kind == "table_caption" else None,
+                number_prefix=numbering_prefix,
             )
             for node in nodes:
                 _fit_tables(node, _section_width_twips(section))
             output_nodes.extend(nodes)
             if block.kind == "equation":
                 equation_index += 1
+            if block.kind == "table_caption":
+                label = f"Table {numbering_prefix}{table_index}" if numbering_prefix else f"Table {table_index}"
+                tables.append({"number": table_index, "label": label, "caption": block.text})
+                table_index += 1
         if image is None:
             break
         if prototypes.figure_regions:
@@ -1512,6 +1551,7 @@ def assemble_markdown_template(
                     styles["caption"],
                     figure_index + 1,
                     section_width_twips=_section_width_twips(figure_section),
+                    number_prefix=numbering_prefix,
                 )
             )
             output_nodes.append(_section_break_node(figure_section))
@@ -1519,6 +1559,7 @@ def assemble_markdown_template(
             figures.append(
                 {
                     "number": figure_index + 1,
+                    "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
                     "path": str(Path(image.path).resolve()),
                     "sha256": sha256_file(Path(image.path)),
                     "caption": caption or image.text,
@@ -1542,11 +1583,13 @@ def assemble_markdown_template(
                     styles["caption"],
                     figure_index + 1,
                     section_width_twips=_section_width_twips(section),
+                    number_prefix=numbering_prefix,
                 )
             )
             figures.append(
                 {
                     "number": figure_index + 1,
+                    "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
                     "path": str(Path(image.path).resolve()),
                     "sha256": sha256_file(Path(image.path)),
                     "caption": caption or image.text,
@@ -1639,6 +1682,8 @@ def assemble_markdown_template(
         heading_before=heading_before,
         section_sources=tuple(section_sources),
         figures=tuple(figures),
+        tables=tuple(tables),
+        numbering_prefix=numbering_prefix,
     )
 
 
@@ -1694,6 +1739,8 @@ def write_assembly_sidecars(
         "used_citations": list(result.used_citations),
         "style_map": dict(result.style_map),
         "figures": [dict(figure) for figure in result.figures],
+        "tables": [dict(table) for table in result.tables],
+        "numbering_prefix": result.numbering_prefix,
         "template_sections": {
             "before": result.template_sections_before,
             "after": result.template_sections_after,

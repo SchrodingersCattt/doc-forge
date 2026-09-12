@@ -145,3 +145,15 @@ def test_scientific_units_and_r_squared_use_true_scripts() -> None:
     assert sum(run.font.superscript is True and run.text == "–1" for run in runs) == 2
     assert any(run.text == "C" and run.italic for run in runs)
     assert any(run.text == "2" and run.font.subscript for run in runs)
+
+
+def test_explicit_table_caption_block_is_parsed() -> None:
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "source.md"
+        path.write_text(
+            "Table: Example values.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n",
+            encoding="utf-8",
+        )
+        blocks = parse_markdown(path)
+        assert [block.kind for block in blocks] == ["table_caption", "table"]
+        assert blocks[0].text == "Example values."
