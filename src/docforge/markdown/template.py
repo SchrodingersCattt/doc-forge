@@ -753,6 +753,41 @@ def _template_regions(document: DocumentType) -> tuple[_TemplateRegion, ...]:
     return tuple(marked)
 
 
+def _template_inline_figure_slots(regions) -> tuple[_TemplateRegion, ...]:
+    """Find every image/caption pair, including pairs inside mixed regions.
+
+    Some SI templates keep sample prose, figures, and captions in one section.
+    A section-level figure test would miss those slots because the prose is not
+    part of the figure itself.  Pairing the drawing paragraph with the next
+    non-empty caption paragraph keeps the template's own section geometry while
+    making every explicit figure slot reusable.
+    """
+    slots: list[_TemplateRegion] = []
+    for region in regions:
+        for index, node in enumerate(region.nodes):
+            if node.tag != qn("w:p") or next(node.iter(qn("w:drawing")), None) is None:
+                continue
+            for following in region.nodes[index + 1:]:
+                if following.tag != qn("w:p"):
+                    continue
+                text = _text_of(following).strip()
+                if not text:
+                    continue
+                if _is_figure_caption_text(text):
+                    slots.append(
+                        _TemplateRegion(
+                            region.index,
+                            (node, following),
+                            region.section,
+                            True,
+                            node,
+                            following,
+                        )
+                    )
+                break
+    return tuple(slots)
+
+
 def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regions):
     paragraphs = list(document.paragraphs)
     by_style: dict[str, list] = {}
@@ -773,13 +808,34 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
     heading_1 = choose("heading_1")
     heading_2 = choose("heading_2")
     heading_3 = choose("heading_3")
-    body = None
-    for node in paragraphs:
-        if node.style.style_id in {styles["body"], "a", "Normal"} and _text_of(node._p).strip() and "<w:drawing" not in node._p.xml:
-            body = copy.deepcopy(node._p)
-            break
-    if body is None:
-        body = choose("body")
+    body_candidates = [
+        (index, node)
+        for index, node in enumerate(paragraphs)
+        if node.style.style_id in {styles["body"], "a", "Normal"}
+        and _text_of(node._p).strip()
+        and "<w:drawing" not in node._p.xml
+    ]
+    heading_style_ids = {
+        styles["heading_1"],
+        styles["heading_2"],
+        styles["heading_3"],
+    }
+    first_heading = next(
+        (
+            index
+            for index, node in enumerate(paragraphs)
+            if node.style.style_id in heading_style_ids and _text_of(node._p).strip()
+        ),
+        -1,
+    )
+    post_front = [
+        node
+        for index, node in body_candidates
+        if index > first_heading
+    ]
+    body = copy.deepcopy(
+        max(post_front or [node for _, node in body_candidates], key=lambda node: len(_text_of(node._p)))._p
+    ) if (post_front or body_candidates) else choose("body")
     caption = choose("caption", long=True)
     references = choose("reference", long=True)
     references_heading = next((copy.deepcopy(paragraph._p) for paragraph in paragraphs if paragraph.text.strip().lower() in {"references", "bibliography"}), None)
@@ -800,7 +856,9 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         "reference": references,
         "references_heading": references_heading if references_heading is not None else choose("references_heading", text_match="references"),
     }
-    figure_regions = tuple(region for region in regions if region.figure)
+    figure_regions = _template_inline_figure_slots(regions)
+    if not figure_regions:
+        figure_regions = tuple(region for region in regions if region.figure)
     return _TemplatePrototypes(paragraphs_map, figure_regions)
 
 
@@ -1539,8 +1597,19 @@ def assemble_markdown_template(
             else:
                 raise ValueError("Image columns marker must be one, two, single, or double")
             figure_section = adjusted(figure_section, apply_columns=False)
-            output_nodes.append(_section_break_node(section))
-            section_sources.append(selected_body.index)
+            previous_figure = (
+                prototypes.figure_regions[figure_index - 1]
+                if figure_index > 0
+                else None
+            )
+            needs_body_break = (
+                bool(text_blocks)
+                or previous_figure is None
+                or previous_figure.index != figure_region.index
+            )
+            if needs_body_break:
+                output_nodes.append(_section_break_node(section))
+                section_sources.append(selected_body.index)
             output_nodes.extend(
                 _clone_figure(
                     template,

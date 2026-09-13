@@ -76,7 +76,9 @@ Inline figures use ordinary Markdown plus a following caption paragraph, for exa
 `![Figure 1](figures/structure.png)` followed by `Figure 1. Caption text.`.
 When the template contains figure sections, docforge reuses their inline drawing
 slots and the surrounding one-column/two-column section properties; the image
-and caption remain separate Word paragraphs.
+and caption remain separate Word paragraphs. Figure slots are detected from
+each image paragraph and its following Figure/Scheme/Chart caption, even when
+an SI template keeps sample prose and multiple figure pairs in one section.
 
 Inline TeX formulae use ordinary Word runs rather than OMML, so variables are
 italic, ``\mathrm{...}`` text and numerals are upright, and ``^``/``_`` become

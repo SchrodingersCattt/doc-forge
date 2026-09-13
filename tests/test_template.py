@@ -166,6 +166,64 @@ def test_one_section_template_uses_terminal_section_properties(tmp_path: Path) -
     assert "placeholder" not in "\n".join(p.text for p in Document(output).paragraphs).lower()
 
 
+def _front_and_body_same_style_template(path: Path) -> None:
+    document = Document()
+    title = document.add_paragraph("Supporting Information")
+    title.alignment = 1
+    title.runs[0].italic = True
+    document.add_paragraph("A long body prototype with ordinary left-aligned formatting.")
+    document.add_paragraph("Section", style="Heading 1")
+    document.add_paragraph("A second long body prototype with ordinary left-aligned formatting.")
+    document.save(path)
+
+
+def _mixed_figure_template(path: Path, image: Path) -> None:
+    document = Document()
+    document.add_paragraph("[TITLE]")
+    document.add_paragraph("Body")
+    for index in (1, 2):
+        document.add_paragraph().add_run().add_picture(str(image), width=1000000)
+        document.add_paragraph(f"Figure {index}. Placeholder caption.")
+    document.save(path)
+
+
+def test_body_prototype_skips_front_matter_when_style_is_shared(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _front_and_body_same_style_template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("# Intro\n\nGenerated body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    body = next(p for p in Document(output).paragraphs if "Generated body" in p.text)
+    assert body.alignment != 1
+    assert all(run.font.italic is not True for run in body.runs)
+
+
+def test_template_uses_all_mixed_region_figure_slots(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _mixed_figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Body.\n\n![Figure 1](source.png)\n\nFigure 1. One.\n\n"
+        "![Figure 2](source.png)\n\nFigure 2. Two.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    assert len(result.figures) == 2
+    assert len(Document(output).inline_shapes) == 2
+
+
 def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     Image.new("RGB", (80, 40), "white").save(source_image)
