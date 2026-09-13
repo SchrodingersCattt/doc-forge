@@ -44,6 +44,7 @@ from .docx_export import (
     load_section_map,
     metadata_markdown,
     normalize_media_links,
+    normalize_script_boundaries,
     split_markdown_sections,
     write_conversion_manifest,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "load_section_map",
     "metadata_markdown",
     "normalize_media_links",
+    "normalize_script_boundaries",
     "split_markdown_sections",
     "write_conversion_manifest",
 ]

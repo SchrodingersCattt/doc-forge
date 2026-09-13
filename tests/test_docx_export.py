@@ -17,6 +17,7 @@ from docforge.docxdiff.redline import visible_text
 from docforge.markdown import (
     Block,
     docx_to_markdown,
+    normalize_script_boundaries,
     render_blocks_to_doc,
     split_markdown_sections,
 )
@@ -108,6 +109,25 @@ def test_sup_sub_markup_is_rendered_as_true_scripts() -> None:
     runs = document.paragraphs[0].runs
     assert any(run.text == "2" and run.font.subscript for run in runs)
     assert any(run.text == "+−" and run.font.superscript for run in runs)
+
+
+def test_pandoc_subscript_run_does_not_capture_formula_delimiters() -> None:
+    pandoc_markdown = r"(Et<sub>4</sub>N)<sub>2</sub>\[Cu<sub>8</sub>(N<sub>3)18\]</sub>"
+    normalized = normalize_script_boundaries(pandoc_markdown)
+    assert normalized == r"(Et<sub>4</sub>N)<sub>2</sub>\[Cu<sub>8</sub>(N<sub>3</sub>)<sub>18</sub>\]"
+
+    document = render_blocks_to_doc([Block("paragraph", normalized)])
+    run_modes = [
+        (
+            run.text,
+            "subscript" if run.font.subscript else "superscript" if run.font.superscript else "normal",
+        )
+        for run in document.paragraphs[0].runs
+    ]
+    assert ("3", "subscript") in run_modes
+    assert (")", "normal") in run_modes
+    assert ("18", "subscript") in run_modes
+    assert any(text.endswith("]") and mode == "normal" for text, mode in run_modes)
 
 
 def test_split_markdown_sections_handles_duplicate_headings() -> None:
