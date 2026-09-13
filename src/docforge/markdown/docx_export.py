@@ -20,6 +20,7 @@ from typing import Any, Mapping
 from PIL import Image
 
 from .._pandoc import run_pandoc
+from ..output import validate_output_path
 
 IMAGE_TAG_RE = re.compile(r"<img\b(?P<attrs>[^>]*?)(?:/?)>", re.IGNORECASE)
 IMAGE_ATTR_RE = re.compile(r"\b(?P<name>src|alt)\s*=\s*(['\"])(?P<value>.*?)\2", re.IGNORECASE)
@@ -266,6 +267,8 @@ def docx_to_markdown(
 ) -> MarkdownExportResult:
     """Convert a DOCX to GFM, optionally emitting mapped section files."""
 
+    validate_output_path(output)
+    validate_output_path(split_dir, label="split output directory")
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     if output is None and split_dir is None:

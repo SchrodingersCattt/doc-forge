@@ -129,7 +129,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
     from ..markdown import parse_markdown, render_blocks_to_doc, convert_unicode_scripts_in_docx
+    from ..output import validate_output_path
 
+    validate_output_path(args.output)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     if args.template is not None:
@@ -206,7 +208,9 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
 
 def _cmd_redline(args: argparse.Namespace) -> int:
     from ..docxdiff import create_tracked_docx
+    from ..output import validate_output_path
 
+    validate_output_path(args.output)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     summary = create_tracked_docx(
@@ -223,7 +227,10 @@ def _cmd_redline(args: argparse.Namespace) -> int:
 
 def _cmd_docx2md(args: argparse.Namespace) -> int:
     from ..markdown import docx_to_markdown
+    from ..output import validate_output_path
 
+    validate_output_path(args.output)
+    validate_output_path(args.split_dir, label="split output directory")
     if args.output is None and args.split_dir is None:
         raise ValueError("docx2md requires --output, --split-dir, or both")
     result = docx_to_markdown(
@@ -246,7 +253,9 @@ def _cmd_docx2md(args: argparse.Namespace) -> int:
 
 def _cmd_tex2docx(args: argparse.Namespace) -> int:
     from ..tex import convert_files
+    from ..output import validate_output_path
 
+    validate_output_path(args.output)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     convert_files(
@@ -261,7 +270,9 @@ def _cmd_tex2docx(args: argparse.Namespace) -> int:
 
 def _cmd_docx2tex(args: argparse.Namespace) -> int:
     from ..tex import docx_to_tex
+    from ..output import validate_output_path
 
+    validate_output_path(args.output)
     result = docx_to_tex(
         args.input,
         output=args.output,

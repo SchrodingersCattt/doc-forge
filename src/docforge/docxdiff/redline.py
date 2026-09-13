@@ -26,6 +26,7 @@ from pathlib import Path
 from lxml import etree
 
 from .package import Package
+from ..output import validate_output_path
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -760,6 +761,7 @@ def create_tracked_docx(
     author: str = "M.Y.G.",
     overwrite: bool = False,
 ) -> dict[str, int]:
+    validate_output_path(output_path)
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")

@@ -27,6 +27,7 @@ from lxml import etree
 from PIL import Image
 
 from .blocks import Block
+from ..output import validate_output_path
 from .launcher import (
     accept_docx_revisions,
     add_inline,
@@ -1553,6 +1554,7 @@ def assemble_markdown_template(
     include_metadata_back_matter: bool = True,
     force: bool = False,
 ) -> AssemblyResult:
+    validate_output_path(output)
     if output.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
     if not inputs:

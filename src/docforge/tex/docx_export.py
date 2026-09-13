@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image
 
 from .._pandoc import run_pandoc
+from ..output import validate_output_path
 
 INCLUDE_GRAPHICS_RE = re.compile(
     r"(?P<prefix>\\includegraphics(?:\[[^\]]*\])?\{)(?P<path>[^}]+)(?P<suffix>\})"
@@ -98,6 +99,7 @@ def docx_to_tex(
 ) -> TexExportResult:
     """Convert a DOCX to LaTeX using Pandoc and a generic preamble."""
 
+    validate_output_path(output)
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     if output.exists() and not force:

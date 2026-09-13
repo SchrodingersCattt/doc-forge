@@ -10,6 +10,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from ..output import validate_output_path
+
 
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
@@ -51,6 +53,7 @@ def package_files(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = output or root / "dist" / f"tex_source_{timestamp}_{git_short_hash(root)}.zip"
     output = output.resolve()
+    validate_output_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     manifest_rows: list[tuple[str, int, str]] = []

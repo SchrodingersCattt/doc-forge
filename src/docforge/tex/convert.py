@@ -19,6 +19,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
 from .bib import CitationResolver, parse_bib
+from ..output import validate_output_path
 from .tokenize import TableCell, spans_to_plain, tokenize_tex
 from ..markdown.omml import normalize_math_source, parse_math_omml
 
@@ -134,6 +135,7 @@ def latex_to_docx(
     *fig_dir* resolves ``\\includegraphics`` paths; *output* saves the document
     if given. Returns the opened Document.
     """
+    validate_output_path(output)
     resolver = CitationResolver(bib or {})
 
     def resolve_ref(key: str) -> str:
