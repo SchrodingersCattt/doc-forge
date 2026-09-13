@@ -263,13 +263,18 @@ def _block_texts(block: Block) -> Iterable[str]:
         yield from row
 
 
-def _citation_keys(blocks: Iterable[Block]) -> set[str]:
-    found: set[str] = set()
+def _citation_keys(blocks: Iterable[Block]) -> tuple[str, ...]:
+    found: list[str] = []
+    seen: set[str] = set()
     for block in blocks:
         for text in _block_texts(block):
             for match in CITATION_RE.finditer(text):
-                found.update(key.strip() for key in match.group(1).split(",") if key.strip())
-    return found
+                for raw_key in match.group(1).split(","):
+                    key = raw_key.strip()
+                    if key and key not in seen:
+                        seen.add(key)
+                        found.append(key)
+    return tuple(found)
 
 
 def _load_citation_base(path: Path) -> dict[str, int]:
@@ -285,14 +290,14 @@ def _load_citation_base(path: Path) -> dict[str, int]:
 
 
 def _citation_plan(
-    cited: set[str], bibliography: Mapping[str, str], base: Mapping[str, int] | None
+    cited: Sequence[str], bibliography: Mapping[str, str], base: Mapping[str, int] | None
 ) -> tuple[tuple[str, ...], dict[str, str | int]]:
     """Reuse main numeric labels in SI and prefix SI-only labels with S."""
     if base is None:
-        used = tuple(key for key in bibliography if key in cited)
+        used = tuple(cited)
         return used, {key: index for index, key in enumerate(used, start=1)}
-    shared = sorted((key for key in cited if key in base), key=lambda key: base[key])
-    si_only = [key for key in bibliography if key in cited and key not in base]
+    shared = [key for key in cited if key in base]
+    si_only = [key for key in cited if key not in base]
     mapping: dict[str, str | int] = {key: base[key] for key in shared}
     mapping.update({key: f"S{index}" for index, key in enumerate(si_only, start=1)})
     return tuple(shared + si_only), mapping
@@ -304,10 +309,13 @@ def _replace_citations(text: str, mapping: Mapping[str, str | int], *, superscri
         missing = [key for key in keys if key not in mapping]
         if missing:
             raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
-        numbers = ",".join(str(mapping[key]) for key in keys)
+        labels = [mapping[key] for key in keys]
+        labels.sort(key=lambda value: (isinstance(value, str), int(str(value).removeprefix("S"))))
+        numbers = ",".join(str(value) for value in labels)
         return ("\ue000" + numbers + "\ue001") if superscript else "[" + numbers + "]"
 
-    return CITATION_RE.sub(replace, text)
+    pattern = r"\s*" + CITATION_RE.pattern if superscript else CITATION_RE.pattern
+    return re.sub(pattern, replace, text)
 
 
 def _replace_block_citations(
@@ -633,6 +641,40 @@ def _new_paragraph(
     return element
 
 
+def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *, prototype=None):
+    """Render metadata literally so correspondence asterisks cannot become emphasis."""
+    temporary = Document()
+    paragraph = temporary.add_paragraph()
+    paragraph.add_run(text)
+    element = copy.deepcopy(paragraph._p)
+    if prototype is not None:
+        properties = element.find(qn("w:pPr"))
+        if properties is not None:
+            element.remove(properties)
+        original_properties = _clean_paragraph_prototype(prototype).find(qn("w:pPr"))
+        if original_properties is not None:
+            element.insert(0, original_properties)
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    style = properties.find(qn("w:pStyle"))
+    if prototype is None:
+        if style is None:
+            style = OxmlElement("w:pStyle")
+            properties.insert(0, style)
+        style.set(qn("w:val"), style_id)
+    base_run = _run_prototype(prototype, prefer_long=True) if prototype is not None else None
+    base_rpr = _sanitize_run_properties(base_run.find(qn("w:rPr")) if base_run is not None else None)
+    for run in element.findall(".//" + qn("w:r")):
+        existing = run.find(qn("w:rPr"))
+        if existing is not None:
+            run.remove(existing)
+        if base_rpr is not None:
+            run.insert(0, copy.deepcopy(base_rpr))
+    return element
+
+
 def _remap_styles(element, source: DocumentType, target: DocumentType) -> None:
     source_styles = {style.style_id: style for style in source.styles}
     target_styles = {style.name: style for style in target.styles}
@@ -906,14 +948,28 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
     caption = choose("caption", long=True)
     references = choose("reference", long=True)
     references_heading = next((copy.deepcopy(paragraph._p) for paragraph in paragraphs if paragraph.text.strip().lower() in {"references", "bibliography"}), None)
-    authors = choose("authors")
+    supporting_information = next(
+        (copy.deepcopy(paragraph._p) for paragraph in paragraphs if paragraph.text.strip().lower() == "supporting information"),
+        None,
+    )
+    si_title = None
+    si_authors = None
+    si_affiliations = None
+    si_contacts = None
+    if supporting_information is not None:
+        front = [paragraph for paragraph in paragraphs[:first_heading] if paragraph.text.strip()]
+        if len(front) >= 5:
+            _, si_title, si_authors, si_affiliations, si_contacts = [copy.deepcopy(paragraph._p) for paragraph in front[:5]]
+    authors = si_authors if si_authors is not None else choose("authors")
     if styles["authors"] == styles["title"]:
         same_style = by_style.get(styles["authors"], [])
         authors = copy.deepcopy(same_style[1]) if len(same_style) > 1 else None
     paragraphs_map = {
-        "title": choose("title"),
+        "supporting_information": supporting_information,
+        "title": si_title if si_title is not None else choose("title"),
         "authors": authors,
-        "affiliations": choose("affiliations"),
+        "affiliations": si_affiliations if si_affiliations is not None else choose("affiliations"),
+        "contacts": si_contacts if si_contacts is not None else choose("affiliations"),
         "abstract": choose("abstract", long=True),
         "body": body,
         "heading_1": heading_1,
@@ -1480,6 +1536,7 @@ def assemble_markdown_template(
     metadata_path: Path | None = None,
     bibliography_path: Path | None = None,
     citation_base_path: Path | None = None,
+    citation_format: str = "template",
     title: str = "",
     keep_comments: bool = False,
     skip_images: bool = False,
@@ -1519,8 +1576,12 @@ def assemble_markdown_template(
     if bibliography_scope not in {"all", "new-only"}:
         raise ValueError("bibliography_scope must be one of: all, new-only")
 
+    if citation_format not in {"template", "superscript", "bracketed"}:
+        raise ValueError("citation_format must be one of: template, superscript, bracketed")
     template = Document(template_path)
-    citation_superscript = _template_uses_superscript_citations(template)
+    citation_superscript = citation_format == "superscript" or (
+        citation_format == "template" and _template_uses_superscript_citations(template)
+    )
     blocks = tuple(
         block
         for path in inputs
@@ -1530,7 +1591,7 @@ def assemble_markdown_template(
         blocks = tuple(block for block in blocks if block.kind != "image")
     bibliography = load_bibliography(bibliography_path) if bibliography_path else {}
     cited = _citation_keys(blocks)
-    missing = sorted(cited - set(bibliography))
+    missing = sorted(set(cited) - set(bibliography))
     if missing:
         raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
     citation_base = _load_citation_base(citation_base_path) if citation_base_path else None
@@ -1606,14 +1667,16 @@ def assemble_markdown_template(
 
     body_columns_after = _section_column_count(adjusted(body_regions[0].section))
     front = []
+    if prototypes.paragraphs.get("supporting_information") is not None:
+        front.append(_new_metadata_paragraph(template, styles["body"], "Supporting Information", prototype=prototypes.paragraphs.get("supporting_information")))
     if include_title:
-        front.append(_new_paragraph(template, styles["title"], resolved_title, prototype=prototypes.paragraphs.get("title"), bold_default=True))
+        front.append(_new_metadata_paragraph(template, styles["title"], resolved_title, prototype=prototypes.paragraphs.get("title")))
     if metadata.authors:
-        front.append(_new_paragraph(template, styles["authors"], metadata.authors, prototype=prototypes.paragraphs.get("authors")))
+        front.append(_new_metadata_paragraph(template, styles["authors"], metadata.authors, prototype=prototypes.paragraphs.get("authors")))
     if metadata.affiliations:
-        front.append(_new_paragraph(template, styles["affiliations"], metadata.affiliations, prototype=prototypes.paragraphs.get("affiliations")))
+        front.append(_new_metadata_paragraph(template, styles["affiliations"], metadata.affiliations, prototype=prototypes.paragraphs.get("affiliations")))
     for contact in metadata.contacts:
-        front.append(_new_paragraph(template, styles["affiliations"], contact, prototype=prototypes.paragraphs.get("affiliations")))
+        front.append(_new_metadata_paragraph(template, styles["affiliations"], contact, prototype=prototypes.paragraphs.get("contacts")))
     if abstract:
         abstract_prototype = prototypes.paragraphs.get("abstract")
         # MolCrysKit carries the label and the abstract in one styled paragraph.
@@ -1666,11 +1729,7 @@ def assemble_markdown_template(
         if image is None:
             break
         if prototypes.figure_regions:
-            if figure_index >= len(prototypes.figure_regions):
-                raise ValueError(
-                    f"Template provides {len(prototypes.figure_regions)} figure slots but Markdown contains more"
-                )
-            figure_region = prototypes.figure_regions[figure_index]
+            figure_region = prototypes.figure_regions[min(figure_index, len(prototypes.figure_regions) - 1)]
             requested_columns = dict(image.options).get("columns")
             if requested_columns in {"single", "one"}:
                 figure_section = _with_column_layout(figure_region.section, "one")
@@ -1681,11 +1740,7 @@ def assemble_markdown_template(
             else:
                 raise ValueError("Image columns marker must be one, two, single, or double")
             figure_section = adjusted(figure_section, apply_columns=False)
-            previous_figure = (
-                prototypes.figure_regions[figure_index - 1]
-                if figure_index > 0
-                else None
-            )
+            previous_figure = prototypes.figure_regions[min(figure_index - 1, len(prototypes.figure_regions) - 1)] if figure_index > 0 else None
             needs_body_break = (
                 bool(text_blocks)
                 or previous_figure is None

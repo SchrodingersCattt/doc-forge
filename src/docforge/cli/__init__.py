@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
     md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
     md.add_argument("--citation-base", type=Path, help="Existing main-manuscript manifest whose citation numbers SI should reuse")
+    md.add_argument("--citation-format", choices=("template", "superscript", "bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
     md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
     md.add_argument("--east-asia-font", dest="east_asia_font", help="Explicit East Asian font override for generated text")
@@ -143,6 +144,7 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             metadata_path=args.metadata,
             bibliography_path=args.bibliography,
             citation_base_path=args.citation_base,
+            citation_format=args.citation_format,
             title=args.title or "",
             keep_comments=args.keep_comments,
             skip_images=args.skip_images,

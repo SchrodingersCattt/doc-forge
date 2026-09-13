@@ -86,6 +86,26 @@ def test_metadata_parses_author_contributions(tmp_path: Path) -> None:
     assert parse_metadata(metadata).author_contributions == "A. Author contributed."
 
 
+def test_correspondence_stars_render_literally(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# TITLE\n\nA title\n# AUTHOR\n\nA. One*, B. Two*\n# EMAILS\n\n*one@example.com\n*two@example.com\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.md"
+    source.write_text("Body.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    document = Document(output)
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "A. One*, B. Two*" in text
+    assert "*one@example.com" in text and "*two@example.com" in text
+    author = next(p for p in document.paragraphs if "A. One" in p.text)
+    assert all(run.font.italic is not True for run in author.runs)
+
+
 def test_structured_bibliography_record_matches_formatter_contract() -> None:
     formatted = _format_bibliography_record(
         {
@@ -127,11 +147,11 @@ def test_template_assembly_replaces_placeholders_and_numbers_citations(tmp_path:
     )
     document = Document(output)
     text = "\n".join(paragraph.text for paragraph in document.paragraphs)
-    assert result.used_citations == ("ref_a", "ref_b")
-    assert "Abstract cites [2]." in text
-    assert "Body cites [1]." in text
-    assert "1.\tAuthor A." in text
-    assert "2.\tAuthor B." in text
+    assert result.used_citations == ("ref_b", "ref_a")
+    assert "Abstract cites [1]." in text
+    assert "Body cites [2]." in text
+    assert "1.\tAuthor B." in text
+    assert "2.\tAuthor A." in text
     assert "placeholder" not in text.lower()
     assert len(document.sections) == 2
     verify_template_output(
@@ -311,6 +331,10 @@ def test_template_inherits_superscript_citations_without_private_markers(tmp_pat
     assert "\ue000" not in text and "\ue001" not in text
     assert result.verification["citation_count"] == 3
     assert sum(run.font.superscript is True for paragraph in document.paragraphs for run in paragraph.runs) == 3
+    first = next(p for p in document.paragraphs if p.text.startswith("First"))
+    assert first.text == "First1."
+    assert first.runs[0].text == "First"
+    assert first.runs[1].text == "1" and first.runs[1].font.superscript is True
     assert all(
         (section._sectPr.find(qn("w:type")) is None
          or section._sectPr.find(qn("w:type")).get(qn("w:val")) == "continuous")
