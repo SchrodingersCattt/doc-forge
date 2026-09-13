@@ -45,9 +45,6 @@ COMMENT_NAMES = (
     "people.xml",
 )
 PASSTHROUGH_LOCAL_NAMES = {
-    "br",
-    "tab",
-    "cr",
     "drawing",
     "pict",
     "object",
@@ -238,11 +235,14 @@ def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int
     spans: list[tuple[int, int, Style]] = []
     offset = 0
     for node in paragraph.iter():
-        if node.tag not in (f"{{{W}}}t", f"{{{W}}}delText"):
+        if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
+            value = "\t" if node.tag == f"{{{W}}}tab" else "\n"
+        elif node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
+            value = node.text or ""
+        else:
             continue
         if view == "final" and (_inside(node, "del") or _inside(node, "moveFrom")):
             continue
-        value = node.text or ""
         if not value:
             continue
         run = node
@@ -331,6 +331,12 @@ def _run(token: Token, deleted: bool = False) -> etree._Element:
     run = etree.Element(f"{{{W}}}r")
     if token.style.rpr is not None:
         run.append(copy.deepcopy(token.style.rpr))
+    if token.text == "\t":
+        etree.SubElement(run, f"{{{W}}}tab")
+        return run
+    if token.text == "\n":
+        etree.SubElement(run, f"{{{W}}}br")
+        return run
     text = etree.SubElement(run, f"{{{W}}}{'delText' if deleted else 't'}")
     if token.text[:1].isspace() or token.text[-1:].isspace():
         text.set(f"{{{XML}}}space", "preserve")
@@ -420,11 +426,11 @@ def _mark_paragraph(
     paragraph: etree._Element, kind: str, context: Context
 ) -> etree._Element:
     if kind == "del":
-        empty = etree.Element(f"{{{W}}}p", nsmap=paragraph.nsmap)
-        ppr = paragraph.find("./w:pPr", NS)
-        if ppr is not None:
-            empty.append(copy.deepcopy(ppr))
-        result = _merge_paragraph(paragraph, empty, context)
+        # A paragraph-level deletion marker hides the paragraph in the final
+        # view.  Keep the original runs in place so Word's original view can
+        # still show the deleted paragraph; diffing against an empty paragraph
+        # would otherwise discard those runs entirely.
+        result = copy.deepcopy(paragraph)
         result_ppr = result.find("./w:pPr", NS)
         if result_ppr is None:
             result_ppr = etree.Element(f"{{{W}}}pPr")
@@ -758,7 +764,11 @@ def create_tracked_docx(
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
     base_root = _accepted_revision_view(raw_base_root)
-    current_root = current_package.xml("word/document.xml")
+    # A freshly supplied current document may itself contain an earlier
+    # review pass.  Diff only its accepted view so stale w:ins/w:del and
+    # formatting-change markers cannot leak into the new redline.
+    raw_current_root = current_package.xml("word/document.xml")
+    current_root = _accepted_revision_view(raw_current_root)
     base_body, base_blocks = _blocks(base_root)
     current_body, current_blocks = _blocks(current_root)
     context = Context(author, _next_id(raw_base_root))

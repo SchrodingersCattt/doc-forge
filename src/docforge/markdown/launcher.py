@@ -62,7 +62,7 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 INLINE_TOKEN_RE = re.compile(
-    r"(<u>\*\*.*?\*\*</u>|<!--.*?-->|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
+    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<!--.*?-->|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -350,6 +350,16 @@ def add_inline(
             run = paragraph.add_run(token[5:-6])
             run.bold = True
             run.underline = True
+            set_run_font(run, size=size)
+        elif token.lower().startswith("<sup>"):
+            run = paragraph.add_run(token[5:-6])
+            run.bold = bold_default
+            run.font.superscript = True
+            set_run_font(run, size=size)
+        elif token.lower().startswith("<sub>"):
+            run = paragraph.add_run(token[5:-6])
+            run.bold = bold_default
+            run.font.subscript = True
             set_run_font(run, size=size)
         elif token.startswith("<!--"):
             inner = token[4:-3].strip()
