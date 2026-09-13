@@ -30,6 +30,10 @@ pip install -e ".[tex]"     # + numpy for TeX rendering
 
 Python 3.10+.
 
+The `docx2md` and `docx2tex` commands require the external `pandoc` command
+to be installed and available on `PATH`. docforge does not install, discover,
+or replace Pandoc.
+
 ## CLI
 
 ```bash
@@ -55,6 +59,14 @@ docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
 
 # LaTeX manuscript -> DOCX (main + optional SI + bib)
 docforge tex2docx main.tex --si si.tex --bib ref.bib -o main.docx
+
+# DOCX -> Markdown / LaTeX (Pandoc must be installed)
+docforge docx2md reviewed.docx -o reviewed.md --track-changes accept
+docforge docx2tex reviewed.docx -o reviewed.tex --track-changes accept
+
+# DOCX -> mapped section Markdown with extracted media
+docforge docx2md reviewed.docx --split-dir sections \
+  --section-map section-map.json --force
 
 # Generate figures from front-matter Markdown prompts (auditable sidecars)
 docforge aigc figures/_prompts --backend litellm --all
@@ -124,6 +136,11 @@ files.
 | `docforge.sourcepack` | Whitelisted, SHA-256-manifested TeX source ZIP (`SOURCE_PACKAGE_MANIFEST.csv` + README inside the archive) |
 | `docforge.plotting` | Shared Matplotlib visual system: restrained palette, mm-based figure sizes, panel labels, schematic boxes/arrows/status chips, PDF/SVG/600-dpi PNG output |
 | `docforge.cli` | Thin `docforge` entry point; feature modules are imported lazily per subcommand |
+
+Reverse conversion is exposed as `docforge.markdown.docx_to_markdown` and
+`docforge.tex.docx_to_tex`; both invoke the installed `pandoc` command. The
+Markdown exporter can additionally split the converted document using an
+ordered JSON section map and writes a `manifest.json` beside the section files.
 
 ## Auditability conventions
 

@@ -38,6 +38,15 @@ from .template import (
     verify_template_output,
     write_assembly_sidecars,
 )
+from .docx_export import (
+    MarkdownExportResult,
+    docx_to_markdown,
+    load_section_map,
+    metadata_markdown,
+    normalize_media_links,
+    split_markdown_sections,
+    write_conversion_manifest,
+)
 
 __all__ = [
     "Block",
@@ -74,4 +83,11 @@ __all__ = [
     "sha256_file",
     "verify_template_output",
     "write_assembly_sidecars",
+    "MarkdownExportResult",
+    "docx_to_markdown",
+    "load_section_map",
+    "metadata_markdown",
+    "normalize_media_links",
+    "split_markdown_sections",
+    "write_conversion_manifest",
 ]

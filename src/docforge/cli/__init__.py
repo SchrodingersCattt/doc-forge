@@ -39,6 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
     md.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
+    docx_md = sub.add_parser("docx2md", help="DOCX -> GitHub-Flavored Markdown via Pandoc")
+    docx_md.add_argument("input", type=Path, help="Input DOCX path")
+    docx_md.add_argument("-o", "--output", type=Path, help="Output Markdown path")
+    docx_md.add_argument("--split-dir", type=Path, help="Directory for section Markdown files")
+    docx_md.add_argument("--section-map", type=Path, help="JSON section map used with --split-dir")
+    docx_md.add_argument("--media-dir", type=Path, help="Pandoc extraction root (contains media/)")
+    docx_md.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
+    docx_md.add_argument("--force", action="store_true", help="Overwrite existing output files")
+
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
     md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
     md2.add_argument("current", type=Path, help="Freshly generated DOCX")
@@ -52,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     tex.add_argument("--bib", type=Path, help="ref.bib path")
     tex.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
     tex.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
+    docx_tex = sub.add_parser("docx2tex", help="DOCX -> standalone LaTeX via Pandoc")
+    docx_tex.add_argument("input", type=Path, help="Input DOCX path")
+    docx_tex.add_argument("-o", "--output", type=Path, required=True, help="Output TeX path")
+    docx_tex.add_argument("--media-dir", type=Path, help="Pandoc extraction root (contains media/)")
+    docx_tex.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
+    docx_tex.add_argument("--body-only", action="store_true", help="Write Pandoc body without a preamble")
+    docx_tex.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
     aigc = sub.add_parser("aigc", help="Generate figures from Markdown prompt files")
     aigc.add_argument("prompt_dir", type=Path, help="Directory containing *_prompt.md files")
@@ -86,10 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "md2docx":
             return _cmd_md2docx(args)
+        if args.command == "docx2md":
+            return _cmd_docx2md(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "tex2docx":
             return _cmd_tex2docx(args)
+        if args.command == "docx2tex":
+            return _cmd_docx2tex(args)
         if args.command == "aigc":
             return _cmd_aigc(args)
         if args.command == "sourcepack":
@@ -194,6 +215,29 @@ def _cmd_redline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_docx2md(args: argparse.Namespace) -> int:
+    from ..markdown import docx_to_markdown
+
+    if args.output is None and args.split_dir is None:
+        raise ValueError("docx2md requires --output, --split-dir, or both")
+    result = docx_to_markdown(
+        args.input,
+        output=args.output,
+        split_dir=args.split_dir,
+        section_map_path=args.section_map,
+        media_dir=args.media_dir,
+        track_changes=args.track_changes,
+        force=args.force,
+    )
+    if result.output is not None:
+        print(result.output)
+    if result.split_dir is not None:
+        for path in result.sections:
+            print(path)
+        print(result.split_dir / "manifest.json")
+    return 0
+
+
 def _cmd_tex2docx(args: argparse.Namespace) -> int:
     from ..tex import convert_files
 
@@ -206,6 +250,21 @@ def _cmd_tex2docx(args: argparse.Namespace) -> int:
         output=args.output,
     )
     print(args.output)
+    return 0
+
+
+def _cmd_docx2tex(args: argparse.Namespace) -> int:
+    from ..tex import docx_to_tex
+
+    result = docx_to_tex(
+        args.input,
+        output=args.output,
+        media_dir=args.media_dir,
+        track_changes=args.track_changes,
+        body_only=args.body_only,
+        force=args.force,
+    )
+    print(result.output)
     return 0
 
 
