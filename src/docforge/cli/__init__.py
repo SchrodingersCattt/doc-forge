@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
     md.add_argument("--numbering-prefix", default="", help="Prefix for figure, table-caption, and equation numbers (e.g. S for SI)")
+    md.add_argument("--bibliography-scope", choices=("all", "new-only"), default="all", help="Reference entries to render: all used citations or only citations absent from --citation-base")
+    md.add_argument("--omit-metadata-back-matter", action="store_true", help="Omit acknowledgment, author-contribution, and code-availability sections")
     md.add_argument("--no-title", action="store_true", help="Remove level-one Markdown headings; retain the metadata title block")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
     md.add_argument("--force", action="store_true", help="Overwrite an existing output file")
@@ -153,6 +155,8 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             strip_level_one_headings=args.no_title,
             heading_before=args.heading_before,
             numbering_prefix=args.numbering_prefix,
+            bibliography_scope=args.bibliography_scope,
+            include_metadata_back_matter=not args.omit_metadata_back_matter,
             force=args.force,
         )
         manifest, checksum = write_assembly_sidecars(

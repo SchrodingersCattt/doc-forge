@@ -46,6 +46,7 @@ __all__ = [
     "ManuscriptMetadata",
     "assemble_markdown_template",
     "discover_template_styles",
+    "_format_bibliography_record",
     "load_bibliography",
     "parse_metadata",
     "sha256_file",
@@ -76,6 +77,7 @@ class ManuscriptMetadata:
     affiliations: str = ""
     contacts: tuple[str, ...] = ()
     acknowledgement: str = ""
+    author_contributions: str = ""
     code_availability: str = ""
 
 
@@ -85,6 +87,7 @@ class AssemblyResult:
     title: str
     citation_map: Mapping[str, str | int]
     used_citations: tuple[str, ...]
+    reference_keys: tuple[str, ...]
     style_map: Mapping[str, str]
     template_sections_before: int
     template_sections_after: int
@@ -105,6 +108,8 @@ class AssemblyResult:
     figures: tuple[Mapping[str, object], ...] = ()
     tables: tuple[Mapping[str, object], ...] = ()
     numbering_prefix: str = ""
+    bibliography_scope: str = "all"
+    include_metadata_back_matter: bool = True
 
 
 def sha256_file(path: Path) -> str:
@@ -127,6 +132,9 @@ def _metadata_key(label: str) -> str | None:
         "acknowledgment": "acknowledgement",
         "acknowledgements": "acknowledgement",
         "acknowledgments": "acknowledgement",
+        "author contribution": "author_contributions",
+        "author contributions": "author_contributions",
+        "author contributions statement": "author_contributions",
         "email": "contacts",
         "emails": "contacts",
         "e mail": "contacts",
@@ -166,6 +174,7 @@ def parse_metadata(path: Path) -> ManuscriptMetadata:
         affiliations=" ".join(raw_values.get("affiliations", [])).strip(),
         contacts=tuple(contact_lines),
         acknowledgement=" ".join(raw_values.get("acknowledgement", [])).strip(),
+        author_contributions=" ".join(raw_values.get("author_contributions", [])).strip(),
         code_availability=" ".join(raw_values.get("code_availability", [])).strip(),
     )
 
@@ -173,6 +182,57 @@ def parse_metadata(path: Path) -> ManuscriptMetadata:
 def _is_filled_metadata(value: str) -> bool:
     """Treat unresolved optional metadata markers as absent during assembly."""
     return value.strip().upper() not in {"", "TODO", "TBD", "TBA"}
+
+
+def _format_bibliography_record(record: Mapping[str, object], key: str) -> str:
+    required = {"authors", "year", "journal", "doi"}
+    missing = sorted(required - set(record))
+    if missing:
+        raise ValueError(f"Bibliography record {key!r} is missing: {', '.join(missing)}")
+    authors = record["authors"]
+    if not isinstance(authors, list) or not authors or not all(isinstance(item, str) and item.strip() for item in authors):
+        raise ValueError(f"Bibliography record {key!r} authors must be a non-empty string array")
+    year = record["year"]
+    if not isinstance(year, int) or isinstance(year, bool) or year < 0:
+        raise ValueError(f"Bibliography record {key!r} year must be a non-negative integer")
+    journal = record["journal"]
+    doi = record["doi"]
+    if not isinstance(journal, str) or not journal.strip():
+        raise ValueError(f"Bibliography record {key!r} journal must be a non-empty string")
+    if not isinstance(doi, str) or not doi.strip():
+        raise ValueError(f"Bibliography record {key!r} doi must be a non-empty string")
+    author_text = ", ".join(item.strip() for item in authors[:-1])
+    if author_text:
+        author_text += ", and " + authors[-1].strip()
+    else:
+        author_text = authors[0].strip()
+    parts = [f"{author_text}."]
+    title = record.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"Bibliography record {key!r} title must be a non-empty string")
+        parts.append(title.strip() + ".")
+    volume = record.get("volume")
+    issue = record.get("issue")
+    locator = record.get("locator")
+    if volume is not None and not isinstance(volume, (str, int)):
+        raise ValueError(f"Bibliography record {key!r} volume must be a string or integer")
+    if issue is not None and not isinstance(issue, (str, int)):
+        raise ValueError(f"Bibliography record {key!r} issue must be a string or integer")
+    if locator is not None and not isinstance(locator, str):
+        raise ValueError(f"Bibliography record {key!r} locator must be a string")
+    journal_part = f"*{journal.strip()}*"
+    if isinstance(year, int):
+        journal_part += f", **{year}**"
+    if volume is not None:
+        journal_part += f", *{str(volume).strip()}*"
+    if issue is not None:
+        journal_part += f" ({str(issue).strip()})"
+    if locator:
+        journal_part += f", {locator.strip()}"
+    parts.append(journal_part + ".")
+    parts.append(f"DOI: {doi.strip().removeprefix('https://doi.org/').removeprefix('doi:').strip()}")
+    return " ".join(parts)
 
 
 def load_bibliography(path: Path) -> dict[str, str]:
@@ -183,9 +243,16 @@ def load_bibliography(path: Path) -> dict[str, str]:
     for key, value in payload.items():
         if str(key).startswith("_"):
             continue
-        if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
-            raise ValueError(f"Bibliography entry must be a non-empty string: {key!r}")
-        result[key] = value.strip()
+        if not isinstance(key, str):
+            raise ValueError(f"Bibliography entry key must be a string: {key!r}")
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError(f"Bibliography entry must be non-empty: {key!r}")
+            result[key] = value.strip()
+        elif isinstance(value, dict):
+            result[key] = _format_bibliography_record(value, key)
+        else:
+            raise ValueError(f"Bibliography entry must be a string or object: {key!r}")
     return result
 
 
@@ -1245,12 +1312,11 @@ def _geometry(document: DocumentType) -> tuple[tuple[int, int, int, int, int, in
 
 
 def _update_fields(document: DocumentType) -> None:
+    """Disable automatic field updates that trigger Word's external-field prompt."""
     settings = document.settings.element
     node = settings.find(qn("w:updateFields"))
-    if node is None:
-        node = OxmlElement("w:updateFields")
-        settings.append(node)
-    node.set(qn("w:val"), "true")
+    if node is not None:
+        settings.remove(node)
 
 
 def _source_part(rels_name: str) -> str | None:
@@ -1359,6 +1425,19 @@ def verify_template_output(
     verify_image_relationships(path)
     verify_clean_review_state(path)
     _verify_images(path)
+    with zipfile.ZipFile(path) as archive:
+        settings = etree.fromstring(archive.read("word/settings.xml"))
+        update_fields = settings.find(qn("w:updateFields"))
+        if update_fields is not None and update_fields.get(qn("w:val"), "true").lower() == "true":
+            raise RuntimeError("Generated DOCX enables automatic field updates on open")
+        unsafe = re.compile(r"\b(?:INCLUDETEXT|INCLUDEPICTURE|DDE(?:AUTO)?|LINK)\b", re.IGNORECASE)
+        for name in archive.namelist():
+            if not name.startswith("word/") or not name.endswith(".xml"):
+                continue
+            root = etree.fromstring(archive.read(name))
+            field_codes = " ".join(node.text or "" for node in root.iter(qn("w:instrText")))
+            if unsafe.search(field_codes):
+                raise RuntimeError(f"Unsafe external-file field remains in generated DOCX: {name}")
     document = Document(path)
     geometry = _geometry(document)
     if expected_sections is not None and len(document.sections) != expected_sections:
@@ -1386,6 +1465,7 @@ def verify_template_output(
         "image_relationships": "resolved",
         "placeholder_tokens": [],
         "raw_citation_tokens": 0,
+        "automatic_field_updates": False,
         "sections": len(document.sections),
         "body_columns": body_columns,
         "section_geometry": [list(value) for value in geometry],
@@ -1412,6 +1492,8 @@ def assemble_markdown_template(
     strip_level_one_headings: bool = False,
     heading_before: float | None = None,
     numbering_prefix: str = "",
+    bibliography_scope: str = "all",
+    include_metadata_back_matter: bool = True,
     force: bool = False,
 ) -> AssemblyResult:
     if output.exists() and not force:
@@ -1434,6 +1516,8 @@ def assemble_markdown_template(
         raise ValueError("heading_before must be nonnegative")
     if not re.fullmatch(r"[A-Za-z]*", numbering_prefix):
         raise ValueError("numbering_prefix must contain only ASCII letters")
+    if bibliography_scope not in {"all", "new-only"}:
+        raise ValueError("bibliography_scope must be one of: all, new-only")
 
     template = Document(template_path)
     citation_superscript = _template_uses_superscript_citations(template)
@@ -1670,21 +1754,22 @@ def assemble_markdown_template(
             figure_index += 1
         body_index += 1
 
-    if _is_filled_metadata(metadata.acknowledgement):
-        if not strip_level_one_headings:
-            output_nodes.append(_new_paragraph(template, styles["heading_1"], "Acknowledgment", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
+    reference_keys = tuple(key for key in used if bibliography_scope == "all" or citation_base is None or key not in citation_base)
+    if include_metadata_back_matter and _is_filled_metadata(metadata.acknowledgement):
+        output_nodes.append(_new_paragraph(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body")))
-    if _is_filled_metadata(metadata.code_availability):
-        if not strip_level_one_headings:
-            output_nodes.append(_new_paragraph(template, styles["heading_1"], "Code Availability", prototype=prototypes.paragraphs.get("heading_1"), uppercase=True))
+    if include_metadata_back_matter and _is_filled_metadata(metadata.author_contributions):
+        output_nodes.append(_new_paragraph(template, styles["heading_1"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
+        output_nodes.append(_new_paragraph(template, styles["body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("body")))
+    if include_metadata_back_matter and _is_filled_metadata(metadata.code_availability):
+        output_nodes.append(_new_paragraph(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body")))
-    if used:
-        if not strip_level_one_headings:
-            reference_prototype = prototypes.paragraphs.get("references_heading")
-            if reference_prototype is None:
-                reference_prototype = prototypes.paragraphs.get("heading_1")
-            output_nodes.append(_new_paragraph(template, styles["references_heading"], "References", prototype=reference_prototype, uppercase=True))
-        for key in used:
+    if reference_keys:
+        reference_prototype = prototypes.paragraphs.get("references_heading")
+        if reference_prototype is None:
+            reference_prototype = prototypes.paragraphs.get("heading_1")
+        output_nodes.append(_new_paragraph(template, styles["references_heading"], "REFERENCES", prototype=reference_prototype, uppercase=False))
+        for key in reference_keys:
             output_nodes.append(
                 _new_paragraph(template, styles["reference"], f"{mapping[key]}.\t{bibliography[key]}", prototype=prototypes.paragraphs.get("reference"))
             )
@@ -1733,6 +1818,7 @@ def assemble_markdown_template(
         title=resolved_title,
         citation_map=mapping,
         used_citations=used,
+        reference_keys=reference_keys,
         style_map=styles,
         template_sections_before=sections_before,
         template_sections_after=len(Document(output).sections),
@@ -1753,6 +1839,8 @@ def assemble_markdown_template(
         figures=tuple(figures),
         tables=tuple(tables),
         numbering_prefix=numbering_prefix,
+        bibliography_scope=bibliography_scope,
+        include_metadata_back_matter=include_metadata_back_matter,
     )
 
 
@@ -1794,6 +1882,7 @@ def write_assembly_sidecars(
         "title": result.title,
         "metadata_fields": {
             "contacts": list(result.contacts),
+            "include_back_matter": result.include_metadata_back_matter,
         },
         "rendering": {
             "font_family": result.font_family,
@@ -1806,6 +1895,8 @@ def write_assembly_sidecars(
         },
         "citation_map": dict(result.citation_map),
         "used_citations": list(result.used_citations),
+        "reference_keys": list(result.reference_keys),
+        "bibliography_scope": result.bibliography_scope,
         "style_map": dict(result.style_map),
         "figures": [dict(figure) for figure in result.figures],
         "tables": [dict(table) for table in result.tables],

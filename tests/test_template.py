@@ -12,6 +12,7 @@ from docx.oxml.ns import qn
 from PIL import Image
 
 from docforge.markdown import (
+    _format_bibliography_record,
     assemble_markdown_template,
     discover_template_styles,
     parse_metadata,
@@ -71,7 +72,6 @@ def test_metadata_and_style_discovery(tmp_path: Path) -> None:
     assert parsed.authors == "A. Author"
     assert parsed.affiliations == "A Lab"
     assert parsed.contacts == ("*one@example.com", "**two@example.com")
-
     template = tmp_path / "template.docx"
     _template(template)
     styles = discover_template_styles(Document(template))
@@ -79,6 +79,28 @@ def test_metadata_and_style_discovery(tmp_path: Path) -> None:
     assert styles["body"] == "TA_Main_Text"
     assert styles["reference"] == "EndNoteBibliography"
 
+
+def test_metadata_parses_author_contributions(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n# AUTHOR CONTRIBUTIONS\n\nA. Author contributed.\n", encoding="utf-8")
+    assert parse_metadata(metadata).author_contributions == "A. Author contributed."
+
+
+def test_structured_bibliography_record_matches_formatter_contract() -> None:
+    formatted = _format_bibliography_record(
+        {
+            "authors": ["Author, One", "Author, Two"],
+            "title": "A title",
+            "year": 2025,
+            "journal": "Journal",
+            "volume": "12",
+            "issue": "3",
+            "locator": "101-110",
+            "doi": "https://doi.org/10.1000/example",
+        },
+        "example",
+    )
+    assert formatted == "Author, One, and Author, Two. A title. *Journal*, **2025**, *12* (3), 101-110. DOI: 10.1000/example"
 
 def test_template_assembly_replaces_placeholders_and_numbers_citations(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
@@ -383,8 +405,49 @@ def test_no_title_strips_level_one_and_generated_reference_heading(tmp_path: Pat
     assert "Body [1]." in text
     assert "Detail" in text
     assert "Introduction" not in text
-    assert "References" not in text
+    assert "REFERENCES" in text
     assert "1.\tAuthor." in text
+
+
+def test_si_only_reference_scope_omits_shared_entries_and_metadata_back_matter(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# TITLE\n\nA title\n# ACKNOWLEDGMENTS\n\nThanks.\n# AUTHOR CONTRIBUTIONS\n\nContributed.\n",
+        encoding="utf-8",
+    )
+    bibliography = tmp_path / "references.json"
+    bibliography.write_text('{"shared": "Shared. Journal. 2020.", "si_only": "SI only. Journal. 2021."}', encoding="utf-8")
+    main_source = tmp_path / "main.md"
+    main_source.write_text("# Intro\n\nMain \\citep{shared}.\n", encoding="utf-8")
+    main_output = tmp_path / "main.docx"
+    main_result = assemble_markdown_template(
+        [main_source], template_path=template, output=main_output,
+        metadata_path=metadata, bibliography_path=bibliography,
+    )
+    main_manifest, _ = write_assembly_sidecars(
+        main_result, inputs=[main_source], template_path=template,
+        metadata_path=metadata, bibliography_path=bibliography,
+        command=["docforge", "md2docx"],
+    )
+    si_source = tmp_path / "si.md"
+    si_source.write_text("# SI\n\nSI \\citep{shared,si_only}.\n", encoding="utf-8")
+    si_output = tmp_path / "si.docx"
+    si_result = assemble_markdown_template(
+        [si_source], template_path=template, output=si_output,
+        metadata_path=metadata, bibliography_path=bibliography,
+        citation_base_path=main_manifest, bibliography_scope="new-only",
+        include_metadata_back_matter=False,
+    )
+    text = "\n".join(p.text for p in Document(si_output).paragraphs)
+    assert si_result.reference_keys == ("si_only",)
+    assert "[1,S1]" in text
+    assert "S1.\tSI only." in text
+    assert "Shared. Journal" not in text
+    assert "ACKNOWLEDGMENTS" not in text
+    assert "AUTHOR CONTRIBUTIONS" not in text
+    assert "REFERENCES" in text
 
 
 def test_unfilled_optional_metadata_is_omitted(tmp_path: Path) -> None:

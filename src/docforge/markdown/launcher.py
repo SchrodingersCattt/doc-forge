@@ -119,6 +119,11 @@ def is_table_start(lines: list[str], index: int) -> bool:
     return all(TABLE_SEPARATOR_RE.match(cell) for cell in split_table_row(second))
 
 
+def _looks_like_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
 def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
     """Parse a Markdown file into the block model (see ``Block``)."""
     text = clean_markdown(path.read_text(encoding="utf-8-sig"), strip_comments)
@@ -208,6 +213,8 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                 i += 1
             blocks.append(Block("table", rows=tuple(rows)))
             continue
+        if _looks_like_table_row(line) and i + 1 < len(lines) and _looks_like_table_row(lines[i + 1]):
+            raise ValueError(f"Malformed Markdown table in {path}:{i + 1}; separator row must use at least three hyphens per cell")
         ordered = ORDERED_RE.match(line)
         if ordered:
             flush_paragraph()

@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from docforge.markdown.blocks import Block
 from docforge.markdown.launcher import normalize_typography, parse_markdown, render_blocks_to_doc
 
@@ -157,3 +159,11 @@ def test_explicit_table_caption_block_is_parsed() -> None:
         blocks = parse_markdown(path)
         assert [block.kind for block in blocks] == ["table_caption", "table"]
         assert blocks[0].text == "Example values."
+
+
+def test_malformed_pipe_table_fails_with_source_location(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.md"
+    path.write_text("| A | B |\n|-|-|\n| 1 | 2 |\n", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        parse_markdown(path)
+    assert "Malformed Markdown table" in str(excinfo.value)
