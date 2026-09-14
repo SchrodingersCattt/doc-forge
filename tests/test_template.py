@@ -289,10 +289,11 @@ def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) 
     result = assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
     document = Document(output)
     assert result.figures and result.figures[0]["caption"].startswith("Figure 1.")
-    assert result.figures[0]["columns"] == 2
+    assert result.figures[0]["columns"] == 1
+    assert result.figures[0]["orientation"] == "portrait"
     assert len(document.inline_shapes) == 1
     assert any(p.text.startswith("Figure 1.") for p in document.paragraphs)
-    verify_template_output(output, expected_sections=4)
+    verify_template_output(output, expected_sections=2)
 
 
 def test_table_fits_explicit_one_column_section(tmp_path: Path) -> None:
@@ -425,6 +426,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     result = assemble_markdown_template(
         [source], template_path=template, output=output, metadata_path=metadata,
         native_toc=True, restart_heading_numbering=True, body_first_line_chars=2,
+        page_break_before_h1=True,
     )
     document = Document(output)
     text = "\n".join(paragraph.text for paragraph in document.paragraphs)
@@ -436,6 +438,8 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     numbered = [p.text for p in headings if p.text[:1].isdigit()]
     assert numbered == ["1. One", "2. Two", "1. Table Section", "1. Figure Section"]
     assert "Detail" in [p.text for p in headings]
+    detail = next(p for p in headings if p.text == "Detail")
+    assert not detail.text[:1].isdigit()
     for paragraph in headings:
         indentation = paragraph._p.find(".//" + qn("w:ind"))
         assert indentation is not None
@@ -450,6 +454,40 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert body_indent is not None
     assert body_indent.get(qn("w:firstLineChars")) == "200"
     assert result.body_first_line_chars == 2
+    for paragraph in headings:
+        if paragraph.text in {"METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"}:
+            assert paragraph._p.find(".//" + qn("w:pageBreakBefore")) is not None
+    assert result.page_break_before_h1 is True
+
+
+def test_template_body_and_caption_typography(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Figures\n\nBody text.\n\nTable: Example values.\n\n"
+        "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+        "![Figure 1](source.png)\n\nFigure 1. Caption body.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        numbering_prefix="S",
+    )
+    document = Document(output)
+    body = next(p for p in document.paragraphs if p.text == "Body text.")
+    assert all(run._r.rPr.sz.get(qn("w:val")) == "22" for run in body.runs if run.text)
+    for prefix in ("Table S1.", "Figure S1."):
+        caption = next(p for p in document.paragraphs if p.text.startswith(prefix))
+        assert all(run._r.rPr.sz.get(qn("w:val")) == "20" for run in caption.runs if run.text)
+        assert caption.runs[0].bold is True
+        assert all(run.bold is not True and run.italic is not True for run in caption.runs[1:] if run.text.strip())
+    assert result.figures[0]["orientation"] == "portrait"
 
 
 def test_no_title_strips_level_one_and_generated_reference_heading(tmp_path: Path) -> None:

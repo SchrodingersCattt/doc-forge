@@ -149,6 +149,16 @@ def test_scientific_units_and_r_squared_use_true_scripts() -> None:
     assert any(run.text == "2" and run.font.subscript for run in runs)
 
 
+def test_arrhenius_operator_and_upright_subscript() -> None:
+    document = render_blocks_to_doc(
+        [Block("paragraph", r"$\mathrm{ln}(k)$, $\mathrm{ln}(A)$, and $E_{\mathrm{a}}$.")]
+    )
+    runs = document.paragraphs[0].runs
+    assert any(run.text.startswith("ln") and run.italic is not True for run in runs)
+    assert any(run.text == "a" and run.font.subscript and run.italic is not True for run in runs)
+    assert any(run.text == "E" and run.italic for run in runs)
+
+
 def test_explicit_table_caption_block_is_parsed() -> None:
     with TemporaryDirectory() as directory:
         path = Path(directory) / "source.md"

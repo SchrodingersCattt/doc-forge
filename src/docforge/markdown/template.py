@@ -114,6 +114,7 @@ class AssemblyResult:
     native_toc: bool = False
     restart_heading_numbering: bool = False
     body_first_line_chars: float | None = None
+    page_break_before_h1: bool = False
 
 
 def sha256_file(path: Path) -> str:
@@ -565,6 +566,50 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
             fonts.attrib.pop(qn(f"w:{slot}"), None)
 
 
+def _override_run_size(element, points: float) -> None:
+    value = str(round(points * 2))
+    for run in element.iter(qn("w:r")):
+        properties = run.find(qn("w:rPr"))
+        if properties is None:
+            properties = OxmlElement("w:rPr")
+            run.insert(0, properties)
+        for tag in ("sz", "szCs"):
+            node = properties.find(qn("w:" + tag))
+            if node is None:
+                node = OxmlElement("w:" + tag)
+                properties.append(node)
+            node.set(qn("w:val"), value)
+
+
+def _remove_run_emphasis(element) -> None:
+    for properties in element.iter(qn("w:rPr")):
+        for tag in ("b", "bCs", "i", "iCs"):
+            for node in list(properties.findall(qn("w:" + tag))):
+                properties.remove(node)
+
+
+def _format_caption_runs(element) -> None:
+    """Apply 10 pt roman caption text and bold only the leading label run."""
+    _remove_run_emphasis(element)
+    _override_run_size(element, 10)
+    first = next(
+        (
+            run for run in element.iter(qn("w:r"))
+            if "".join(node.text or "" for node in run.iter(qn("w:t"))).strip()
+        ),
+        None,
+    )
+    if first is None:
+        return
+    properties = first.find(qn("w:rPr"))
+    if properties is None:
+        properties = OxmlElement("w:rPr")
+        first.insert(0, properties)
+    for tag in ("b", "bCs"):
+        marker = OxmlElement("w:" + tag)
+        properties.append(marker)
+
+
 def _override_heading_before(element, style_ids: set[str], points: float | None) -> None:
     """Set explicit spacing before generated headings when requested."""
     if points is None:
@@ -745,6 +790,18 @@ def _set_heading_outline(element, level: int) -> None:
         outline = OxmlElement("w:outlineLvl")
         properties.append(outline)
     outline.set(qn("w:val"), str(max(0, level - 1)))
+
+
+def _set_page_break_before(element) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    node = properties.find(qn("w:pageBreakBefore"))
+    if node is None:
+        node = OxmlElement("w:pageBreakBefore")
+        properties.append(node)
+    node.set(qn("w:val"), "true")
 
 
 def _number_heading(element, number: int) -> None:
@@ -1203,6 +1260,16 @@ def _section_break_node(section) -> object:
     return paragraph
 
 
+def _page_break_node() -> object:
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    node = OxmlElement("w:br")
+    node.set(qn("w:type"), "page")
+    run.append(node)
+    paragraph.append(run)
+    return paragraph
+
+
 def _section_column_count(section) -> int:
     columns = section.find(qn("w:cols"))
     if columns is None:
@@ -1241,6 +1308,29 @@ def _with_column_layout(section, layout: str):
     return section
 
 
+def _with_page_orientation(section, orientation: str):
+    if orientation not in {"portrait", "landscape"}:
+        raise ValueError("image orientation must be portrait or landscape")
+    section = copy.deepcopy(section)
+    page = section.find(qn("w:pgSz"))
+    if page is None:
+        page = OxmlElement("w:pgSz")
+        section.insert(0, page)
+    width = int(page.get(qn("w:w"), "12240"))
+    height = int(page.get(qn("w:h"), "15840"))
+    if orientation == "portrait" and width > height:
+        width, height = height, width
+    elif orientation == "landscape" and width < height:
+        width, height = height, width
+    page.set(qn("w:w"), str(width))
+    page.set(qn("w:h"), str(height))
+    if orientation == "landscape":
+        page.set(qn("w:orient"), "landscape")
+    else:
+        page.attrib.pop(qn("w:orient"), None)
+    return section
+
+
 def _apply_template_run_formatting(element, prototype) -> None:
     if prototype is None:
         return
@@ -1272,16 +1362,19 @@ def _clone_rendered_block(
     p = prototypes.paragraphs
     if block.kind == "table_caption":
         label = f"Table {number_prefix}{table_number}. " if table_number is not None else "Table. "
-        return [
-            _new_paragraph(
-                target,
-                styles["caption"],
-                label + block.text,
-                prototype=p.get("caption"),
-            )
-        ]
+        paragraph = _new_paragraph(
+            target,
+            styles["caption"],
+            f"**{label.strip()}** {block.text}",
+            prototype=p.get("caption"),
+        )
+        _format_caption_runs(paragraph)
+        return [paragraph]
     if block.kind in {"paragraph", "reference"}:
-        return [_new_paragraph(target, styles["body"], block.text, prototype=p.get("body"))]
+        paragraph = _new_paragraph(target, styles["body"], block.text, prototype=p.get("body"))
+        if block.kind == "paragraph":
+            _override_run_size(paragraph, 11)
+        return [paragraph]
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
         role = f"heading_{level}"
@@ -1412,6 +1505,7 @@ def _clone_figure(
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
     caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption_text)
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
+    _format_caption_runs(cap)
     return [paragraph, cap]
 
 
@@ -1658,6 +1752,7 @@ def assemble_markdown_template(
     native_toc: bool = False,
     restart_heading_numbering: bool = False,
     body_first_line_chars: float | None = None,
+    page_break_before_h1: bool = False,
     force: bool = False,
 ) -> AssemblyResult:
     validate_output_path(output)
@@ -1836,6 +1931,8 @@ def assemble_markdown_template(
                 for node in nodes:
                     _flush_left_heading(node)
                     _set_heading_outline(node, min(max(block.level, 1), 3))
+                    if page_break_before_h1 and block.level == 1:
+                        _set_page_break_before(node)
                 if restart_heading_numbering and block.level == 2:
                     heading_counters[block.level] += 1
                     heading_counters[3] = 0
@@ -1856,8 +1953,19 @@ def assemble_markdown_template(
         if image is None:
             break
         if prototypes.figure_regions:
-            figure_region = prototypes.figure_regions[min(figure_index, len(prototypes.figure_regions) - 1)]
-            requested_columns = dict(image.options).get("columns")
+            image_options = dict(image.options)
+            requested_orientation = image_options.get("orientation", "portrait")
+            if requested_orientation not in {"portrait", "landscape"}:
+                raise ValueError("Image orientation marker must be portrait or landscape")
+            portrait_regions = [
+                region for region in prototypes.figure_regions
+                if int(region.section.find(qn("w:pgSz")).get(qn("w:w"), "0"))
+                <= int(region.section.find(qn("w:pgSz")).get(qn("w:h"), "0"))
+            ]
+            landscape_regions = [region for region in prototypes.figure_regions if region not in portrait_regions]
+            candidates = landscape_regions if requested_orientation == "landscape" else portrait_regions
+            figure_region = candidates[min(figure_index, len(candidates) - 1)] if candidates else prototypes.figure_regions[0]
+            requested_columns = image_options.get("columns")
             if requested_columns in {"single", "one"}:
                 figure_section = _with_column_layout(figure_region.section, "one")
             elif requested_columns in {"double", "two"}:
@@ -1866,14 +1974,10 @@ def assemble_markdown_template(
                 figure_section = copy.deepcopy(figure_region.section)
             else:
                 raise ValueError("Image columns marker must be one, two, single, or double")
+            figure_section = _with_page_orientation(figure_section, requested_orientation)
             figure_section = adjusted(figure_section, apply_columns=False)
-            previous_figure = prototypes.figure_regions[min(figure_index - 1, len(prototypes.figure_regions) - 1)] if figure_index > 0 else None
-            needs_body_break = (
-                bool(text_blocks)
-                or previous_figure is None
-                or previous_figure.index != figure_region.index
-            )
-            if needs_body_break:
+            dedicated_page = requested_orientation == "landscape"
+            if dedicated_page:
                 output_nodes.append(_section_break_node(section))
                 section_sources.append(selected_body.index)
             output_nodes.extend(
@@ -1885,12 +1989,13 @@ def assemble_markdown_template(
                     prototypes.paragraphs.get("caption"),
                     styles["caption"],
                     figure_index + 1,
-                    section_width_twips=_section_width_twips(figure_section),
+                    section_width_twips=_section_width_twips(figure_section if dedicated_page else section),
                     number_prefix=numbering_prefix,
                 )
             )
-            output_nodes.append(_section_break_node(figure_section))
-            section_sources.append(figure_region.index)
+            if dedicated_page:
+                output_nodes.append(_section_break_node(figure_section))
+                section_sources.append(figure_region.index)
             figures.append(
                 {
                     "number": figure_index + 1,
@@ -1900,7 +2005,8 @@ def assemble_markdown_template(
                     "caption": caption or image.text,
                     "template_region": figure_region.index,
                     "placement_after_body_region": selected_body.index,
-                    "columns": _section_column_count(figure_section),
+                    "columns": _section_column_count(figure_section if dedicated_page else section),
+                    "orientation": requested_orientation,
                 }
             )
             figure_index += 1
@@ -1952,6 +2058,8 @@ def assemble_markdown_template(
             reference_prototype = prototypes.paragraphs.get("heading_1")
         reference_heading = _new_paragraph(template, styles["references_heading"], "REFERENCES", prototype=reference_prototype, uppercase=False)
         _flush_left_heading(reference_heading)
+        if page_break_before_h1:
+            _set_page_break_before(reference_heading)
         output_nodes.append(reference_heading)
         for key in reference_keys:
             output_nodes.append(
@@ -2028,6 +2136,7 @@ def assemble_markdown_template(
         native_toc=native_toc,
         restart_heading_numbering=restart_heading_numbering,
         body_first_line_chars=body_first_line_chars,
+        page_break_before_h1=page_break_before_h1,
     )
 
 
@@ -2082,6 +2191,7 @@ def write_assembly_sidecars(
             "native_toc": result.native_toc,
             "restart_heading_numbering": result.restart_heading_numbering,
             "body_first_line_chars": result.body_first_line_chars,
+            "page_break_before_h1": result.page_break_before_h1,
         },
         "citation_map": dict(result.citation_map),
         "used_citations": list(result.used_citations),

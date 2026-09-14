@@ -189,6 +189,9 @@ template front matter. `--restart-heading-numbering` adds decimal H2 labels
 that restart at 1 after every H1; H3 remains unnumbered. Generated headings are flush left; template
 body-paragraph indentation remains unchanged unless `--body-first-line-chars`
 sets an explicit first-line indent in character units.
+`--page-break-before-h1` starts each Markdown H1 on a new page. Template-backed
+figures default to portrait placement; request a landscape page explicitly with
+an image option such as `![Figure S1|orientation=landscape](figure.png)`.
 
 The generic rule is level-based rather than filename-based: any input Markdown
 file may contain level-one headings, and --no-title removes them uniformly.
