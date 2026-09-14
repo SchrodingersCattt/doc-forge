@@ -111,6 +111,9 @@ class AssemblyResult:
     numbering_prefix: str = ""
     bibliography_scope: str = "all"
     include_metadata_back_matter: bool = True
+    native_toc: bool = False
+    restart_heading_numbering: bool = False
+    body_first_line_chars: float | None = None
 
 
 def sha256_file(path: Path) -> str:
@@ -400,9 +403,9 @@ def discover_template_styles(document: DocumentType) -> dict[str, str]:
         "abstract_title": ("BDAbstractTitle", "BD_Abstract_Title", "Heading 1", "1"),
         "abstract": ("BDAbstract", "BD_Abstract", "Normal"),
         "body": ("TAMainText1", "TAMainText", "TA_Main_Text", "Normal"),
-        "heading_1": ("1", "Heading 1"),
-        "heading_2": ("2", "Heading 2"),
-        "heading_3": ("3", "Heading 3"),
+        "heading_1": ("Heading 1", "1"),
+        "heading_2": ("Heading 2", "2"),
+        "heading_3": ("Heading 3", "3"),
         "caption": ("a4", "Caption", "VA_Figure_Caption"),
         "references_heading": (
             "TFReferencesSection",
@@ -674,6 +677,106 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
         if base_rpr is not None:
             run.insert(0, copy.deepcopy(base_rpr))
     return element
+
+
+def _native_toc_nodes(document: DocumentType, heading_style_id: str) -> list:
+    """Create a native Word TOC field covering Heading 1 through Heading 3."""
+    toc_style_id = _find_style(document, ("TOC Heading", "TOCHeading"))
+    heading = _new_paragraph(document, toc_style_id or heading_style_id, "CONTENTS", uppercase=False)
+    _flush_left_heading(heading)
+    paragraph = OxmlElement("w:p")
+    run_begin = OxmlElement("w:r")
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    run_begin.append(begin)
+    paragraph.append(run_begin)
+    run_instruction = OxmlElement("w:r")
+    instruction = OxmlElement("w:instrText")
+    instruction.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    instruction.text = ' TOC \\o "1-3" \\h \\z \\u '
+    run_instruction.append(instruction)
+    paragraph.append(run_instruction)
+    run_separate = OxmlElement("w:r")
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    run_separate.append(separate)
+    paragraph.append(run_separate)
+    placeholder = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.text = "Right-click and update field to populate this table of contents."
+    placeholder.append(text)
+    paragraph.append(placeholder)
+    run_end = OxmlElement("w:r")
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run_end.append(end)
+    paragraph.append(run_end)
+    page_break = OxmlElement("w:p")
+    page_run = OxmlElement("w:r")
+    break_node = OxmlElement("w:br")
+    break_node.set(qn("w:type"), "page")
+    page_run.append(break_node)
+    page_break.append(page_run)
+    return [heading, paragraph, page_break]
+
+
+def _flush_left_heading(element) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    for node in list(properties.findall(qn("w:ind"))) + list(properties.findall(qn("w:tabs"))):
+        properties.remove(node)
+    indentation = OxmlElement("w:ind")
+    indentation.set(qn("w:left"), "0")
+    indentation.set(qn("w:firstLine"), "0")
+    indentation.set(qn("w:hanging"), "0")
+    properties.append(indentation)
+
+
+def _set_heading_outline(element, level: int) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    outline = properties.find(qn("w:outlineLvl"))
+    if outline is None:
+        outline = OxmlElement("w:outlineLvl")
+        properties.append(outline)
+    outline.set(qn("w:val"), str(max(0, level - 1)))
+
+
+def _number_heading(element, number: int) -> None:
+    paragraph = next(iter(element.iter(qn("w:p"))), None)
+    if paragraph is None:
+        return
+    _flush_left_heading(paragraph)
+    first_run = next(iter(paragraph.findall(qn("w:r"))), None)
+    if first_run is None:
+        first_run = OxmlElement("w:r")
+        paragraph.append(first_run)
+    text_node = first_run.find(qn("w:t"))
+    if text_node is None:
+        text_node = OxmlElement("w:t")
+        first_run.append(text_node)
+    text_node.text = f"{number}. " + (text_node.text or "")
+
+
+def _set_body_first_line_indent(element, characters: float | None) -> None:
+    if characters is None:
+        return
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    indentation = properties.find(qn("w:ind"))
+    if indentation is None:
+        indentation = OxmlElement("w:ind")
+        properties.append(indentation)
+    indentation.attrib.pop(qn("w:firstLine"), None)
+    indentation.attrib.pop(qn("w:hanging"), None)
+    indentation.set(qn("w:firstLineChars"), str(max(0, round(characters * 100))))
 
 
 def _remap_styles(element, source: DocumentType, target: DocumentType) -> None:
@@ -1552,6 +1655,9 @@ def assemble_markdown_template(
     numbering_prefix: str = "",
     bibliography_scope: str = "all",
     include_metadata_back_matter: bool = True,
+    native_toc: bool = False,
+    restart_heading_numbering: bool = False,
+    body_first_line_chars: float | None = None,
     force: bool = False,
 ) -> AssemblyResult:
     validate_output_path(output)
@@ -1573,6 +1679,8 @@ def assemble_markdown_template(
         raise ValueError("columns must be one of: template, one, two")
     if heading_before is not None and heading_before < 0:
         raise ValueError("heading_before must be nonnegative")
+    if body_first_line_chars is not None and body_first_line_chars < 0:
+        raise ValueError("body_first_line_chars must be nonnegative")
     if not re.fullmatch(r"[A-Za-z]*", numbering_prefix):
         raise ValueError("numbering_prefix must contain only ASCII letters")
     if bibliography_scope not in {"all", "new-only"}:
@@ -1683,6 +1791,8 @@ def assemble_markdown_template(
         abstract_prototype = prototypes.paragraphs.get("abstract")
         # MolCrysKit carries the label and the abstract in one styled paragraph.
         front.append(_new_paragraph(template, styles["abstract"], f"**ABSTRACT:** {abstract}", prototype=abstract_prototype))
+    if native_toc:
+        front.extend(_native_toc_nodes(template, styles["heading_1"]))
 
     # Build a fresh body while reusing the template's section properties.  The
     # sample text and sample images are discarded; their section geometry,
@@ -1703,6 +1813,7 @@ def assemble_markdown_template(
     figure_index = 0
     equation_index = 1
     table_index = 1
+    heading_counters = {2: 0, 3: 0}
     for text_blocks, image, caption in groups:
         selected_body = body_regions[min(body_index, len(body_regions) - 1)]
         section = adjusted(selected_body.section)
@@ -1710,6 +1821,8 @@ def assemble_markdown_template(
         # active section; the selected section is normally the same geometry,
         # and the explicit fit below handles differing templates.
         for block in text_blocks:
+            if block.kind == "heading" and block.level == 1:
+                heading_counters = {2: 0, 3: 0}
             nodes = _clone_rendered_block(
                 block,
                 template,
@@ -1719,6 +1832,19 @@ def assemble_markdown_template(
                 table_number=table_index if block.kind == "table_caption" else None,
                 number_prefix=numbering_prefix,
             )
+            if block.kind == "heading":
+                for node in nodes:
+                    _flush_left_heading(node)
+                    _set_heading_outline(node, min(max(block.level, 1), 3))
+                if restart_heading_numbering and block.level in {2, 3}:
+                    heading_counters[block.level] += 1
+                    if block.level == 2:
+                        heading_counters[3] = 0
+                    for node in nodes:
+                        _number_heading(node, heading_counters[block.level])
+            elif block.kind == "paragraph":
+                for node in nodes:
+                    _set_body_first_line_indent(node, body_first_line_chars)
             for node in nodes:
                 _fit_tables(node, _section_width_twips(section))
             output_nodes.extend(nodes)
@@ -1825,7 +1951,9 @@ def assemble_markdown_template(
         reference_prototype = prototypes.paragraphs.get("references_heading")
         if reference_prototype is None:
             reference_prototype = prototypes.paragraphs.get("heading_1")
-        output_nodes.append(_new_paragraph(template, styles["references_heading"], "REFERENCES", prototype=reference_prototype, uppercase=False))
+        reference_heading = _new_paragraph(template, styles["references_heading"], "REFERENCES", prototype=reference_prototype, uppercase=False)
+        _flush_left_heading(reference_heading)
+        output_nodes.append(reference_heading)
         for key in reference_keys:
             output_nodes.append(
                 _new_paragraph(template, styles["reference"], f"{mapping[key]}.\t{bibliography[key]}", prototype=prototypes.paragraphs.get("reference"))
@@ -1898,6 +2026,9 @@ def assemble_markdown_template(
         numbering_prefix=numbering_prefix,
         bibliography_scope=bibliography_scope,
         include_metadata_back_matter=include_metadata_back_matter,
+        native_toc=native_toc,
+        restart_heading_numbering=restart_heading_numbering,
+        body_first_line_chars=body_first_line_chars,
     )
 
 
@@ -1948,7 +2079,10 @@ def write_assembly_sidecars(
             "line_numbers": result.line_numbers,
             "include_title": result.include_title,
             "strip_level_one_headings": result.strip_level_one_headings,
-            "heading_before": result.heading_before
+            "heading_before": result.heading_before,
+            "native_toc": result.native_toc,
+            "restart_heading_numbering": result.restart_heading_numbering,
+            "body_first_line_chars": result.body_first_line_chars,
         },
         "citation_map": dict(result.citation_map),
         "used_citations": list(result.used_citations),

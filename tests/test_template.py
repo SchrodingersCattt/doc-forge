@@ -409,6 +409,48 @@ def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tm
     assert tab is not None and int(tab.get(qn("w:pos"))) > 0
 
 
+def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "si.md"
+    source.write_text(
+        "# Methods\n\n## One\n\nBody.\n\n## Two\n\nBody.\n\n"
+        "# Supplementary Tables\n\n## Table Section\n\nBody.\n\n"
+        "# Supplementary Figures\n\n## Figure Section\n\nBody.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "si.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        native_toc=True, restart_heading_numbering=True, body_first_line_chars=2,
+    )
+    document = Document(output)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "CONTENTS" in text
+    contents = next(p for p in document.paragraphs if p.text == "CONTENTS")
+    assert contents.style.name == "TOC Heading"
+    assert all(value in text for value in ("METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"))
+    headings = [p for p in document.paragraphs if p._p.find(".//" + qn("w:outlineLvl")) is not None]
+    numbered = [p.text for p in headings if p.text[:1].isdigit()]
+    assert numbered == ["1. One", "2. Two", "1. Table Section", "1. Figure Section"]
+    for paragraph in headings:
+        indentation = paragraph._p.find(".//" + qn("w:ind"))
+        assert indentation is not None
+        assert indentation.get(qn("w:left")) == "0"
+        assert indentation.get(qn("w:firstLine")) == "0"
+    xml = document._element.xml
+    assert 'TOC \\o "1-3" \\h \\z \\u' in xml
+    assert result.native_toc is True
+    assert result.restart_heading_numbering is True
+    body = next(p for p in document.paragraphs if p.text == "Body.")
+    body_indent = body._p.find(".//" + qn("w:ind"))
+    assert body_indent is not None
+    assert body_indent.get(qn("w:firstLineChars")) == "200"
+    assert result.body_first_line_chars == 2
+
+
 def test_no_title_strips_level_one_and_generated_reference_heading(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _template(template)

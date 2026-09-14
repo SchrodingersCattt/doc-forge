@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
+    md.add_argument("--native-toc", action="store_true", help="Insert a native Word table of contents after template front matter")
+    md.add_argument("--restart-heading-numbering", action="store_true", help="Restart H2/H3 decimal numbering after each H1")
+    md.add_argument("--body-first-line-chars", type=float, default=None, help="Body paragraph first-line indent in character units")
     md.add_argument("--numbering-prefix", default="", help="Prefix for figure, table-caption, and equation numbers (e.g. S for SI)")
     md.add_argument("--bibliography-scope", choices=("all", "new-only"), default="all", help="Reference entries to render: all used citations or only citations absent from --citation-base")
     md.add_argument("--omit-metadata-back-matter", action="store_true", help="Omit acknowledgment, author-contribution, and code-availability sections")
@@ -158,6 +161,9 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             include_title=True,
             strip_level_one_headings=args.no_title,
             heading_before=args.heading_before,
+            native_toc=args.native_toc,
+            restart_heading_numbering=args.restart_heading_numbering,
+            body_first_line_chars=args.body_first_line_chars,
             numbering_prefix=args.numbering_prefix,
             bibliography_scope=args.bibliography_scope,
             include_metadata_back_matter=not args.omit_metadata_back_matter,
