@@ -1836,10 +1836,9 @@ def assemble_markdown_template(
                 for node in nodes:
                     _flush_left_heading(node)
                     _set_heading_outline(node, min(max(block.level, 1), 3))
-                if restart_heading_numbering and block.level in {2, 3}:
+                if restart_heading_numbering and block.level == 2:
                     heading_counters[block.level] += 1
-                    if block.level == 2:
-                        heading_counters[3] = 0
+                    heading_counters[3] = 0
                     for node in nodes:
                         _number_heading(node, heading_counters[block.level])
             elif block.kind == "paragraph":

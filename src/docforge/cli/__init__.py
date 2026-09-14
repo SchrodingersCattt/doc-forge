@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
     md.add_argument("--native-toc", action="store_true", help="Insert a native Word table of contents after template front matter")
-    md.add_argument("--restart-heading-numbering", action="store_true", help="Restart H2/H3 decimal numbering after each H1")
+    md.add_argument("--restart-heading-numbering", action="store_true", help="Restart H2 decimal numbering after each H1")
     md.add_argument("--body-first-line-chars", type=float, default=None, help="Body paragraph first-line indent in character units")
     md.add_argument("--numbering-prefix", default="", help="Prefix for figure, table-caption, and equation numbers (e.g. S for SI)")
     md.add_argument("--bibliography-scope", choices=("all", "new-only"), default="all", help="Reference entries to render: all used citations or only citations absent from --citation-base")

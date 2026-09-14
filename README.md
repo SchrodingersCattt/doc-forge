@@ -185,8 +185,8 @@ headings, while retaining the metadata title block. These rendering arguments
 are written to the assembly manifest.
 
 `--native-toc` inserts a native Word TOC field for heading levels 1–3 after the
-template front matter. `--restart-heading-numbering` adds decimal H2/H3 labels
-that restart at 1 after every H1. Generated headings are flush left; template
+template front matter. `--restart-heading-numbering` adds decimal H2 labels
+that restart at 1 after every H1; H3 remains unnumbered. Generated headings are flush left; template
 body-paragraph indentation remains unchanged unless `--body-first-line-chars`
 sets an explicit first-line indent in character units.
 

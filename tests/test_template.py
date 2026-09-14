@@ -417,7 +417,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     source = tmp_path / "si.md"
     source.write_text(
         "# Methods\n\n## One\n\nBody.\n\n## Two\n\nBody.\n\n"
-        "# Supplementary Tables\n\n## Table Section\n\nBody.\n\n"
+        "# Supplementary Tables\n\n## Table Section\n\n### Detail\n\nBody.\n\n"
         "# Supplementary Figures\n\n## Figure Section\n\nBody.\n",
         encoding="utf-8",
     )
@@ -435,6 +435,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     headings = [p for p in document.paragraphs if p._p.find(".//" + qn("w:outlineLvl")) is not None]
     numbered = [p.text for p in headings if p.text[:1].isdigit()]
     assert numbered == ["1. One", "2. Two", "1. Table Section", "1. Figure Section"]
+    assert "Detail" in [p.text for p in headings]
     for paragraph in headings:
         indentation = paragraph._p.find(".//" + qn("w:ind"))
         assert indentation is not None
