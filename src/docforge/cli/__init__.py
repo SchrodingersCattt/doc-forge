@@ -188,12 +188,10 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
         args.metadata is not None
         or args.bibliography is not None
         or args.citation_base is not None
-        or args.font_family is not None
-        or args.east_asia_font is not None
         or args.style_profile != "template"
         or args.line_numbers != "template"
     ):
-        raise ValueError("Metadata, bibliography, style, font, and line-number options require --template")
+        raise ValueError("Metadata, bibliography, style, and line-number options require --template")
     blocks = [
         block
         for path in args.inputs
@@ -206,7 +204,14 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             block for block in blocks
             if not (block.kind == "heading" and block.level == 1)
         ]
-    doc = render_blocks_to_doc(blocks, title=args.title, number_prefix=args.numbering_prefix, heading_before=args.heading_before)
+    doc = render_blocks_to_doc(
+        blocks,
+        title=args.title,
+        number_prefix=args.numbering_prefix,
+        heading_before=args.heading_before,
+        font_family=args.font_family,
+        east_asia_font=args.east_asia_font,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(args.output))
     convert_unicode_scripts_in_docx(args.output)

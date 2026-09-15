@@ -47,6 +47,7 @@ __all__ = [
     "add_table",
     "setup_styles",
     "make_empty_doc",
+    "override_document_fonts",
 ]
 
 TABLE_SEPARATOR_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
@@ -279,6 +280,40 @@ def set_run_font(run, *, chinese: str = "仿宋", latin: str = "Times New Roman"
     run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), chinese)
 
 
+def override_document_fonts(
+    doc: DocumentType,
+    *,
+    latin: str | None = None,
+    east_asia: str | None = None,
+) -> None:
+    """Override fonts without changing run-level semantic formatting."""
+    if not latin and not east_asia:
+        return
+    for paragraph in doc.paragraphs:
+        for run in paragraph.runs:
+            r_fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
+            if latin:
+                run.font.name = latin
+                r_fonts.set(qn("w:ascii"), latin)
+                r_fonts.set(qn("w:hAnsi"), latin)
+                r_fonts.set(qn("w:cs"), latin)
+            if east_asia:
+                r_fonts.set(qn("w:eastAsia"), east_asia)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        r_fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
+                        if latin:
+                            run.font.name = latin
+                            r_fonts.set(qn("w:ascii"), latin)
+                            r_fonts.set(qn("w:hAnsi"), latin)
+                            r_fonts.set(qn("w:cs"), latin)
+                        if east_asia:
+                            r_fonts.set(qn("w:eastAsia"), east_asia)
+
+
 def set_paragraph_spacing(
     paragraph, *, before: float = 0, after: float = 0, line: float = 1.5
 ) -> None:
@@ -427,6 +462,7 @@ def add_heading(doc: DocumentType, text: str, level: int):
     add_inline(paragraph, text, bold_default=True, size=size)
     for run in paragraph.runs:
         run.bold = True
+        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         if level == 1:
             set_run_font(run, chinese="楷体", latin="Times New Roman", size=size)
         else:
@@ -908,6 +944,8 @@ def render_blocks_to_doc(
     equation_start: int = 1,
     number_prefix: str = "",
     heading_before: float | None = None,
+    font_family: str | None = None,
+    east_asia_font: str | None = None,
 ) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
     doc = make_empty_doc()
@@ -929,6 +967,7 @@ def render_blocks_to_doc(
             equation_number += 1
         if block.kind == "table_caption":
             table_number += 1
+    override_document_fonts(doc, latin=font_family, east_asia=east_asia_font)
     return doc
 
 

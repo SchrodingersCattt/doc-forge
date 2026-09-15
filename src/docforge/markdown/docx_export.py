@@ -27,6 +27,8 @@ IMAGE_ATTR_RE = re.compile(r"\b(?P<name>src|alt)\s*=\s*(['\"])(?P<value>.*?)\2",
 MARKDOWN_IMAGE_RE = re.compile(r"(?P<start>!\[[^\]]*\]\()(?P<src>[^)\s]+)(?P<end>\))")
 BOLD_HEADING_RE = re.compile(r"^\*\*(?P<text>.+?)\*\*\s*:?[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
+SUBSCRIPT_RE = re.compile(r"<sub>(?P<value>[^<\n]*?)</sub>", re.IGNORECASE)
+SUBSCRIPT_CLOSING_DELIMITER_RE = re.compile(r"(\\\]|[)\]])")
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,29 @@ def normalize_media_links(text: str, *, document_dir: Path, media_root: Path) ->
 
     text = MARKDOWN_IMAGE_RE.sub(replace_markdown, text)
     return text, tuple(sorted(media))
+
+
+def normalize_script_boundaries(text: str) -> str:
+    """Move baseline formula delimiters out of Pandoc subscript spans.
+
+    Word often stores a closing ``)`` or ``]`` in the same subscript run as
+    the preceding digit. Pandoc preserves that run boundary literally, for
+    example ``N<sub>3)</sub>``. Delimiters are baseline punctuation in chemical
+    formulae, so canonicalize them before Markdown is written.
+    """
+
+    def normalize_subscript(match: re.Match[str]) -> str:
+        value = match.group("value")
+        if not SUBSCRIPT_CLOSING_DELIMITER_RE.search(value):
+            return match.group(0)
+        pieces = SUBSCRIPT_CLOSING_DELIMITER_RE.split(value)
+        return "".join(
+            piece if SUBSCRIPT_CLOSING_DELIMITER_RE.fullmatch(piece) else f"<sub>{piece}</sub>"
+            for piece in pieces
+            if piece
+        )
+
+    return SUBSCRIPT_RE.sub(normalize_subscript, text)
 
 
 def _heading_text(line: str) -> str | None:
@@ -300,6 +325,7 @@ def docx_to_markdown(
             document_dir=destination_dir,
             media_root=media_root,
         )
+        markdown = normalize_script_boundaries(markdown)
         # Word occasionally contains an empty bold marker paragraph.  Pandoc
         # serializes that artifact as ``**\\**``; it is not manuscript text.
         markdown = re.sub(r"(?m)^\*\*\\\*\*\s*\r?\n?", "", markdown)
@@ -347,6 +373,7 @@ __all__ = [
     "load_section_map",
     "metadata_markdown",
     "normalize_media_links",
+    "normalize_script_boundaries",
     "split_markdown_sections",
     "write_conversion_manifest",
 ]
