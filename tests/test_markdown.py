@@ -80,6 +80,18 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.text == "4" and run.font.subscript for run in paragraph.runs))
         self.assertTrue(any(run.text == "–" and run.font.superscript for run in paragraph.runs))
 
+    def test_standalone_font_override_preserves_inline_formatting(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", "C<sub>36</sub>Fe *d* **bold**")],
+            font_family="Times New Roman",
+            east_asia_font="Times New Roman",
+        )
+        runs = [run for paragraph in document.paragraphs for run in paragraph.runs]
+        self.assertTrue(all(run.font.name == "Times New Roman" for run in runs))
+        self.assertTrue(any(run.bold and run.text == "bold" for run in runs))
+        self.assertTrue(any(run.italic and run.text == "d" for run in runs))
+        self.assertTrue(any(run.font.subscript and run.text == "36" for run in runs))
+
     def test_display_equations_are_omml_and_numbered(self) -> None:
         document = render_blocks_to_doc(
             [Block("equation", r"E = mc^2"), Block("equation", r"a = b")]
