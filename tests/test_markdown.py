@@ -95,6 +95,19 @@ class OmmlTests(unittest.TestCase):
             ["\t", "(1)", "\t", "(2)"],
         )
 
+    def test_standalone_heading_text_and_style_are_black(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("heading", "Methods", level=1), Block("heading", "Details", level=2)]
+        )
+        for paragraph in document.paragraphs:
+            if not paragraph.style.name.startswith("Heading"):
+                continue
+            assert paragraph.style.font.color.rgb is not None
+            assert str(paragraph.style.font.color.rgb) == "000000"
+            assert paragraph.runs
+            assert all(run.font.color.rgb is not None for run in paragraph.runs)
+            assert all(str(run.font.color.rgb) == "000000" for run in paragraph.runs)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -427,6 +427,7 @@ def add_heading(doc: DocumentType, text: str, level: int):
     add_inline(paragraph, text, bold_default=True, size=size)
     for run in paragraph.runs:
         run.bold = True
+        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         if level == 1:
             set_run_font(run, chinese="楷体", latin="Times New Roman", size=size)
         else:
@@ -707,6 +708,7 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
         style.hidden = False
         style.quick_style = True
         style.priority = level
+        style.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         p_pr = style._element.get_or_add_pPr()
         outline_level = p_pr.find(qn("w:outlineLvl"))
         if outline_level is None:
