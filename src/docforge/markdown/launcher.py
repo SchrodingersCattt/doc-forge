@@ -743,6 +743,7 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
         style.hidden = False
         style.quick_style = True
         style.priority = level
+        style.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
         p_pr = style._element.get_or_add_pPr()
         outline_level = p_pr.find(qn("w:outlineLvl"))
         if outline_level is None:
