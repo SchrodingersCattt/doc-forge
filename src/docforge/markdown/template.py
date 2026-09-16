@@ -582,16 +582,17 @@ def _override_run_size(element, points: float) -> None:
             node.set(qn("w:val"), value)
 
 
-def _remove_run_emphasis(element) -> None:
+def _remove_run_emphasis(element, *, preserve_math: bool = False) -> None:
     for properties in element.iter(qn("w:rPr")):
-        for tag in ("b", "bCs", "i", "iCs"):
+        tags = ("b", "bCs") if preserve_math else ("b", "bCs", "i", "iCs")
+        for tag in tags:
             for node in list(properties.findall(qn("w:" + tag))):
                 properties.remove(node)
 
 
 def _format_caption_runs(element) -> None:
     """Apply 10 pt roman caption text and bold only the leading label run."""
-    _remove_run_emphasis(element)
+    _remove_run_emphasis(element, preserve_math=True)
     _override_run_size(element, 10)
     first = next(
         (

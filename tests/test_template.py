@@ -642,6 +642,29 @@ def test_template_body_and_caption_typography(tmp_path: Path) -> None:
     assert result.figures[0]["orientation"] == "portrait"
 
 
+def test_caption_preserves_inline_math_italics_and_superscripts(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "![Figure 1](source.png)\n\nFigure 1. The $f^{+}$ response.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    caption = next(p for p in Document(output).paragraphs if p.text.startswith("Figure 1."))
+    f_run = next(run for run in caption.runs if run.text == "f")
+    sign_run = next(run for run in caption.runs if run.text == "+")
+    assert f_run.italic is True
+    assert sign_run.font.superscript is True
+
+
 def test_no_title_strips_level_one_and_generated_reference_heading(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _template(template)
