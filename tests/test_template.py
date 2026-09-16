@@ -358,6 +358,20 @@ def test_figure_span_cli_default_and_override() -> None:
     assert default.figure_span == "column"
     assert override.figure_span == "page"
 
+    typography = parser.parse_args(
+        [
+            "md2docx", "source.md", "-o", "out.docx",
+            "--body-font-size", "9.5",
+            "--abstract-font-size", "9.5",
+            "--caption-font-size", "9.5",
+            "--reference-font-size", "9.5",
+        ]
+    )
+    assert typography.body_font_size == 9.5
+    assert typography.abstract_font_size == 9.5
+    assert typography.caption_font_size == 9.5
+    assert typography.reference_font_size == 9.5
+
 
 def test_portrait_page_span_uses_continuous_two_one_two_sections(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
@@ -652,6 +666,43 @@ def test_template_body_and_caption_typography(tmp_path: Path) -> None:
         assert caption.runs[0].bold is True
         assert all(run.bold is not True and run.italic is not True for run in caption.runs[1:] if run.text.strip())
     assert result.figures[0]["orientation"] == "portrait"
+
+
+def test_template_typography_size_overrides(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    abstract = tmp_path / "abstract.md"
+    abstract.write_text("# Abstract\n\nAbstract text.\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Introduction\n\nBody text cites \\citep{ref}.\n\n"
+        "![Figure 1](source.png)\n\nFigure 1. Caption body.\n",
+        encoding="utf-8",
+    )
+    bibliography = tmp_path / "refs.json"
+    bibliography.write_text('{"ref": "Author. Journal. 2026."}', encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [abstract, source], template_path=template, output=output,
+        metadata_path=metadata, bibliography_path=bibliography,
+        body_font_size=9.5, abstract_font_size=9.5,
+        caption_font_size=9.5, reference_font_size=9.5,
+    )
+    document = Document(output)
+    for prefix in ("ABSTRACT:", "Body text", "Figure 1.", "1.\tAuthor"):
+        paragraph = next(p for p in document.paragraphs if p.text.startswith(prefix))
+        assert all(
+            run._r.rPr.sz.get(qn("w:val")) == "19"
+            for run in paragraph.runs if run.text
+        )
+    assert result.body_font_size == 9.5
+    assert result.abstract_font_size == 9.5
+    assert result.caption_font_size == 9.5
+    assert result.reference_font_size == 9.5
 
 
 def test_caption_preserves_inline_math_italics_and_superscripts(tmp_path: Path) -> None:

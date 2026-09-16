@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--figure-span", choices=("column", "page"), default="column", help="Default figure span: current text column or printable page width; per-image span= overrides this value")
     md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
     md.add_argument("--east-asia-font", dest="east_asia_font", help="Explicit East Asian font override for generated text")
+    md.add_argument("--body-font-size", type=float, help="Generated body text size in points")
+    md.add_argument("--abstract-font-size", type=float, help="Generated abstract text size in points")
+    md.add_argument("--caption-font-size", type=float, help="Generated figure and table caption size in points")
+    md.add_argument("--reference-font-size", type=float, help="Generated bibliography entry size in points")
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
@@ -168,6 +172,10 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             restart_heading_numbering=args.restart_heading_numbering,
             body_first_line_chars=args.body_first_line_chars,
             page_break_before_h1=args.page_break_before_h1,
+            body_font_size=args.body_font_size,
+            abstract_font_size=args.abstract_font_size,
+            caption_font_size=args.caption_font_size,
+            reference_font_size=args.reference_font_size,
             numbering_prefix=args.numbering_prefix,
             bibliography_scope=args.bibliography_scope,
             include_metadata_back_matter=not args.omit_metadata_back_matter,
@@ -193,8 +201,12 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
         or args.style_profile != "template"
         or args.line_numbers != "template"
         or args.figure_span != "column"
+        or args.body_font_size is not None
+        or args.abstract_font_size is not None
+        or args.caption_font_size is not None
+        or args.reference_font_size is not None
     ):
-        raise ValueError("Metadata, bibliography, style, line-number, and figure-span options require --template")
+        raise ValueError("Metadata, bibliography, style, line-number, figure-span, and typography options require --template")
     blocks = [
         block
         for path in args.inputs

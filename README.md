@@ -177,7 +177,10 @@ At most two contact lines are accepted, and docforge does not infer a
 corresponding-author mapping.
 
 The template assembly CLI accepts --font and --east-asia-font for explicit
-generated-run font overrides. --style template preserves the styles discovered
+generated-run font overrides. `--body-font-size`, `--abstract-font-size`,
+`--caption-font-size`, and `--reference-font-size` set generated text sizes in
+points while leaving heading and metadata sizes under template control.
+--style template preserves the styles discovered
 from the supplied DOCX; alternatively --style PATH.json supplies a semantic
 role-to-existing-style mapping such as {"body": "TA_Main_Text1"}. The
 --line-numbers option is template, on, or off and applies to every retained

@@ -116,6 +116,10 @@ class AssemblyResult:
     restart_heading_numbering: bool = False
     body_first_line_chars: float | None = None
     page_break_before_h1: bool = False
+    body_font_size: float | None = None
+    abstract_font_size: float | None = None
+    caption_font_size: float | None = None
+    reference_font_size: float | None = None
 
 
 def sha256_file(path: Path) -> str:
@@ -590,10 +594,10 @@ def _remove_run_emphasis(element, *, preserve_math: bool = False) -> None:
                 properties.remove(node)
 
 
-def _format_caption_runs(element) -> None:
+def _format_caption_runs(element, points: float = 10) -> None:
     """Apply 10 pt roman caption text and bold only the leading label run."""
     _remove_run_emphasis(element, preserve_math=True)
-    _override_run_size(element, 10)
+    _override_run_size(element, points)
     first = next(
         (
             run for run in element.iter(qn("w:r"))
@@ -1404,6 +1408,8 @@ def _clone_rendered_block(
     equation_number: int | None = None,
     table_number: int | None = None,
     number_prefix: str = "",
+    body_font_size: float | None = None,
+    caption_font_size: float | None = None,
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
@@ -1415,12 +1421,12 @@ def _clone_rendered_block(
             f"**{label.strip()}** {block.text}",
             prototype=p.get("caption"),
         )
-        _format_caption_runs(paragraph)
+        _format_caption_runs(paragraph, caption_font_size or 10)
         return [paragraph]
     if block.kind in {"paragraph", "reference"}:
         paragraph = _new_paragraph(target, styles["body"], block.text, prototype=p.get("body"))
         if block.kind == "paragraph":
-            _override_run_size(paragraph, 11)
+            _override_run_size(paragraph, body_font_size or 11)
         return [paragraph]
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
@@ -1488,6 +1494,7 @@ def _clone_figure(
     figure_number: int,
     section_width_twips: int | None = None,
     number_prefix: str = "",
+    caption_font_size: float | None = None,
 ) -> list:
     image_path = Path(image.path)
     if not image_path.is_file():
@@ -1557,7 +1564,7 @@ def _clone_figure(
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
     caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption_text)
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
-    _format_caption_runs(cap)
+    _format_caption_runs(cap, caption_font_size or 10)
     return [paragraph, cap]
 
 
@@ -1821,6 +1828,10 @@ def assemble_markdown_template(
     restart_heading_numbering: bool = False,
     body_first_line_chars: float | None = None,
     page_break_before_h1: bool = False,
+    body_font_size: float | None = None,
+    abstract_font_size: float | None = None,
+    caption_font_size: float | None = None,
+    reference_font_size: float | None = None,
     force: bool = False,
 ) -> AssemblyResult:
     validate_output_path(output)
@@ -1846,6 +1857,14 @@ def assemble_markdown_template(
         raise ValueError("heading_before must be nonnegative")
     if body_first_line_chars is not None and body_first_line_chars < 0:
         raise ValueError("body_first_line_chars must be nonnegative")
+    for name, value in {
+        "body_font_size": body_font_size,
+        "abstract_font_size": abstract_font_size,
+        "caption_font_size": caption_font_size,
+        "reference_font_size": reference_font_size,
+    }.items():
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be positive")
     if not re.fullmatch(r"[A-Za-z]*", numbering_prefix):
         raise ValueError("numbering_prefix must contain only ASCII letters")
     if bibliography_scope not in {"all", "new-only"}:
@@ -1955,7 +1974,10 @@ def assemble_markdown_template(
     if abstract:
         abstract_prototype = prototypes.paragraphs.get("abstract")
         # MolCrysKit carries the label and the abstract in one styled paragraph.
-        front.append(_new_paragraph(template, styles["abstract"], f"**ABSTRACT:** {abstract}", prototype=abstract_prototype))
+        abstract_paragraph = _new_paragraph(template, styles["abstract"], f"**ABSTRACT:** {abstract}", prototype=abstract_prototype)
+        if abstract_font_size is not None:
+            _override_run_size(abstract_paragraph, abstract_font_size)
+        front.append(abstract_paragraph)
     if native_toc:
         front.extend(_native_toc_nodes(template, styles["heading_1"]))
 
@@ -1996,6 +2018,8 @@ def assemble_markdown_template(
                 equation_number=equation_index if block.kind == "equation" else None,
                 table_number=table_index if block.kind == "table_caption" else None,
                 number_prefix=numbering_prefix,
+                body_font_size=body_font_size,
+                caption_font_size=caption_font_size,
             )
             if block.kind == "heading":
                 for node in nodes:
@@ -2088,6 +2112,7 @@ def assemble_markdown_template(
                 figure_index + 1,
                 section_width_twips=_section_width_twips(render_section),
                 number_prefix=numbering_prefix,
+                caption_font_size=caption_font_size,
             )
         )
         if resolved_span == "page":
@@ -2134,9 +2159,10 @@ def assemble_markdown_template(
         )
         output_nodes.append(reference_heading)
         for key in reference_keys:
-            output_nodes.append(
-                _new_paragraph(template, styles["reference"], f"{mapping[key]}.\t{bibliography[key]}", prototype=prototypes.paragraphs.get("reference"))
-            )
+            reference = _new_paragraph(template, styles["reference"], f"{mapping[key]}.\t{bibliography[key]}", prototype=prototypes.paragraphs.get("reference"))
+            if reference_font_size is not None:
+                _override_run_size(reference, reference_font_size)
+            output_nodes.append(reference)
     final_region = body_regions[min(body_index, len(body_regions) - 1)]
     # The final section belongs to the document body.  A body-level sectPr is
     # required for Word/LibreOffice to balance the last two-column region.
@@ -2210,6 +2236,10 @@ def assemble_markdown_template(
         restart_heading_numbering=restart_heading_numbering,
         body_first_line_chars=body_first_line_chars,
         page_break_before_h1=page_break_before_h1,
+        body_font_size=body_font_size,
+        abstract_font_size=abstract_font_size,
+        caption_font_size=caption_font_size,
+        reference_font_size=reference_font_size,
     )
 
 
@@ -2266,6 +2296,10 @@ def write_assembly_sidecars(
             "body_first_line_chars": result.body_first_line_chars,
             "page_break_before_h1": result.page_break_before_h1,
             "figure_span": result.figure_span,
+            "body_font_size": result.body_font_size,
+            "abstract_font_size": result.abstract_font_size,
+            "caption_font_size": result.caption_font_size,
+            "reference_font_size": result.reference_font_size,
         },
         "citation_map": dict(result.citation_map),
         "used_citations": list(result.used_citations),
