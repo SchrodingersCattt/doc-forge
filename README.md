@@ -45,14 +45,14 @@ docforge md2docx 01.abstract.md 02.main.md -o main.docx \
   --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
   --bibliography 07.references.json --style template \
   --font "Times New Roman" --east-asia-font "Times New Roman" \
-  --line-numbers on --columns two --force
+  --line-numbers on --columns two --figure-span column --force
 
 # Supporting information can request a readable one-column body
 docforge md2docx 06.supporting-information.md -o si.docx \
   --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
   --bibliography 07.references.json --citation-base main-paph2.manifest.json \
   --style template --font "Times New Roman" --east-asia-font "Times New Roman" \
-  --line-numbers on --columns one --numbering-prefix S --force
+  --line-numbers on --columns one --figure-span column --numbering-prefix S --force
 
 # Word tracked-changes redline against a reviewed DOCX
 docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
@@ -103,13 +103,16 @@ body-column width when a template is used. Unicode chemical scripts in ordinary
 text are converted to the same Word run properties during the final audit.
 
 Lines beginning with `! ` or `！ ` are treated as source comments and omitted by
-default; `--keep-comments` preserves them as TODO notes. An image alt-text option
-such as `![Figure 1|columns=double](figure.png)` requests a two-column image
-section. Without an image option, template mode uses the template's figure-slot
-section (MolCrysKit is single-column for figures and two-column for body text),
-while `--columns one|two` changes body sections. Continuous `<w:sectPr>`
-properties are copied section by section, including their headers/footers and
-column definitions.
+default; `--keep-comments` preserves them as TODO notes. Figure width is explicit:
+`--figure-span column|page` sets the document default, and an image option such as
+`![Figure 1|span=page](figure.png)` overrides it. `span=column` keeps a figure in
+the active text column. In a two-column portrait body, `span=page` inserts
+continuous section transitions around a temporary one-column section so the
+figure and caption span the printable text width without forcing a page break.
+`orientation=portrait|landscape` is independent of span; landscape figures require
+`span=page`. The older image-level `columns=single|double` syntax remains a
+deprecated compatibility alias. `--columns one|two` continues to control body
+sections rather than individual figures.
 
 For SI output, pass --numbering-prefix S to apply the S prefix to figure captions, explicit Table: captions, and display-equation numbers.
 
@@ -179,10 +182,13 @@ from the supplied DOCX; alternatively --style PATH.json supplies a semantic
 role-to-existing-style mapping such as {"body": "TA_Main_Text1"}. The
 --line-numbers option is template, on, or off and applies to every retained
 front, body, figure, and terminal section. --heading-before sets explicit
-heading spacing before in points. --no-title removes level-one Markdown
-headings, including the generated References/Acknowledgment/Code Availability
-headings, while retaining the metadata title block. These rendering arguments
-are written to the assembly manifest.
+heading spacing before in points. --no-title removes level-one headings from the
+Markdown inputs while retaining the metadata title block and generated terminal
+headings. Generated Acknowledgments, Author Contributions, Code Availability,
+and References headings share the same unnumbered Heading 1 formatting. Word
+line numbering remains active when requested. `--figure-span column|page` sets
+the default figure placement, while per-image `span=` takes precedence. These
+rendering arguments are written to the assembly manifest.
 
 `--native-toc` inserts a native Word TOC field for heading levels 1–3 after the
 template front matter. `--restart-heading-numbering` adds decimal H2 labels
@@ -190,8 +196,8 @@ that restart at 1 after every H1; H3 remains unnumbered. Generated headings are 
 body-paragraph indentation remains unchanged unless `--body-first-line-chars`
 sets an explicit first-line indent in character units.
 `--page-break-before-h1` starts each Markdown H1 on a new page. Template-backed
-figures default to portrait placement; request a landscape page explicitly with
-an image option such as `![Figure S1|orientation=landscape](figure.png)`.
+figures default to portrait placement. Request a landscape page explicitly with
+an image option such as `![Figure S1|span=page|orientation=landscape](figure.png)`.
 
 The generic rule is level-based rather than filename-based: any input Markdown
 file may contain level-one headings, and --no-title removes them uniformly.

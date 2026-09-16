@@ -96,6 +96,7 @@ class AssemblyResult:
     body_columns_before: int
     body_columns_after: int
     column_layout: str
+    figure_span: str
     verification: Mapping[str, object]
     font_family: str | None = None
     east_asia_font: str | None = None
@@ -804,6 +805,40 @@ def _set_page_break_before(element) -> None:
     node.set(qn("w:val"), "true")
 
 
+def _remove_paragraph_numbering(element) -> None:
+    """Remove inherited list numbering without changing document line numbers."""
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        return
+    numbering = properties.find(qn("w:numPr"))
+    if numbering is not None:
+        properties.remove(numbering)
+
+
+def _terminal_heading(
+    document: DocumentType,
+    style_id: str,
+    text: str,
+    *,
+    prototype=None,
+    page_break_before: bool = False,
+):
+    """Create one visible, unnumbered terminal Heading 1 paragraph."""
+    heading = _new_paragraph(
+        document,
+        style_id,
+        text,
+        prototype=prototype,
+        uppercase=False,
+    )
+    _flush_left_heading(heading)
+    _set_heading_outline(heading, 1)
+    _remove_paragraph_numbering(heading)
+    if page_break_before:
+        _set_page_break_before(heading)
+    return heading
+
+
 def _number_heading(element, number: int) -> None:
     paragraph = next(iter(element.iter(qn("w:p"))), None)
     if paragraph is None:
@@ -1331,6 +1366,17 @@ def _with_page_orientation(section, orientation: str):
     return section
 
 
+def _with_continuous_section(section):
+    """Return a section whose transition is explicitly continuous."""
+    section = copy.deepcopy(section)
+    section_type = section.find(qn("w:type"))
+    if section_type is None:
+        section_type = OxmlElement("w:type")
+        section.insert(0, section_type)
+    section_type.set(qn("w:val"), "continuous")
+    return section
+
+
 def _apply_template_run_formatting(element, prototype) -> None:
     if prototype is None:
         return
@@ -1739,6 +1785,7 @@ def assemble_markdown_template(
     keep_comments: bool = False,
     skip_images: bool = False,
     columns: str = "template",
+    figure_span: str = "column",
     font_family: str | None = None,
     east_asia_font: str | None = None,
     style_profile: str = "template",
@@ -1772,6 +1819,8 @@ def assemble_markdown_template(
         raise ValueError("line_numbers must be one of: template, on, off")
     if columns not in {"template", "one", "two"}:
         raise ValueError("columns must be one of: template, one, two")
+    if figure_span not in {"column", "page"}:
+        raise ValueError("figure_span must be one of: column, page")
     if heading_before is not None and heading_before < 0:
         raise ValueError("heading_before must be nonnegative")
     if body_first_line_chars is not None and body_first_line_chars < 0:
@@ -1952,11 +2001,32 @@ def assemble_markdown_template(
                 table_index += 1
         if image is None:
             break
+        image_options = dict(image.options)
+        requested_orientation = image_options.get("orientation", "portrait")
+        if requested_orientation not in {"portrait", "landscape"}:
+            raise ValueError("Image orientation marker must be portrait or landscape")
+        requested_span = image_options.get("span")
+        requested_columns = image_options.get("columns")
+        if requested_span is not None and requested_columns is not None:
+            raise ValueError("Image span and columns markers cannot be combined")
+        if requested_span is not None:
+            if requested_span not in {"column", "page"}:
+                raise ValueError("Image span marker must be column or page")
+            resolved_span = requested_span
+        elif requested_columns is not None:
+            if requested_columns in {"single", "one"}:
+                resolved_span = "page"
+            elif requested_columns in {"double", "two"}:
+                resolved_span = "column"
+            else:
+                raise ValueError("Image columns marker must be one, two, single, or double")
+        else:
+            resolved_span = figure_span
+        if requested_orientation == "landscape" and resolved_span != "page":
+            raise ValueError("Landscape images require span=page")
+
+        figure_region = None
         if prototypes.figure_regions:
-            image_options = dict(image.options)
-            requested_orientation = image_options.get("orientation", "portrait")
-            if requested_orientation not in {"portrait", "landscape"}:
-                raise ValueError("Image orientation marker must be portrait or landscape")
             portrait_regions = [
                 region for region in prototypes.figure_regions
                 if int(region.section.find(qn("w:pgSz")).get(qn("w:w"), "0"))
@@ -1965,101 +2035,82 @@ def assemble_markdown_template(
             landscape_regions = [region for region in prototypes.figure_regions if region not in portrait_regions]
             candidates = landscape_regions if requested_orientation == "landscape" else portrait_regions
             figure_region = candidates[min(figure_index, len(candidates) - 1)] if candidates else prototypes.figure_regions[0]
-            requested_columns = image_options.get("columns")
-            if requested_columns in {"single", "one"}:
-                figure_section = _with_column_layout(figure_region.section, "one")
-            elif requested_columns in {"double", "two"}:
-                figure_section = _with_column_layout(figure_region.section, "two")
-            elif requested_columns is None:
-                figure_section = copy.deepcopy(figure_region.section)
-            else:
-                raise ValueError("Image columns marker must be one, two, single, or double")
+
+        if resolved_span == "page":
+            base_figure_section = (
+                figure_region.section
+                if requested_orientation == "landscape" and figure_region is not None
+                else section
+            )
+            figure_section = _with_column_layout(base_figure_section, "one")
             figure_section = _with_page_orientation(figure_section, requested_orientation)
             figure_section = adjusted(figure_section, apply_columns=False)
-            dedicated_page = requested_orientation == "landscape"
-            if dedicated_page:
-                output_nodes.append(_section_break_node(section))
-                section_sources.append(selected_body.index)
-            output_nodes.extend(
-                _clone_figure(
-                    template,
-                    image,
-                    caption or image.text or f"Figure {figure_index + 1}.",
-                    figure_region,
-                    prototypes.paragraphs.get("caption"),
-                    styles["caption"],
-                    figure_index + 1,
-                    section_width_twips=_section_width_twips(figure_section if dedicated_page else section),
-                    number_prefix=numbering_prefix,
-                )
-            )
-            if dedicated_page:
-                output_nodes.append(_section_break_node(figure_section))
-                section_sources.append(figure_region.index)
-            figures.append(
-                {
-                    "number": figure_index + 1,
-                    "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
-                    "path": str(Path(image.path).resolve()),
-                    "sha256": sha256_file(Path(image.path)),
-                    "caption": caption or image.text,
-                    "template_region": figure_region.index,
-                    "placement_after_body_region": selected_body.index,
-                    "columns": _section_column_count(figure_section if dedicated_page else section),
-                    "orientation": requested_orientation,
-                }
-            )
-            figure_index += 1
+            if requested_orientation == "portrait":
+                figure_section = _with_continuous_section(figure_section)
+                body_break_section = _with_continuous_section(section)
+            else:
+                body_break_section = section
+            output_nodes.append(_section_break_node(body_break_section))
+            section_sources.append(selected_body.index)
+            render_section = figure_section
         else:
-            # A blank single-section template has no full-width slot.  Keep
-            # the image inline in the current column and do not invent a new
-            # page geometry.
-            output_nodes.extend(
-                _clone_figure(
-                    template,
-                    image,
-                    caption or image.text or f"Figure {figure_index + 1}.",
-                    None,
-                    prototypes.paragraphs.get("caption"),
-                    styles["caption"],
-                    figure_index + 1,
-                    section_width_twips=_section_width_twips(section),
-                    number_prefix=numbering_prefix,
-                )
+            render_section = section
+
+        output_nodes.extend(
+            _clone_figure(
+                template,
+                image,
+                caption or image.text or f"Figure {figure_index + 1}.",
+                figure_region,
+                prototypes.paragraphs.get("caption"),
+                styles["caption"],
+                figure_index + 1,
+                section_width_twips=_section_width_twips(render_section),
+                number_prefix=numbering_prefix,
             )
-            figures.append(
-                {
-                    "number": figure_index + 1,
-                    "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
-                    "path": str(Path(image.path).resolve()),
-                    "sha256": sha256_file(Path(image.path)),
-                    "caption": caption or image.text,
-                    "template_region": None,
-                    "placement_after_body_region": selected_body.index,
-                    "columns": _section_column_count(section),
-                }
+        )
+        if resolved_span == "page":
+            output_nodes.append(_section_break_node(figure_section))
+            section_sources.append(
+                figure_region.index
+                if requested_orientation == "landscape" and figure_region is not None
+                else selected_body.index
             )
-            figure_index += 1
+        figures.append(
+            {
+                "number": figure_index + 1,
+                "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
+                "path": str(Path(image.path).resolve()),
+                "sha256": sha256_file(Path(image.path)),
+                "caption": caption or image.text,
+                "template_region": figure_region.index if figure_region is not None else None,
+                "placement_after_body_region": selected_body.index,
+                "span": resolved_span,
+                "columns": _section_column_count(render_section),
+                "orientation": requested_orientation,
+            }
+        )
+        figure_index += 1
         body_index += 1
 
     reference_keys = tuple(key for key in used if bibliography_scope == "all" or citation_base is None or key not in citation_base)
     if include_metadata_back_matter and _is_filled_metadata(metadata.acknowledgement):
-        output_nodes.append(_new_paragraph(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
+        output_nodes.append(_terminal_heading(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1")))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body")))
     if include_metadata_back_matter and _is_filled_metadata(metadata.author_contributions):
-        output_nodes.append(_new_paragraph(template, styles["heading_1"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
+        output_nodes.append(_terminal_heading(template, styles["heading_1"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("heading_1")))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("body")))
     if include_metadata_back_matter and _is_filled_metadata(metadata.code_availability):
-        output_nodes.append(_new_paragraph(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1"), uppercase=False))
+        output_nodes.append(_terminal_heading(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body")))
     if reference_keys:
-        reference_prototype = prototypes.paragraphs.get("references_heading")
-        if reference_prototype is None:
-            reference_prototype = prototypes.paragraphs.get("heading_1")
-        reference_heading = _new_paragraph(template, styles["references_heading"], "REFERENCES", prototype=reference_prototype, uppercase=False)
-        _flush_left_heading(reference_heading)
-        if page_break_before_h1:
-            _set_page_break_before(reference_heading)
+        reference_heading = _terminal_heading(
+            template,
+            styles["heading_1"],
+            "REFERENCES",
+            prototype=prototypes.paragraphs.get("heading_1"),
+            page_break_before=page_break_before_h1,
+        )
         output_nodes.append(reference_heading)
         for key in reference_keys:
             output_nodes.append(
@@ -2118,6 +2169,7 @@ def assemble_markdown_template(
         body_columns_before=body_columns_before,
         body_columns_after=body_columns_after,
         column_layout=columns,
+        figure_span=figure_span,
         verification=verification,
         font_family=font_family,
         east_asia_font=east_asia_font,
@@ -2192,6 +2244,7 @@ def write_assembly_sidecars(
             "restart_heading_numbering": result.restart_heading_numbering,
             "body_first_line_chars": result.body_first_line_chars,
             "page_break_before_h1": result.page_break_before_h1,
+            "figure_span": result.figure_span,
         },
         "citation_map": dict(result.citation_map),
         "used_citations": list(result.used_citations),

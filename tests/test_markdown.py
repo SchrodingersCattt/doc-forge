@@ -29,13 +29,16 @@ class BlockTests(unittest.TestCase):
             path = Path(directory) / "source.md"
             path.write_text(
                 "! internal Chinese blueprint\n\nVisible paragraph.\n\n"
-                "![Figure 1|columns=single](figure.png)\n\n"
+                "![Figure 1|span=page|orientation=portrait](figure.png)\n\n"
                 "Figure 1. Caption.\n",
                 encoding="utf-8",
             )
             blocks = parse_markdown(path)
             self.assertEqual([block.kind for block in blocks], ["paragraph", "image", "paragraph"])
-            self.assertEqual(blocks[1].options, (("columns", "single"),))
+            self.assertEqual(
+                blocks[1].options,
+                (("span", "page"), ("orientation", "portrait")),
+            )
             kept = parse_markdown(path, strip_comments=False)
             self.assertIn("[TODO: internal Chinese blueprint]", [block.text for block in kept])
 

@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--citation-base", type=Path, help="Existing main-manuscript manifest whose citation numbers SI should reuse")
     md.add_argument("--citation-format", choices=("template", "superscript", "bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
+    md.add_argument("--figure-span", choices=("column", "page"), default="column", help="Default figure span: current text column or printable page width; per-image span= overrides this value")
     md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
     md.add_argument("--east-asia-font", dest="east_asia_font", help="Explicit East Asian font override for generated text")
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
@@ -155,6 +156,7 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             keep_comments=args.keep_comments,
             skip_images=args.skip_images,
             columns=args.columns,
+            figure_span=args.figure_span,
             font_family=args.font_family,
             east_asia_font=args.east_asia_font,
             style_profile=args.style_profile,
@@ -190,8 +192,9 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
         or args.citation_base is not None
         or args.style_profile != "template"
         or args.line_numbers != "template"
+        or args.figure_span != "column"
     ):
-        raise ValueError("Metadata, bibliography, style, and line-number options require --template")
+        raise ValueError("Metadata, bibliography, style, line-number, and figure-span options require --template")
     blocks = [
         block
         for path in args.inputs

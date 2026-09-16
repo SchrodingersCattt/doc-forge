@@ -10,6 +10,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image
+from docforge.cli import build_parser
 
 from docforge.markdown import (
     _format_bibliography_record,
@@ -176,6 +177,8 @@ def test_template_assembly_replaces_placeholders_and_numbers_citations(tmp_path:
     )
     assert manifest.exists()
     assert checksum.exists()
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["rendering"]["figure_span"] == "column"
 
 
 def test_unknown_citation_fails_before_writing(tmp_path: Path) -> None:
@@ -270,6 +273,7 @@ def test_template_uses_all_mixed_region_figure_slots(tmp_path: Path) -> None:
         [source], template_path=template, output=output, metadata_path=metadata
     )
     assert len(result.figures) == 2
+    assert all(figure["span"] == "column" for figure in result.figures)
     assert len(Document(output).inline_shapes) == 2
 
 
@@ -282,18 +286,130 @@ def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) 
     metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
     source = tmp_path / "source.md"
     source.write_text(
-        "# Introduction\n\nBody.\n\n![Figure 1|columns=double](source.png)\n\nFigure 1. Example inline figure.\n",
+        "# Introduction\n\nBody.\n\n![Figure 1|span=page](source.png)\n\nFigure 1. Example inline figure.\n",
         encoding="utf-8",
     )
     output = tmp_path / "output.docx"
     result = assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
     document = Document(output)
     assert result.figures and result.figures[0]["caption"].startswith("Figure 1.")
+    assert result.figures[0]["span"] == "page"
     assert result.figures[0]["columns"] == 1
     assert result.figures[0]["orientation"] == "portrait"
     assert len(document.inline_shapes) == 1
     assert any(p.text.startswith("Figure 1.") for p in document.paragraphs)
-    verify_template_output(output, expected_sections=2)
+    verify_template_output(output, expected_sections=4)
+
+
+def test_figure_span_cli_default_and_override() -> None:
+    parser = build_parser()
+    default = parser.parse_args(["md2docx", "source.md", "-o", "out.docx"])
+    override = parser.parse_args(
+        ["md2docx", "source.md", "-o", "out.docx", "--figure-span", "page"]
+    )
+    assert default.figure_span == "column"
+    assert override.figure_span == "page"
+
+
+def test_portrait_page_span_uses_continuous_two_one_two_sections(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (160, 80), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    document = Document(template)
+    body_columns = document.sections[1]._sectPr.find(qn("w:cols"))
+    if body_columns is None:
+        body_columns = OxmlElement("w:cols")
+        document.sections[1]._sectPr.append(body_columns)
+    body_columns.set(qn("w:num"), "2")
+    body_columns.set(qn("w:space"), "475")
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Body before.\n\n![Figure 1|span=page](source.png)\n\n"
+        "Figure 1. Wide portrait figure.\n\nBody after.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        line_numbers="on", figure_span="column",
+    )
+    rendered = Document(output)
+    columns = []
+    section_types = []
+    for section in rendered.sections:
+        cols = section._sectPr.find(qn("w:cols"))
+        columns.append(int(cols.get(qn("w:num"), "1")) if cols is not None else 1)
+        section_type = section._sectPr.find(qn("w:type"))
+        section_types.append(section_type.get(qn("w:val")) if section_type is not None else None)
+        assert section._sectPr.find(qn("w:lnNumType")) is not None
+    assert columns[-3:] == [2, 1, 2]
+    assert all(value in {None, "continuous"} for value in section_types)
+    assert '<w:br w:type="page"' not in rendered._element.xml
+    assert result.figure_span == "column"
+    assert result.figures[0]["span"] == "page"
+    assert result.figures[0]["columns"] == 1
+
+
+def test_invalid_and_conflicting_image_span_markers_fail(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    for marker, message in (
+        ("span=wide", "span marker"),
+        ("span=page|columns=single", "cannot be combined"),
+    ):
+        source = tmp_path / f"{marker.replace('|', '-')}.md"
+        source.write_text(f"![Figure 1|{marker}](source.png)\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            assemble_markdown_template(
+                [source], template_path=template, output=tmp_path / "out.docx",
+                metadata_path=metadata,
+            )
+
+
+def test_terminal_headings_share_h1_style_without_list_numbering(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    document = Document(template)
+    heading = document.add_paragraph("Numbered prototype", style="Heading 1")
+    numbering = OxmlElement("w:numPr")
+    numbering.append(OxmlElement("w:ilvl"))
+    numbering.append(OxmlElement("w:numId"))
+    heading._p.get_or_add_pPr().append(numbering)
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# TITLE\n\nA title\n# ACKNOWLEDGMENTS\n\nThanks.\n"
+        "# AUTHOR CONTRIBUTIONS\n\nA. Author contributed.\n"
+        "# CODE AVAILABILITY\n\nCode is available.\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.md"
+    source.write_text("Body \\citep{ref}.\n", encoding="utf-8")
+    bibliography = tmp_path / "refs.json"
+    bibliography.write_text('{"ref": "Author. Journal. 2026."}', encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        bibliography_path=bibliography, line_numbers="on",
+    )
+    rendered = Document(output)
+    terminal_texts = {
+        "ACKNOWLEDGMENTS", "AUTHOR CONTRIBUTIONS", "CODE AVAILABILITY", "REFERENCES"
+    }
+    headings = [p for p in rendered.paragraphs if p.text in terminal_texts]
+    assert {p.text for p in headings} == terminal_texts
+    assert {p.style.style_id for p in headings} == {result.style_map["heading_1"]}
+    assert all(p._p.find(".//" + qn("w:numPr")) is None for p in headings)
+    assert all(p._p.find(".//" + qn("w:outlineLvl")) is not None for p in headings)
+    assert all(section._sectPr.find(qn("w:lnNumType")) is not None for section in rendered.sections)
 
 
 def test_table_fits_explicit_one_column_section(tmp_path: Path) -> None:
