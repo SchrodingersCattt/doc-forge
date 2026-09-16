@@ -74,6 +74,18 @@ class OmmlTests(unittest.TestCase):
         elements = parse_math_omml(r"\frac{1}{2}")
         self.assertEqual(elements[0].tag.rsplit("}", 1)[-1], "f")
 
+    def test_parse_display_pmatrix(self) -> None:
+        from docforge.markdown.omml import parse_math_omml
+
+        elements = parse_math_omml(
+            r"M=\begin{pmatrix}3&0&0\\0&2&2\\0&-2&2\end{pmatrix}"
+        )
+        names = [node.tag.rsplit("}", 1)[-1] for element in elements for node in element.iter()]
+        self.assertIn("d", names)
+        self.assertIn("m", names)
+        self.assertEqual(names.count("mr"), 3)
+        self.assertEqual(names.count("e"), 10)
+
     def test_inline_math_uses_ordinary_runs_and_true_scripts(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"The clock is $t_{\mathrm{chem}}$ and $ClO_4^-$. ")]

@@ -98,6 +98,36 @@ def math_fraction(numerator: list, denominator: list) -> etree._Element:
     return fraction
 
 
+def math_matrix(rows: list[list[list]]) -> etree._Element:
+    """Build an OMML matrix from rows of parsed cell elements."""
+    matrix = etree.Element(f"{{{MATH_CONTEXT}}}m")
+    properties = etree.Element(f"{{{MATH_CONTEXT}}}mPr")
+    column_count = etree.Element(f"{{{MATH_CONTEXT}}}count")
+    column_count.set(f"{{{MATH_CONTEXT}}}val", str(max((len(row) for row in rows), default=1)))
+    properties.append(column_count)
+    matrix.append(properties)
+    for row in rows:
+        matrix_row = etree.Element(f"{{{MATH_CONTEXT}}}mr")
+        for cell in row:
+            matrix_row.append(math_arg("e", cell))
+        matrix.append(matrix_row)
+    return matrix
+
+
+def math_parenthesized(element: etree._Element) -> etree._Element:
+    """Wrap one math element in scalable parentheses."""
+    delimiter = etree.Element(f"{{{MATH_CONTEXT}}}d")
+    properties = etree.Element(f"{{{MATH_CONTEXT}}}dPr")
+    begin = etree.Element(f"{{{MATH_CONTEXT}}}begChr")
+    begin.set(f"{{{MATH_CONTEXT}}}val", "(")
+    end = etree.Element(f"{{{MATH_CONTEXT}}}endChr")
+    end.set(f"{{{MATH_CONTEXT}}}val", ")")
+    properties.extend((begin, end))
+    delimiter.append(properties)
+    delimiter.append(math_arg("e", [element]))
+    return delimiter
+
+
 def math_script(base, subscript=None, superscript=None) -> etree._Element:
     """Build sSub/sSup/sSubSup around a base run or element."""
     if subscript is not None and superscript is not None:
@@ -186,6 +216,20 @@ def parse_math_omml(text: str, normal: bool = False) -> list:
             elements.append(math_script(base, subscript=subscript, superscript=superscript))
             continue
         if char == "\\":
+            matrix_match = re.match(
+                r"\\begin\{pmatrix\}(.*?)\\end\{pmatrix\}",
+                text[index:],
+                flags=re.DOTALL,
+            )
+            if matrix_match:
+                rows = [
+                    [parse_math_omml(cell.strip(), normal=normal) for cell in row.split("&")]
+                    for row in re.split(r"\\\\", matrix_match.group(1))
+                    if row.strip()
+                ]
+                elements.append(math_parenthesized(math_matrix(rows)))
+                index += matrix_match.end()
+                continue
             match = re.match(r"\\(?:[A-Za-z]+|.)", text[index:])
             if not match:
                 index += 1
@@ -255,6 +299,8 @@ __all__ = [
     "math_text_elements",
     "math_arg",
     "math_fraction",
+    "math_matrix",
+    "math_parenthesized",
     "math_script",
     "find_matching_brace",
     "parse_command_arg",
