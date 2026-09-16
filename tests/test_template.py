@@ -130,7 +130,21 @@ def test_structured_bibliography_record_matches_formatter_contract() -> None:
         },
         "example",
     )
-    assert formatted == "Author, One, and Author, Two. A title. *Journal*, **2025**, *12* (3), 101-110. DOI: 10.1000/example"
+    assert formatted == "Author, One, and Author, Two. A title. *Journal*, **2025**, *12* (3), 101-110."
+
+
+def test_structured_bibliography_record_uses_doi_without_publication_locator() -> None:
+    formatted = _format_bibliography_record(
+        {
+            "authors": ["Author, One"],
+            "title": "An online-first title",
+            "year": 2025,
+            "journal": "Journal",
+            "doi": "https://doi.org/10.1000/example",
+        },
+        "example",
+    )
+    assert formatted.endswith("DOI: 10.1000/example")
 
 def test_template_assembly_replaces_placeholders_and_numbers_citations(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"

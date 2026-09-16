@@ -241,7 +241,8 @@ def _format_bibliography_record(record: Mapping[str, object], key: str) -> str:
     if locator:
         journal_part += f", {locator.strip()}"
     parts.append(journal_part + ".")
-    parts.append(f"DOI: {doi.strip().removeprefix('https://doi.org/').removeprefix('doi:').strip()}")
+    if volume is None and issue is None and not locator:
+        parts.append(f"DOI: {doi.strip().removeprefix('https://doi.org/').removeprefix('doi:').strip()}")
     return " ".join(parts)
 
 
