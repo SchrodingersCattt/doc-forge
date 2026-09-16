@@ -1511,14 +1511,18 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_path.read_bytes()))
         for blip in drawing.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
-        # Keep the reference slot width, but derive height from the actual
-        # asset so the image is never stretched or cropped.
+        # Keep the template drawing style, but replace template-specific crop
+        # metadata and size the new asset to the available section width.
+        for source_rect in list(drawing.iter(qn("a:srcRect"))):
+            source_rect.attrib.clear()
         extent = next(iter(drawing.iter(qn("wp:extent"))), None)
         source_extent = next(iter(prototype.image_node.iter(qn("wp:extent"))), None)
         if extent is not None and source_extent is not None:
-            width = int(source_extent.get("cx", "1"))
-            if section_width_twips is not None:
-                width = min(width, section_width_twips * 635)
+            width = (
+                section_width_twips * 635
+                if section_width_twips is not None
+                else int(source_extent.get("cx", "1"))
+            )
             with Image.open(image_path) as image_file:
                 ratio = image_file.height / max(1, image_file.width)
             height = max(1, round(width * ratio))

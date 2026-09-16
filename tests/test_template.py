@@ -301,6 +301,42 @@ def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) 
     verify_template_output(output, expected_sections=4)
 
 
+def test_replacement_figure_drops_template_crop_and_fills_section_width(tmp_path: Path) -> None:
+    template_image = tmp_path / "template.png"
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (200, 80), "white").save(template_image)
+    Image.new("RGB", (400, 300), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, template_image)
+    document = Document(template)
+    drawing = document.inline_shapes[0]._inline
+    source_rect = OxmlElement("a:srcRect")
+    source_rect.set("t", "10000")
+    source_rect.set("b", "5000")
+    blip_fill = drawing.find(".//" + qn("pic:blipFill"))
+    blip_fill.insert(1, source_rect)
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "![Figure 1](source.png)\n\nFigure 1. Replacement.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    rendered = Document(output)
+    shape = rendered.inline_shapes[0]
+    section = rendered.sections[-1]
+    expected_width = section.page_width - section.left_margin - section.right_margin
+    assert shape.width == expected_width
+    assert abs((shape.width / shape.height) - (4 / 3)) < 1e-6
+    source_rects = shape._inline.findall(".//" + qn("a:srcRect"))
+    assert all(not node.attrib for node in source_rects)
+
+
 def test_figure_span_cli_default_and_override() -> None:
     parser = build_parser()
     default = parser.parse_args(["md2docx", "source.md", "-o", "out.docx"])
