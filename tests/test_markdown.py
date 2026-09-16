@@ -90,7 +90,19 @@ class OmmlTests(unittest.TestCase):
             [Block("paragraph", r"$A \rightarrow B$ and $C \longrightarrow D$.")]
         )
         text = document.paragraphs[0].text
-        self.assertEqual(text, "A→B and C⟶D.")
+        self.assertEqual(text, "A → B and C ⟶ D.")
+
+    def test_inline_math_spaces_binary_operators(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"$\tau=t-t_{\mathrm{chem}}$ and $E=-mR$.")]
+        )
+        text = document.paragraphs[0].text
+        self.assertEqual(text, "τ = t – tchem and E = –mR.")
+
+        spaced = render_blocks_to_doc(
+            [Block("paragraph", r"$\tau = t - t_{\mathrm{chem}}$.")]
+        )
+        self.assertEqual(spaced.paragraphs[0].text, "τ = t – tchem.")
 
     def test_standalone_font_override_preserves_inline_formatting(self) -> None:
         document = render_blocks_to_doc(

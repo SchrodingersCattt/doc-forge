@@ -355,15 +355,31 @@ def set_highlight(run, fill: str = "FFF2CC") -> None:
 def append_inline_math(
     paragraph, expression: str, *, bold_default: bool = False, size: float = 11.0
 ) -> None:
-    """Render inline TeX as ordinary Word runs with true script formatting.
+    r"""Render inline TeX as ordinary Word runs with true script formatting.
 
     Inline formulae are intentionally not OMML objects.  Variables retain the
     normal italic convention, ``\mathrm`` text and numerals remain upright,
     and ``^``/``_`` become Word ``w:vertAlign`` run properties.  Standalone
     display formulae use :func:`add_equation` and native OMML instead.
     """
-    for span in tokenize_tex(f"${expression}$"):
-        run = paragraph.add_run(span.text)
+    spans = tokenize_tex(f"${expression}$")
+    binary_operators = {"+", "–", "=", "<", ">", "≤", "≥", "≠", "≈", "∼", "±", "∓", "→", "⟶", "←", "⟵"}
+    for index, span in enumerate(spans):
+        text = span.text
+        if not span.superscript and not span.subscript:
+            text = re.sub(r"\s*(→|⟶|←|⟵|≤|≥|≠|≈|∼|±|∓|=|<|>)\s*", r" \1 ", text)
+            text = re.sub(r"(?<=[A-Za-z0-9)])\s*([+–])\s*(?=[A-Za-z])", r" \1 ", text)
+        if (
+            text in binary_operators
+            and not span.superscript
+            and not span.subscript
+            and index > 0
+            and index + 1 < len(spans)
+            and spans[index - 1].text not in binary_operators
+            and spans[index + 1].text not in binary_operators
+        ):
+            text = f" {text} "
+        run = paragraph.add_run(text)
         run.bold = bold_default or span.bold
         run.italic = span.italic
         run.font.subscript = span.subscript
