@@ -364,21 +364,21 @@ def append_inline_math(
     """
     spans = tokenize_tex(f"${expression}$")
     binary_operators = {"+", "–", "=", "<", ">", "≤", "≥", "≠", "≈", "∼", "±", "∓", "→", "⟶", "←", "⟵"}
+    normalized_text = [span.text for span in spans]
     for index, span in enumerate(spans):
-        text = span.text
+        if span.superscript or span.subscript:
+            continue
+        stripped = span.text.strip()
+        if stripped not in binary_operators or index == 0 or index + 1 >= len(spans):
+            continue
+        normalized_text[index - 1] = normalized_text[index - 1].rstrip()
+        normalized_text[index] = f" {stripped} "
+        normalized_text[index + 1] = normalized_text[index + 1].lstrip()
+    for index, span in enumerate(spans):
+        text = normalized_text[index]
         if not span.superscript and not span.subscript:
             text = re.sub(r"\s*(→|⟶|←|⟵|≤|≥|≠|≈|∼|±|∓|=|<|>)\s*", r" \1 ", text)
             text = re.sub(r"(?<=[A-Za-z0-9)])\s*([+–])\s*(?=[A-Za-z])", r" \1 ", text)
-        if (
-            text in binary_operators
-            and not span.superscript
-            and not span.subscript
-            and index > 0
-            and index + 1 < len(spans)
-            and spans[index - 1].text not in binary_operators
-            and spans[index + 1].text not in binary_operators
-        ):
-            text = f" {text} "
         run = paragraph.add_run(text)
         run.bold = bold_default or span.bold
         run.italic = span.italic
