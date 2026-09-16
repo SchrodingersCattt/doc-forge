@@ -101,11 +101,6 @@ def math_fraction(numerator: list, denominator: list) -> etree._Element:
 def math_matrix(rows: list[list[list]]) -> etree._Element:
     """Build an OMML matrix from rows of parsed cell elements."""
     matrix = etree.Element(f"{{{MATH_CONTEXT}}}m")
-    properties = etree.Element(f"{{{MATH_CONTEXT}}}mPr")
-    column_count = etree.Element(f"{{{MATH_CONTEXT}}}count")
-    column_count.set(f"{{{MATH_CONTEXT}}}val", str(max((len(row) for row in rows), default=1)))
-    properties.append(column_count)
-    matrix.append(properties)
     for row in rows:
         matrix_row = etree.Element(f"{{{MATH_CONTEXT}}}mr")
         for cell in row:

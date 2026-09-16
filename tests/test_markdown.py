@@ -85,6 +85,8 @@ class OmmlTests(unittest.TestCase):
         self.assertIn("m", names)
         self.assertEqual(names.count("mr"), 3)
         self.assertEqual(names.count("e"), 10)
+        self.assertNotIn("mPr", names)
+        self.assertNotIn("count", names)
 
     def test_inline_math_uses_ordinary_runs_and_true_scripts(self) -> None:
         document = render_blocks_to_doc(
