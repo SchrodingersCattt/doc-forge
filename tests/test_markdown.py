@@ -110,6 +110,12 @@ class OmmlTests(unittest.TestCase):
         self.assertEqual(uncertainty.paragraphs[0].text, "61.3 ± 1.1% and tchem = 0.")
         self.assertNotIn("  ", uncertainty.paragraphs[0].text)
 
+        split_math = render_blocks_to_doc(
+            [Block("paragraph", r"61.3 $\pm$ 1.1% and mean $\pm$ S.E.")]
+        )
+        self.assertEqual(split_math.paragraphs[0].text, "61.3 ± 1.1% and mean ± S.E.")
+        self.assertNotIn("  ", split_math.paragraphs[0].text)
+
     def test_standalone_font_override_preserves_inline_formatting(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", "C<sub>36</sub>Fe *d* **bold**")],

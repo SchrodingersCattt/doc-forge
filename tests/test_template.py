@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from docforge.markdown import (
     verify_template_output,
     write_assembly_sidecars,
 )
+from docforge.markdown.template import _word_compatible_image_bytes
 from docforge.output import validate_output_path
 
 
@@ -335,6 +337,16 @@ def test_replacement_figure_drops_template_crop_and_fills_section_width(tmp_path
     assert abs((shape.width / shape.height) - (4 / 3)) < 1e-6
     source_rects = shape._inline.findall(".//" + qn("a:srcRect"))
     assert all(not node.attrib for node in source_rects)
+
+
+def test_word_compatible_image_bytes_normalizes_large_rgba_png(tmp_path: Path) -> None:
+    source = tmp_path / "large-rgba.png"
+    Image.new("RGBA", (5000, 3000), (255, 255, 255, 255)).save(source)
+    payload = _word_compatible_image_bytes(source)
+    with Image.open(BytesIO(payload)) as image:
+        assert image.format == "PNG"
+        assert image.mode == "RGB"
+        assert image.size == (4096, 2458)
 
 
 def test_figure_span_cli_default_and_override() -> None:

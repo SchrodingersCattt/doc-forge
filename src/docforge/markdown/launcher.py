@@ -400,7 +400,10 @@ def add_inline(
     position = 0
     for match in INLINE_TOKEN_RE.finditer(text):
         if match.start() > position:
-            run = paragraph.add_run(text[position : match.start()])
+            segment = text[position : match.start()]
+            if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and segment.startswith(" "):
+                segment = segment.lstrip(" ")
+            run = paragraph.add_run(segment)
             run.bold = bold_default
             set_run_font(run, size=size)
         token = match.group(0)
@@ -438,10 +441,19 @@ def add_inline(
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
         elif token.startswith("$"):
+            before = paragraph.runs[-1] if paragraph.runs else None
+            first_math_run = len(paragraph.runs)
             append_inline_math(paragraph, token[1:-1], bold_default=bold_default, size=size)
+            if before is not None and len(paragraph.runs) > first_math_run:
+                first = paragraph.runs[first_math_run]
+                if before.text.endswith(" ") and first.text.startswith(" "):
+                    before.text = before.text.rstrip(" ")
         position = match.end()
     if position < len(text):
-        run = paragraph.add_run(text[position:])
+        remainder = text[position:]
+        if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and remainder.startswith(" "):
+            remainder = remainder.lstrip(" ")
+        run = paragraph.add_run(remainder)
         run.bold = bold_default
         set_run_font(run, size=size)
 

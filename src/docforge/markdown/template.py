@@ -1492,6 +1492,7 @@ def _clone_figure(
     image_path = Path(image.path)
     if not image_path.is_file():
         raise FileNotFoundError(f"Markdown image does not exist: {image_path}")
+    image_bytes = _word_compatible_image_bytes(image_path)
     if prototype is not None and prototype.image_node is not None:
         paragraph = copy.deepcopy(prototype.image_node)
         properties = paragraph.find(qn("w:pPr"))
@@ -1509,7 +1510,7 @@ def _clone_figure(
         if drawing is None:
             raise ValueError("Figure prototype has no drawing")
         drawing = copy.deepcopy(drawing)
-        relation_id, _ = target.part.get_or_add_image(BytesIO(image_path.read_bytes()))
+        relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in drawing.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
         # Keep the template drawing style, but replace template-specific crop
@@ -1550,7 +1551,7 @@ def _clone_figure(
             width = min(914400 * 6.5, max(914400, available))
             picture.add_run().add_picture(str(image_path), width=width)
         paragraph = copy.deepcopy(picture._p)
-        relation_id, _ = target.part.get_or_add_image(BytesIO(image_path.read_bytes()))
+        relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
@@ -1558,6 +1559,21 @@ def _clone_figure(
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
     _format_caption_runs(cap)
     return [paragraph, cap]
+
+
+def _word_compatible_image_bytes(image_path: Path, *, max_dimension: int = 4096) -> bytes:
+    """Return a conservative RGB PNG payload for reliable Word rendering."""
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        if max(image.size) > max_dimension:
+            scale = max_dimension / max(image.size)
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        payload = BytesIO()
+        image.save(payload, format="PNG", optimize=True)
+        return payload.getvalue()
 
 
 def _section_columns(document: DocumentType, index: int = 1) -> int:
