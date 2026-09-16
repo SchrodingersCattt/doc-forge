@@ -85,6 +85,13 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.text == "4" and run.font.subscript for run in paragraph.runs))
         self.assertTrue(any(run.text == "–" and run.font.superscript for run in paragraph.runs))
 
+    def test_inline_math_preserves_reaction_arrows(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"$A \rightarrow B$ and $C \longrightarrow D$.")]
+        )
+        text = document.paragraphs[0].text
+        self.assertEqual(text, "A→B and C⟶D.")
+
     def test_standalone_font_override_preserves_inline_formatting(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", "C<sub>36</sub>Fe *d* **bold**")],

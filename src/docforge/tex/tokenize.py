@@ -66,6 +66,11 @@ GREEK = {
     r"\arg": "arg",
     r"\min": "min",
     r"\gets": "←",
+    r"\leftarrow": "←",
+    r"\longleftarrow": "⟵",
+    r"\to": "→",
+    r"\rightarrow": "→",
+    r"\longrightarrow": "⟶",
 }
 
 # Commands whose textual content is skipped entirely (kept for compatibility
