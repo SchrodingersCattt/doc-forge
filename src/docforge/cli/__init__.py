@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--body-first-line-chars", type=float, default=None, help="Body paragraph first-line indent in character units")
     md.add_argument("--page-break-before-h1", action="store_true", help="Start each level-one Markdown heading on a new page")
     md.add_argument("--numbering-prefix", default="", help="Prefix for figure, table-caption, and equation numbers (e.g. S for SI)")
-    md.add_argument("--bibliography-scope", choices=("all", "new-only"), default="all", help="Reference entries to render: all used citations or only citations absent from --citation-base")
+    md.add_argument("--bibliography-scope", choices=("auto", "all", "new-only"), default="auto", help="Reference entries to render: auto uses new-only with --citation-base and all otherwise")
     md.add_argument("--omit-metadata-back-matter", action="store_true", help="Omit acknowledgment, author-contribution, and code-availability sections")
     md.add_argument("--no-title", action="store_true", help="Remove level-one Markdown headings; retain the metadata title block")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")

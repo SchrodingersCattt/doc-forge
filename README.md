@@ -120,7 +120,8 @@ For a Supporting Information build, pass the main manifest with
 `--citation-base`: citations present in the main document reuse their numeric
 labels; keys that occur only in SI receive `S1`, `S2`, and so on. The main and SI
 bibliographies therefore share a single ordered JSON source while keeping SI-only
-entries visibly separate.
+entries visibly separate. Citation-base builds render only SI-only bibliography
+entries by default; pass `--bibliography-scope all` to repeat shared entries.
 `--metadata` reads simple level-one Markdown fields (`TITLE`, `AUTHOR`,
 `AFFILIATION`, `Acknowledgement`, and `Code Availability`). Citation tokens
 (`\\cite{key}` and `\\citep{key}`) are converted to numbered references from

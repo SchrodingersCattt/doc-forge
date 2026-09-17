@@ -110,7 +110,7 @@ class AssemblyResult:
     figures: tuple[Mapping[str, object], ...] = ()
     tables: tuple[Mapping[str, object], ...] = ()
     numbering_prefix: str = ""
-    bibliography_scope: str = "all"
+    bibliography_scope: str = "auto"
     include_metadata_back_matter: bool = True
     native_toc: bool = False
     restart_heading_numbering: bool = False
@@ -1749,6 +1749,7 @@ def verify_template_output(
     expected_sections: int | None = None,
     expected_geometry: Sequence[tuple[int, int, int, int, int, int]] | None = None,
     expected_body_columns: int | None = None,
+    expected_reference_labels: Sequence[str] | None = None,
 ) -> dict[str, object]:
     verify_navigation_headings(path)
     verify_image_relationships(path)
@@ -1789,6 +1790,16 @@ def verify_template_output(
         raise RuntimeError("Raw Markdown citation token remains in generated DOCX")
     if "\ue000" in text or "\ue001" in text:
         raise RuntimeError("Unmaterialized citation marker remains in generated DOCX")
+    if expected_reference_labels is not None:
+        paragraphs = [paragraph.text for paragraph in document.paragraphs]
+        if expected_reference_labels and "REFERENCES" not in paragraphs:
+            raise RuntimeError("Generated DOCX is missing the REFERENCES heading")
+        for label in expected_reference_labels:
+            prefix = f"{label}.\t"
+            if sum(paragraph.startswith(prefix) for paragraph in paragraphs) != 1:
+                raise RuntimeError(
+                    f"Generated DOCX must contain exactly one bibliography entry labeled {label}"
+                )
     return {
         "clean_review_state": True,
         "image_relationships": "resolved",
@@ -1823,7 +1834,7 @@ def assemble_markdown_template(
     strip_level_one_headings: bool = False,
     heading_before: float | None = None,
     numbering_prefix: str = "",
-    bibliography_scope: str = "all",
+    bibliography_scope: str = "auto",
     include_metadata_back_matter: bool = True,
     native_toc: bool = False,
     restart_heading_numbering: bool = False,
@@ -1868,8 +1879,15 @@ def assemble_markdown_template(
             raise ValueError(f"{name} must be positive")
     if not re.fullmatch(r"[A-Za-z]*", numbering_prefix):
         raise ValueError("numbering_prefix must contain only ASCII letters")
-    if bibliography_scope not in {"all", "new-only"}:
-        raise ValueError("bibliography_scope must be one of: all, new-only")
+    if bibliography_scope not in {"auto", "all", "new-only"}:
+        raise ValueError("bibliography_scope must be one of: auto, all, new-only")
+    resolved_bibliography_scope = (
+        "new-only" if bibliography_scope == "auto" and citation_base_path else
+        "all" if bibliography_scope == "auto" else
+        bibliography_scope
+    )
+    if resolved_bibliography_scope == "new-only" and citation_base_path is None:
+        raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
     if citation_format not in {"template", "superscript", "bracketed"}:
         raise ValueError("citation_format must be one of: template, superscript, bracketed")
@@ -2140,7 +2158,10 @@ def assemble_markdown_template(
         figure_index += 1
         body_index += 1
 
-    reference_keys = tuple(key for key in used if bibliography_scope == "all" or citation_base is None or key not in citation_base)
+    reference_keys = tuple(
+        key for key in used
+        if resolved_bibliography_scope == "all" or key not in citation_base
+    ) if citation_base is not None else tuple(used)
     if include_metadata_back_matter and _is_filled_metadata(metadata.acknowledgement):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1")))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body")))
@@ -2201,6 +2222,7 @@ def assemble_markdown_template(
         expected_sections=len(section_sources),
         expected_geometry=selected_geometry,
         expected_body_columns=body_columns_after,
+        expected_reference_labels=tuple(str(mapping[key]) for key in reference_keys),
     )
     verification["citation_format"] = "superscript" if citation_superscript else "bracketed"
     verification["citation_count"] = citation_converted
@@ -2231,7 +2253,7 @@ def assemble_markdown_template(
         figures=tuple(figures),
         tables=tuple(tables),
         numbering_prefix=numbering_prefix,
-        bibliography_scope=bibliography_scope,
+        bibliography_scope=resolved_bibliography_scope,
         include_metadata_back_matter=include_metadata_back_matter,
         native_toc=native_toc,
         restart_heading_numbering=restart_heading_numbering,

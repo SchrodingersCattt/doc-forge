@@ -574,8 +574,28 @@ def test_si_reuses_main_citation_numbers_and_prefixes_si_only_references(tmp_pat
     )
     text = "\n".join(paragraph.text for paragraph in Document(si_output).paragraphs)
     assert si_result.citation_map == {"shared": 1, "si_only": "S1"}
+    assert si_result.bibliography_scope == "new-only"
+    assert si_result.reference_keys == ("si_only",)
     assert "\ue000" not in text and "[1,S1]" in text
     assert "S1.\tSI only." in text
+    assert "1.\tShared." not in text
+
+
+def test_new_only_bibliography_requires_citation_base(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    bibliography = tmp_path / "references.json"
+    bibliography.write_text('{"only": "Only. Journal. 2020."}', encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("# Introduction\n\nText \\citep{only}.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="requires citation_base_path"):
+        assemble_markdown_template(
+            [source], template_path=template, output=tmp_path / "output.docx",
+            metadata_path=metadata, bibliography_path=bibliography,
+            bibliography_scope="new-only",
+        )
 
 
 def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tmp_path: Path) -> None:
