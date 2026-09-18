@@ -464,7 +464,8 @@ def test_terminal_headings_share_h1_style_without_list_numbering(tmp_path: Path)
     metadata.write_text(
         "# TITLE\n\nA title\n# ACKNOWLEDGMENTS\n\nThanks.\n"
         "# AUTHOR CONTRIBUTIONS\n\nA. Author contributed.\n"
-        "# CODE AVAILABILITY\n\nCode is available.\n",
+        "# CODE AVAILABILITY\n\nCode is available.\n"
+        "# DATA AND SOFTWARE AVAILABILITY\n\nData and software are available.\n",
         encoding="utf-8",
     )
     source = tmp_path / "source.md"
@@ -478,7 +479,8 @@ def test_terminal_headings_share_h1_style_without_list_numbering(tmp_path: Path)
     )
     rendered = Document(output)
     terminal_texts = {
-        "ACKNOWLEDGMENTS", "AUTHOR CONTRIBUTIONS", "CODE AVAILABILITY", "REFERENCES"
+        "ACKNOWLEDGMENTS", "AUTHOR CONTRIBUTIONS", "CODE AVAILABILITY",
+        "DATA AND SOFTWARE AVAILABILITY", "REFERENCES"
     }
     headings = [p for p in rendered.paragraphs if p.text in terminal_texts]
     assert {p.text for p in headings} == terminal_texts

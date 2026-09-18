@@ -80,6 +80,7 @@ class ManuscriptMetadata:
     acknowledgement: str = ""
     author_contributions: str = ""
     code_availability: str = ""
+    data_software_availability: str = ""
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ def _metadata_key(label: str) -> str | None:
         "corresponding email": "contacts",
         "corresponding emails": "contacts",
         "code availability": "code_availability",
+        "data and software availability": "data_software_availability",
     }.get(label)
 
 
@@ -186,6 +188,7 @@ def parse_metadata(path: Path) -> ManuscriptMetadata:
         acknowledgement=" ".join(raw_values.get("acknowledgement", [])).strip(),
         author_contributions=" ".join(raw_values.get("author_contributions", [])).strip(),
         code_availability=" ".join(raw_values.get("code_availability", [])).strip(),
+        data_software_availability=" ".join(raw_values.get("data_software_availability", [])).strip(),
     )
 
 
@@ -2171,6 +2174,9 @@ def assemble_markdown_template(
     if include_metadata_back_matter and _is_filled_metadata(metadata.code_availability):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
         output_nodes.append(_new_paragraph(template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body")))
+    if include_metadata_back_matter and _is_filled_metadata(metadata.data_software_availability):
+        output_nodes.append(_terminal_heading(template, styles["heading_1"], "DATA AND SOFTWARE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
+        output_nodes.append(_new_paragraph(template, styles["body"], metadata.data_software_availability, prototype=prototypes.paragraphs.get("body")))
     if reference_keys:
         reference_heading = _terminal_heading(
             template,
