@@ -317,15 +317,36 @@ def _citation_plan(
     return tuple(shared + si_only), mapping
 
 
+def _format_citation_labels(labels: Iterable[str | int]) -> str:
+    """Sort and collapse consecutive numeric or SI-prefixed citation labels."""
+    grouped: dict[str, set[int]] = {"": set(), "S": set()}
+    for label in labels:
+        value = str(label)
+        prefix = "S" if value.startswith("S") else ""
+        grouped[prefix].add(int(value.removeprefix("S")))
+
+    ranges: list[str] = []
+    for prefix in ("", "S"):
+        values = sorted(grouped[prefix])
+        start = end = None
+        for value in values + [None]:
+            if start is None:
+                start = end = value
+            elif value is not None and value == end + 1:
+                end = value
+            else:
+                ranges.append(f"{prefix}{start}" if start == end else f"{prefix}{start}–{prefix}{end}")
+                start = end = value
+    return ",".join(ranges)
+
+
 def _replace_citations(text: str, mapping: Mapping[str, str | int], *, superscript: bool = False) -> str:
     def replace(match: re.Match[str]) -> str:
         keys = [key.strip() for key in match.group(1).split(",") if key.strip()]
         missing = [key for key in keys if key not in mapping]
         if missing:
             raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
-        labels = [mapping[key] for key in keys]
-        labels.sort(key=lambda value: (isinstance(value, str), int(str(value).removeprefix("S"))))
-        numbers = ",".join(str(value) for value in labels)
+        numbers = _format_citation_labels(mapping[key] for key in keys)
         return ("\ue000" + numbers + "\ue001") if superscript else "[" + numbers + "]"
 
     pattern = r"\s*" + CITATION_RE.pattern if superscript else CITATION_RE.pattern
@@ -1195,7 +1216,7 @@ def _template_uses_superscript_citations(document: DocumentType) -> bool:
         for run in paragraph.runs:
             value = run.text.strip()
             marker = run._r.find(".//" + qn("w:vertAlign"))
-            if marker is not None and marker.get(qn("w:val")) == "superscript" and re.fullmatch(r"[0-9]+(?:[,-][0-9]+)*", value):
+            if marker is not None and marker.get(qn("w:val")) == "superscript" and re.fullmatch(r"[0-9]+(?:[,–-][0-9]+)*", value):
                 return True
     return False
 
@@ -1203,7 +1224,7 @@ def _template_uses_superscript_citations(document: DocumentType) -> bool:
 def _materialize_superscript_citations(document: DocumentType) -> int:
     """Replace private citation sentinels with template-style superscripts."""
     converted = 0
-    pattern = re.compile(r"(\ue000(?:S?[0-9]+)(?:,(?:S?[0-9]+))*\ue001)")
+    pattern = re.compile(r"(\ue000(?:S?[0-9]+)(?:[–,](?:S?[0-9]+))*\ue001)")
     # Materialize the run list before replacing nodes; mutating a live lxml
     # iterator otherwise skips sibling paragraphs after the first citation.
     for parent in list(document._element.body.iter(qn("w:r"))):

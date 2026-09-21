@@ -21,7 +21,7 @@ from docforge.markdown import (
     verify_template_output,
     write_assembly_sidecars,
 )
-from docforge.markdown.template import _word_compatible_image_bytes
+from docforge.markdown.template import _format_citation_labels, _word_compatible_image_bytes
 from docforge.output import validate_output_path
 
 
@@ -195,6 +195,12 @@ def test_template_assembly_replaces_placeholders_and_numbers_citations(tmp_path:
     assert checksum.exists()
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["rendering"]["figure_span"] == "column"
+
+
+def test_citation_labels_collapse_numeric_and_si_ranges() -> None:
+    assert _format_citation_labels([8, 2, 6, 5, 7]) == "2,5–8"
+    assert _format_citation_labels([22, "S3", 19, 21, "S1", 20, "S2"]) == "19–22,S1–S3"
+    assert _format_citation_labels([5, 5, 6]) == "5–6"
 
 
 def test_unknown_citation_fails_before_writing(tmp_path: Path) -> None:
@@ -518,14 +524,18 @@ def test_template_inherits_superscript_citations_without_private_markers(tmp_pat
     template = tmp_path / "template.docx"
     _template(template)
     document = Document(template)
-    document.add_paragraph().add_run("1").font.superscript = True
+    document.add_paragraph().add_run("1–3").font.superscript = True
     document.save(template)
     metadata = tmp_path / "metadata.md"
     metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
     source = tmp_path / "source.md"
-    source.write_text("# Intro\n\nFirst \\citep{ref}.\n\nSecond \\cite{ref}.\n\nThird \\citep{ref}.\n", encoding="utf-8")
+    source.write_text("# Intro\n\nFirst \\citep{ref1,ref2,ref3}.\n\nSecond \\cite{ref2}.\n\nThird \\citep{ref3}.\n", encoding="utf-8")
     bibliography = tmp_path / "references.json"
-    bibliography.write_text('{"ref": "Author. Journal. 2026."}', encoding="utf-8")
+    bibliography.write_text(
+        '{"ref1": "Author 1. Journal. 2024.", "ref2": "Author 2. Journal. 2025.", '
+        '"ref3": "Author 3. Journal. 2026."}',
+        encoding="utf-8",
+    )
     output = tmp_path / "output.docx"
     result = assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata, bibliography_path=bibliography)
     document = Document(output)
@@ -534,9 +544,9 @@ def test_template_inherits_superscript_citations_without_private_markers(tmp_pat
     assert result.verification["citation_count"] == 3
     assert sum(run.font.superscript is True for paragraph in document.paragraphs for run in paragraph.runs) == 3
     first = next(p for p in document.paragraphs if p.text.startswith("First"))
-    assert first.text == "First1."
+    assert first.text == "First1–3."
     assert first.runs[0].text == "First"
-    assert first.runs[1].text == "1" and first.runs[1].font.superscript is True
+    assert first.runs[1].text == "1–3" and first.runs[1].font.superscript is True
     assert all(
         (section._sectPr.find(qn("w:type")) is None
          or section._sectPr.find(qn("w:type")).get(qn("w:val")) == "continuous")
