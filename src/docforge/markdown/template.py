@@ -901,6 +901,15 @@ def _set_body_first_line_indent(element, characters: float | None) -> None:
     indentation.set(qn("w:firstLineChars"), str(max(0, round(characters * 100))))
 
 
+def _is_post_equation_continuation(block: Block, previous: Block | None) -> bool:
+    """Return whether prose grammatically continues the preceding equation."""
+    return (
+        previous is not None
+        and previous.kind == "equation"
+        and re.match(r"^\s*(?:where|with)\b", block.text, re.IGNORECASE) is not None
+    )
+
+
 def _remap_styles(element, source: DocumentType, target: DocumentType) -> None:
     source_styles = {style.style_id: style for style in source.styles}
     target_styles = {style.name: style for style in target.styles}
@@ -2050,6 +2059,7 @@ def assemble_markdown_template(
         # _clone_rendered_block computes table widths from the document's
         # active section; the selected section is normally the same geometry,
         # and the explicit fit below handles differing templates.
+        previous_block: Block | None = None
         for block in text_blocks:
             if block.kind == "heading" and block.level == 1:
                 heading_counters = {2: 0, 3: 0}
@@ -2076,8 +2086,9 @@ def assemble_markdown_template(
                     for node in nodes:
                         _number_heading(node, heading_counters[block.level])
             elif block.kind == "paragraph":
+                indent = 0 if _is_post_equation_continuation(block, previous_block) else body_first_line_chars
                 for node in nodes:
-                    _set_body_first_line_indent(node, body_first_line_chars)
+                    _set_body_first_line_indent(node, indent)
             for node in nodes:
                 _fit_tables(node, _section_width_twips(section))
             output_nodes.extend(nodes)
@@ -2087,6 +2098,7 @@ def assemble_markdown_template(
                 label = f"Table {numbering_prefix}{table_index}" if numbering_prefix else f"Table {table_index}"
                 tables.append({"number": table_index, "label": label, "caption": block.text})
                 table_index += 1
+            previous_block = block
         if image is None:
             break
         image_options = dict(image.options)

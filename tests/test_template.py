@@ -684,6 +684,46 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert result.page_break_before_h1 is True
 
 
+def test_post_equation_continuations_are_flush_left(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "ordinary lowercase prose remains indented.\n\n"
+        "where prose without an equation remains indented.\n\n"
+        "$$\na=b\n$$\n\n"
+        "where $a$ is defined.\n\n"
+        "$$\nc=d\n$$\n\n"
+        "with the linear output defined next.\n\n"
+        "$$\ne=f\n$$\n\n"
+        "regular prose after an equation remains indented.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        body_first_line_chars=2,
+    )
+    document = Document(output)
+    expected = {
+        "ordinary lowercase prose remains indented.": "200",
+        "where prose without an equation remains indented.": "200",
+        "where a is defined.": "0",
+        "with the linear output defined next.": "0",
+        "regular prose after an equation remains indented.": "200",
+    }
+    for text, first_line_chars in expected.items():
+        paragraph = next(p for p in document.paragraphs if p.text == text)
+        indentation = paragraph._p.find(".//" + qn("w:ind"))
+        assert indentation is not None
+        assert indentation.get(qn("w:firstLineChars")) == first_line_chars
+
+
 def test_template_body_and_caption_typography(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     Image.new("RGB", (80, 40), "white").save(source_image)
