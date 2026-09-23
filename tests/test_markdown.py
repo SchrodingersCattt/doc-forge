@@ -194,7 +194,9 @@ M_{i,\ell} &= \sqrt{\frac14+\sum_{j\in\mathcal N_i}\chi_{ij,\ell}^2},\\
         )
         xml = document._element.xml
         self.assertEqual(xml.count("<m:oMathPara>"), 1)
-        self.assertIn("<m:m>", xml)
+        # Pandoc 2.9 emits ``m:m`` while 3.9 emits an equivalent ``m:eqArr``
+        # wrapper for aligned rows.
+        self.assertTrue("<m:m>" in xml or "<m:eqArr>" in xml)
         self.assertIn("<m:rad>", xml)
         self.assertIn("<m:f>", xml)
         self.assertIn("<m:nary>", xml)
