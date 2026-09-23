@@ -21,7 +21,7 @@ from docx.shared import Inches, Pt
 from .bib import CitationResolver, parse_bib
 from ..output import validate_output_path
 from .tokenize import TableCell, spans_to_plain, tokenize_tex
-from ..markdown.omml import normalize_math_source, parse_math_omml
+from ..math import latex_to_omml
 
 FONT_HEADING = "Arial"
 FONT_BODY = "Times New Roman"
@@ -194,7 +194,7 @@ def _convert_text(
     def flush_math() -> None:
         nonlocal math_buffer, in_math_display
         if math_buffer:
-            _add_equation(doc, " ".join(math_buffer))
+            _add_equation(doc, "\n".join(math_buffer))
             math_buffer = []
             in_math_display = False
 
@@ -310,12 +310,7 @@ def _add_paragraph(doc: Document, text: str, *, bold: bool = False, italic: bool
 def _add_equation(doc: Document, text: str) -> None:
     paragraph = doc.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    math_para = OxmlElement("m:oMathPara")
-    math = OxmlElement("m:oMath")
-    for element in parse_math_omml(normalize_math_source(text)):
-        math.append(element)
-    math_para.append(math)
-    paragraph._p.append(math_para)
+    paragraph._p.append(latex_to_omml(text))
 
 
 def _add_image(doc: Document, rel_path: str, fig_dir: Path | None) -> None:

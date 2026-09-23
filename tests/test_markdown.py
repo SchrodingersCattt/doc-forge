@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+from lxml import etree
 
 from docforge.markdown.blocks import Block
 from docforge.markdown.launcher import normalize_typography, parse_markdown, render_blocks_to_doc
@@ -147,13 +148,76 @@ class OmmlTests(unittest.TestCase):
             [Block("equation", r"E = mc^2"), Block("equation", r"a = b")]
         )
         xml = document._element.xml
-        self.assertEqual(xml.count("<m:oMathPara"), 2)
+        self.assertEqual(xml.count("<m:oMathPara>"), 2)
         self.assertIn("(1)", xml)
         self.assertIn("(2)", xml)
         self.assertEqual(
             [run.text for paragraph in document.paragraphs for run in paragraph.runs if run.text],
             ["\t", "(1)", "\t", "(2)"],
         )
+
+    def test_display_equation_source_preserves_authored_lines(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text(
+                "$$\n\\begin{aligned}\na &= b,\\\\\nc &= d.\n\\end{aligned}\n$$\n",
+                encoding="utf-8",
+            )
+            blocks = parse_markdown(path)
+        self.assertEqual(
+            blocks[0].text,
+            "\\begin{aligned}\na &= b,\\\\\nc &= d.\n\\end{aligned}",
+        )
+
+    def test_unclosed_and_empty_display_equations_fail(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("$$\na=b\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"Unclosed display equation.*:1"):
+                parse_markdown(path)
+            path.write_text("$$\n\n$$\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"Empty display equation.*:1"):
+                parse_markdown(path)
+
+    def test_pandoc_math_backend_emits_native_omml_structures(self) -> None:
+        document = render_blocks_to_doc(
+            [
+                Block(
+                    "equation",
+                    r"""\begin{aligned}
+M_{i,\ell} &= \sqrt{\frac14+\sum_{j\in\mathcal N_i}\chi_{ij,\ell}^2},\\
+\mathbf h^{(\tau)} &= \mathbf v^{(\tau)}\odot\mathrm{SiLU}\bigl(\mathbf g^{(\tau)}\bigr),\\
+\Pi_{i,\eta\kappa} &= \left\lVert\mathbf Q_\eta\mathbf v_\kappa\right\rVert^2.
+\end{aligned}""",
+                )
+            ]
+        )
+        xml = document._element.xml
+        self.assertEqual(xml.count("<m:oMathPara>"), 1)
+        self.assertIn("<m:m>", xml)
+        self.assertIn("<m:rad>", xml)
+        self.assertIn("<m:f>", xml)
+        self.assertIn("<m:nary>", xml)
+        self.assertIn("<m:d>", xml)
+        self.assertIn("<m:sty m:val=\"b\"", xml)
+        root = etree.fromstring(document._element.xml.encode("utf-8"))
+        rendered_math = "".join(
+            root.xpath(
+                "//m:oMathPara//m:t/text()",
+                namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"},
+            )
+        )
+        for leaked in ("mathcal", "mathbf", "left", "right", "lVert", "rVert"):
+            self.assertNotIn(leaked, rendered_math)
+        self.assertIn("(1)", xml)
+
+    def test_math_text_may_contain_command_like_words(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("equation", r"x_{\mathrm{left}}=\operatorname{sqrt}(y)")]
+        )
+        xml = document._element.xml
+        self.assertIn("left", xml)
+        self.assertIn("sqrt", xml)
 
     def test_standalone_heading_text_and_style_are_black(self) -> None:
         document = render_blocks_to_doc(

@@ -30,9 +30,10 @@ pip install -e ".[tex]"     # + numpy for TeX rendering
 
 Python 3.10+.
 
-The `docx2md` and `docx2tex` commands require the external `pandoc` command
-to be installed and available on `PATH`. docforge does not install, discover,
-or replace Pandoc.
+The `md2docx` and `tex2docx` commands require Pandoc 2.9.2.1 to compile
+display mathematics into native Word OMML. The `docx2md` and `docx2tex`
+commands also require the external `pandoc` command. Pandoc must be installed
+and available on `PATH`; docforge never downloads or replaces it at runtime.
 
 ## CLI
 

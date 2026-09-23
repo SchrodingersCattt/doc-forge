@@ -195,12 +195,17 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         if stripped == "$$":
             flush_paragraph()
             equation: list[str] = []
+            opening_line = i + 1
             i += 1
             while i < len(lines) and lines[i].strip() != "$$":
-                equation.append(lines[i].strip())
+                equation.append(lines[i])
                 i += 1
-            i += 1 if i < len(lines) else 0
-            blocks.append(Block("equation", " ".join(equation)))
+            if i >= len(lines):
+                raise ValueError(f"Unclosed display equation in {path}:{opening_line}")
+            if not any(line.strip() for line in equation):
+                raise ValueError(f"Empty display equation in {path}:{opening_line}")
+            i += 1
+            blocks.append(Block("equation", "\n".join(equation).strip()))
             continue
         if is_table_start(lines, i):
             flush_paragraph()
@@ -532,17 +537,12 @@ def add_equation(
     number: int | None = None,
     number_prefix: str = "",
 ) -> None:
-    from .omml import normalize_math_source, parse_math_omml
+    from ..math import latex_to_omml
 
     paragraph = doc.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_paragraph_spacing(paragraph, before=5, after=5, line=1.0)
-    math_paragraph = OxmlElement("m:oMathPara")
-    math = OxmlElement("m:oMath")
-    for element in parse_math_omml(normalize_math_source(text)):
-        math.append(element)
-    math_paragraph.append(math)
-    paragraph._p.append(math_paragraph)
+    paragraph._p.append(latex_to_omml(text))
     if number is not None:
         # A right tab keeps the number at the edge of the receiving column;
         # template assembly retargets this tab to the actual column width.
