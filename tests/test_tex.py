@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex
 from docforge.tex.bib import CitationResolver, parse_bib
@@ -84,14 +85,12 @@ class TokenizeTests(unittest.TestCase):
 
 class BibTests(unittest.TestCase):
     def test_parse_bib(self) -> None:
-        path = Path("ref.bib")
-        try:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "ref.bib"
             path.write_text(BIB_TEXT, encoding="utf-8")
             entries = parse_bib(path)
             self.assertIn("author2020", entries)
             self.assertEqual(entries["author2020"]["year"], "2020")
-        finally:
-            path.unlink(missing_ok=True)
 
     def test_citation_resolver_order(self) -> None:
         resolver = CitationResolver({})
