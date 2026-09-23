@@ -20,6 +20,7 @@ MATH_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NAMESPACES = {"m": MATH_NAMESPACE, "w": WORD_NAMESPACE}
 PANDOC_VERSION = "2.9.2.1"
+SUPPORTED_PANDOC_VERSIONS = {"2.9.2.1", "3.9.0.1"}
 _NAMED_OPERATORS = ("clip", "tanh")
 
 
@@ -54,9 +55,9 @@ def _pandoc_version() -> str:
     if not match:
         raise MathConversionError(f"could not determine pandoc version from: {first_line!r}")
     version = match.group(1)
-    if version != PANDOC_VERSION:
+    if version not in SUPPORTED_PANDOC_VERSIONS:
         raise MathConversionError(
-            f"docforge requires pandoc {PANDOC_VERSION} for reproducible OMML; found {version}"
+            f"docforge requires one of {sorted(SUPPORTED_PANDOC_VERSIONS)} for reproducible OMML; found {version}"
         )
     return version
 
