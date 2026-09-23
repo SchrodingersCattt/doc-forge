@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     tex.add_argument("main", type=Path, help="main.tex path")
     tex.add_argument("--si", type=Path, help="si.tex path")
     tex.add_argument("--bib", type=Path, help="ref.bib path")
+    tex.add_argument("--target", choices=("main", "si"), default="main", help="TeX source to render; the other source is used for cross-references")
     tex.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
     tex.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
@@ -280,17 +281,33 @@ def _cmd_docx2md(args: argparse.Namespace) -> int:
 
 
 def _cmd_tex2docx(args: argparse.Namespace) -> int:
-    from ..tex import convert_files
+    from ..tex import build_validated_docx, convert_files
     from ..output import validate_output_path
 
     validate_output_path(args.output)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
-    convert_files(
-        args.main,
-        si_path=args.si,
-        bib_path=args.bib,
-        output=args.output,
+    source = args.main if args.target == "main" else args.si
+    if source is None:
+        raise ValueError("--target si requires --si")
+
+    def build(path: Path) -> None:
+        convert_files(
+            args.main,
+            si_path=args.si,
+            bib_path=args.bib,
+            output=path,
+            target=args.target,
+            citation_prefix="S" if args.target == "si" else "",
+            float_prefix="S" if args.target == "si" else "",
+        )
+
+    build_validated_docx(
+        args.output,
+        source,
+        build,
+        atomic=True,
+        auxiliary_tex_path=args.si if args.target == "main" else args.main,
     )
     print(args.output)
     return 0
