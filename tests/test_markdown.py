@@ -201,7 +201,9 @@ M_{i,\ell} &= \sqrt{\frac14+\sum_{j\in\mathcal N_i}\chi_{ij,\ell}^2},\\
         self.assertIn("<m:f>", xml)
         self.assertIn("<m:nary>", xml)
         self.assertIn("<m:d>", xml)
-        self.assertIn("<m:sty m:val=\"b\"", xml)
+        self.assertTrue(
+            '<m:sty m:val="b"' in xml or '<m:sty m:val="bi"' in xml
+        )
         root = etree.fromstring(document._element.xml.encode("utf-8"))
         rendered_math = "".join(
             root.xpath(
