@@ -149,12 +149,11 @@ class OmmlTests(unittest.TestCase):
         )
         xml = document._element.xml
         self.assertEqual(xml.count("<m:oMathPara>"), 2)
-        self.assertIn("(1)", xml)
-        self.assertIn("(2)", xml)
-        self.assertEqual(
-            [run.text for paragraph in document.paragraphs for run in paragraph.runs if run.text],
-            ["\t", "(1)", "\t", "(2)"],
-        )
+        self.assertEqual(len(document.tables), 2)
+        self.assertEqual([table.cell(0, 2).text for table in document.tables], ["(1)", "(2)"])
+        for table in document.tables:
+            self.assertIn("oMathPara", table.cell(0, 1)._tc.xml)
+            self.assertNotIn("w:tab", table._tbl.xml)
 
     def test_display_equation_source_preserves_authored_lines(self) -> None:
         with TemporaryDirectory() as directory:

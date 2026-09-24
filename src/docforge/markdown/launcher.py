@@ -20,7 +20,8 @@ from typing import Iterable
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -540,18 +541,42 @@ def add_equation(
 ) -> None:
     from ..math import latex_to_omml
 
-    paragraph = doc.add_paragraph()
+    if number is None:
+        paragraph = doc.add_paragraph()
+    else:
+        table = doc.add_table(rows=1, cols=3)
+        table.autofit = False
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        widths = (Inches(0.75), Inches(5), Inches(0.75))
+        for column, cell, width in zip(table.columns, table.rows[0].cells, widths):
+            column.width = width
+            cell.width = width
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        properties = table._tbl.tblPr
+        borders = OxmlElement("w:tblBorders")
+        for side in ("top", "bottom", "left", "right", "insideH", "insideV"):
+            border = OxmlElement(f"w:{side}")
+            border.set(qn("w:val"), "nil")
+            borders.append(border)
+        properties.append(borders)
+        cell_margins = OxmlElement("w:tblCellMar")
+        for side in ("top", "bottom", "left", "right"):
+            margin = OxmlElement(f"w:{side}")
+            margin.set(qn("w:w"), "0")
+            margin.set(qn("w:type"), "dxa")
+            cell_margins.append(margin)
+        properties.append(cell_margins)
+        paragraph = table.cell(0, 1).paragraphs[0]
+        marker = table.cell(0, 2).paragraphs[0]
+        marker.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        marker.paragraph_format.first_line_indent = 0
+        set_paragraph_spacing(marker, before=5, after=5, line=1.0)
+        run = marker.add_run(f"({number_prefix}{number})")
+        set_run_font(run, size=11.0)
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.first_line_indent = 0
     set_paragraph_spacing(paragraph, before=5, after=5, line=1.0)
     paragraph._p.append(latex_to_omml(text))
-    if number is not None:
-        # A right tab keeps the number at the edge of the receiving column;
-        # template assembly retargets this tab to the actual column width.
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
-        tab = paragraph.add_run("\t")
-        set_run_font(tab, size=11.0)
-        marker = paragraph.add_run(f"({number_prefix}{number})")
-        set_run_font(marker, size=11.0)
 
 
 def add_table_caption(

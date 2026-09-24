@@ -8,6 +8,7 @@ import pytest
 from docx import Document
 from docx.enum.section import WD_SECTION_START
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from PIL import Image
@@ -610,7 +611,8 @@ def test_new_only_bibliography_requires_citation_base(tmp_path: Path) -> None:
         )
 
 
-def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("columns", ["one", "two"])
+def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tmp_path: Path, columns: str) -> None:
     template = tmp_path / "template.docx"
     _template(template)
     metadata = tmp_path / "metadata.md"
@@ -622,16 +624,24 @@ def test_template_assembly_preserves_inline_runs_and_numbers_display_equation(tm
         encoding="utf-8",
     )
     output = tmp_path / "output.docx"
-    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata, columns=columns)
     document = Document(output)
     inline = next(p for p in document.paragraphs if "Inline" in p.text)
-    equation = next(p for p in document.paragraphs if "(1)" in p.text)
+    equation = next(table for table in document.tables if table.cell(0, 2).text == "(1)")
     assert "oMath" not in inline._p.xml
     assert any(run.text == "chem" and run.font.subscript for run in inline.runs)
-    assert "oMathPara" in equation._p.xml
-    assert "(1)" in equation.text
-    tab = equation._p.find(".//" + qn("w:tab"))
-    assert tab is not None and int(tab.get(qn("w:pos"))) > 0
+    assert "oMathPara" in equation.cell(0, 1)._tc.xml
+    assert equation.cell(0, 1).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert equation.cell(0, 2).paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    grid_widths = [int(column.get(qn("w:w"))) for column in equation._tbl.tblGrid]
+    section = document.sections[1]
+    section_columns = section._sectPr.find(qn("w:cols"))
+    count = int(section_columns.get(qn("w:num"), "1"))
+    gap = int(section_columns.get(qn("w:space"), "0")) if count > 1 else 0
+    available = section.page_width.twips - section.left_margin.twips - section.right_margin.twips
+    assert sum(grid_widths) == (available - gap * (count - 1)) // count
+    assert abs(grid_widths[0] - grid_widths[2]) <= 1
+    assert equation._tbl.tblPr.find(qn("w:tblBorders") + "/" + qn("w:right")).get(qn("w:val")) == "nil"
 
 
 def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
@@ -973,7 +983,7 @@ def test_si_numbering_prefixes_figures_tables_and_equations(tmp_path: Path) -> N
     text = "\n".join(paragraph.text for paragraph in document.paragraphs)
     assert "Figure S1." in text
     assert "Table S1." in text
-    assert "(S1)" in text
+    assert any(table.cell(0, 2).text == "(S1)" for table in document.tables if len(table.columns) == 3)
     assert result.figures[0]["label"] == "Figure S1"
     assert result.tables[0]["label"] == "Table S1"
     assert result.numbering_prefix == "S"
@@ -984,5 +994,5 @@ def test_main_numbering_prefix_remains_numeric_by_default(tmp_path: Path) -> Non
     source.write_text("$$\na = b\n$$\n", encoding="utf-8")
     from docforge.markdown import parse_markdown, render_blocks_to_doc
     document = render_blocks_to_doc(parse_markdown(source))
-    assert "(1)" in "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert document.tables[0].cell(0, 2).text == "(1)"
     assert "(S1)" not in document._element.xml

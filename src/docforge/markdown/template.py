@@ -1019,13 +1019,6 @@ def _fit_tables(element, width_twips: int) -> None:
                         ppr.append(OxmlElement("w:keepNext"))
 
 
-def _fit_equation_tabs(element, width_twips: int) -> None:
-    """Place generated right-aligned equation numbers at the active column edge."""
-    for tab in element.iter(qn("w:tab")):
-        if tab.get(qn("w:val")) == "right":
-            tab.set(qn("w:pos"), str(max(1, width_twips)))
-
-
 def _clone_body(blocks: Iterable[Block], target: DocumentType, styles: Mapping[str, str]) -> list:
     source = render_blocks_to_doc(blocks)
     result: list = []
@@ -1478,16 +1471,7 @@ def _clone_rendered_block(
             _remap_styles(clone, generated, target)
             _fit_tables(clone, width)
             if block.kind == "equation":
-                properties = clone.find(qn("w:pPr"))
-                if properties is None:
-                    properties = OxmlElement("w:pPr")
-                    clone.insert(0, properties)
-                style = properties.find(qn("w:pStyle"))
-                if style is None:
-                    style = OxmlElement("w:pStyle")
-                    properties.insert(0, style)
-                style.set(qn("w:val"), styles["body"])
-                _fit_equation_tabs(clone, width)
+                _add_body_style(clone, styles["body"])
             if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet"}:
                 properties = clone.find(qn("w:pPr"))
                 if properties is None:
