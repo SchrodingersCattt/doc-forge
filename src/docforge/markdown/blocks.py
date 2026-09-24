@@ -44,7 +44,7 @@ class Block:
 class SectionSource:
     """A named Markdown section with an ordering slot.
 
-    Used by template-driven workflows (e.g. NSFC proposal bodies) that must
+    Used by template-driven workflows that must
     rebuild the report body from a fixed set of Markdown files while keeping
     the official cover, tables, attachments, and commitment pages intact.
     """

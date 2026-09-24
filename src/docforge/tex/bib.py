@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from .tokenize import plain_tex
+from ..bibliography import CitationResolver as SharedCitationResolver
 
 def parse_bib(path: Path) -> dict[str, dict]:
     """Parse a BibTeX file into {key: field-dict} (fields lower-cased)."""
@@ -130,6 +131,11 @@ class CitationResolver:
 
     def citation_numbers(self) -> dict[str, int]:
         return dict(self._key2num)
+
+
+# The shared resolver is the implementation source.  Keep this assignment
+# after the legacy compatibility class so old imports retain the same name.
+CitationResolver = SharedCitationResolver
 
 
 def _citation_sort_key(label: str) -> tuple[int, int, str]:

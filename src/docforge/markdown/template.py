@@ -26,6 +26,7 @@ from docx.oxml.ns import qn
 from lxml import etree
 from PIL import Image
 
+from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .blocks import Block
 from ..output import validate_output_path
 from .launcher import (
@@ -53,6 +54,7 @@ __all__ = [
     "sha256_file",
     "verify_template_output",
     "write_assembly_sidecars",
+    "CitationResolver",
 ]
 
 CITATION_RE = re.compile(r"\\citep?\{([^{}]+)\}")
@@ -112,6 +114,8 @@ class AssemblyResult:
     tables: tuple[Mapping[str, object], ...] = ()
     numbering_prefix: str = ""
     bibliography_scope: str = "auto"
+    citation_numbering: str = "first-citation"
+    bibliography_profile: str = "markdown"
     include_metadata_back_matter: bool = True
     native_toc: bool = False
     restart_heading_numbering: bool = False
@@ -198,76 +202,12 @@ def _is_filled_metadata(value: str) -> bool:
 
 
 def _format_bibliography_record(record: Mapping[str, object], key: str) -> str:
-    required = {"authors", "year", "journal", "doi"}
-    missing = sorted(required - set(record))
-    if missing:
-        raise ValueError(f"Bibliography record {key!r} is missing: {', '.join(missing)}")
-    authors = record["authors"]
-    if not isinstance(authors, list) or not authors or not all(isinstance(item, str) and item.strip() for item in authors):
-        raise ValueError(f"Bibliography record {key!r} authors must be a non-empty string array")
-    year = record["year"]
-    if not isinstance(year, int) or isinstance(year, bool) or year < 0:
-        raise ValueError(f"Bibliography record {key!r} year must be a non-negative integer")
-    journal = record["journal"]
-    doi = record["doi"]
-    if not isinstance(journal, str) or not journal.strip():
-        raise ValueError(f"Bibliography record {key!r} journal must be a non-empty string")
-    if not isinstance(doi, str) or not doi.strip():
-        raise ValueError(f"Bibliography record {key!r} doi must be a non-empty string")
-    author_text = ", ".join(item.strip() for item in authors[:-1])
-    if author_text:
-        author_text += ", and " + authors[-1].strip()
-    else:
-        author_text = authors[0].strip()
-    parts = [f"{author_text}."]
-    title = record.get("title")
-    if title is not None:
-        if not isinstance(title, str) or not title.strip():
-            raise ValueError(f"Bibliography record {key!r} title must be a non-empty string")
-        parts.append(title.strip() + ".")
-    volume = record.get("volume")
-    issue = record.get("issue")
-    locator = record.get("locator")
-    if volume is not None and not isinstance(volume, (str, int)):
-        raise ValueError(f"Bibliography record {key!r} volume must be a string or integer")
-    if issue is not None and not isinstance(issue, (str, int)):
-        raise ValueError(f"Bibliography record {key!r} issue must be a string or integer")
-    if locator is not None and not isinstance(locator, str):
-        raise ValueError(f"Bibliography record {key!r} locator must be a string")
-    journal_part = f"*{journal.strip()}*"
-    if isinstance(year, int):
-        journal_part += f", **{year}**"
-    if volume is not None:
-        journal_part += f", *{str(volume).strip()}*"
-    if issue is not None:
-        journal_part += f" ({str(issue).strip()})"
-    if locator:
-        journal_part += f", {locator.strip()}"
-    parts.append(journal_part + ".")
-    if volume is None and issue is None and not locator:
-        parts.append(f"DOI: {doi.strip().removeprefix('https://doi.org/').removeprefix('doi:').strip()}")
-    return " ".join(parts)
+    entry = BibliographyEntry.from_mapping(key, record, source_format="json")
+    return format_entry(entry, profile="markdown", label=key)
 
 
 def load_bibliography(path: Path) -> dict[str, str]:
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"Bibliography must be a JSON object: {path}")
-    result: dict[str, str] = {}
-    for key, value in payload.items():
-        if str(key).startswith("_"):
-            continue
-        if not isinstance(key, str):
-            raise ValueError(f"Bibliography entry key must be a string: {key!r}")
-        if isinstance(value, str):
-            if not value.strip():
-                raise ValueError(f"Bibliography entry must be non-empty: {key!r}")
-            result[key] = value.strip()
-        elif isinstance(value, dict):
-            result[key] = _format_bibliography_record(value, key)
-        else:
-            raise ValueError(f"Bibliography entry must be a string or object: {key!r}")
-    return result
+    return {key: format_entry(entry, profile="markdown", label=key) for key, entry in load_json(path).items()}
 
 
 def _block_texts(block: Block) -> Iterable[str]:
@@ -304,17 +244,15 @@ def _load_citation_base(path: Path) -> dict[str, int]:
 
 
 def _citation_plan(
-    cited: Sequence[str], bibliography: Mapping[str, str], base: Mapping[str, int] | None
+    cited: Sequence[str], bibliography: Mapping[str, str | BibliographyEntry], base: Mapping[str, int] | None,
+    *, numbering: str = "first-citation"
 ) -> tuple[tuple[str, ...], dict[str, str | int]]:
-    """Reuse main numeric labels in SI and prefix SI-only labels with S."""
-    if base is None:
-        used = tuple(cited)
-        return used, {key: index for index, key in enumerate(used, start=1)}
-    shared = [key for key in cited if key in base]
-    si_only = [key for key in cited if key not in base]
-    mapping: dict[str, str | int] = {key: base[key] for key in shared}
-    mapping.update({key: f"S{index}" for index, key in enumerate(si_only, start=1)})
-    return tuple(shared + si_only), mapping
+    entries = {
+        key: value if isinstance(value, BibliographyEntry) else BibliographyEntry.from_mapping(key, value)
+        for key, value in bibliography.items()
+    }
+    resolver = CitationResolver(entries, numbering=numbering, strict=True)
+    return resolver.plan(cited, inherited_numbers=base, numbering=numbering)
 
 
 def _format_citation_labels(labels: Iterable[str | int]) -> str:
@@ -1852,6 +1790,8 @@ def assemble_markdown_template(
     heading_before: float | None = None,
     numbering_prefix: str = "",
     bibliography_scope: str = "auto",
+    citation_numbering: str = "first-citation",
+    bibliography_profile: str = "markdown",
     include_metadata_back_matter: bool = True,
     native_toc: bool = False,
     restart_heading_numbering: bool = False,
@@ -1898,6 +1838,10 @@ def assemble_markdown_template(
         raise ValueError("numbering_prefix must contain only ASCII letters")
     if bibliography_scope not in {"auto", "all", "new-only"}:
         raise ValueError("bibliography_scope must be one of: auto, all, new-only")
+    if citation_numbering not in {"first-citation", "source-order"}:
+        raise ValueError("citation_numbering must be one of: first-citation, source-order")
+    if bibliography_profile not in {"markdown", "plain"}:
+        raise ValueError("bibliography_profile must be one of: markdown, plain")
     resolved_bibliography_scope = (
         "new-only" if bibliography_scope == "auto" and citation_base_path else
         "all" if bibliography_scope == "auto" else
@@ -1919,13 +1863,19 @@ def assemble_markdown_template(
     )
     if skip_images:
         blocks = tuple(block for block in blocks if block.kind != "image")
-    bibliography = load_bibliography(bibliography_path) if bibliography_path else {}
+    bibliography_entries = load_json(bibliography_path) if bibliography_path else {}
+    bibliography = {
+        key: format_entry(entry, profile=bibliography_profile, label=key)
+        for key, entry in bibliography_entries.items()
+    }
     cited = _citation_keys(blocks)
     missing = sorted(set(cited) - set(bibliography))
     if missing:
         raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
     citation_base = _load_citation_base(citation_base_path) if citation_base_path else None
-    used, mapping = _citation_plan(cited, bibliography, citation_base)
+    used, mapping = _citation_plan(
+        cited, bibliography_entries, citation_base, numbering=citation_numbering
+    )
     rendered = _replace_block_citations(blocks, mapping, superscript=citation_superscript)
     abstract, body_blocks = _extract_abstract(rendered)
     if strip_level_one_headings:
@@ -1945,8 +1895,8 @@ def assemble_markdown_template(
     regions = _template_regions(template)
     prototypes = _template_prototypes(template, styles, regions)
     # Use the actual paragraph style carried by the reference body prototype;
-    # MolCrysKit's body paragraphs are ``Normal`` while its semantic discovery
-    # role may resolve to a custom style in another template.
+    # A supplied template may carry body paragraphs as ``Normal`` while its
+    # semantic discovery role resolves to a custom style.
     body_prototype = prototypes.paragraphs.get("body")
     if body_prototype is not None:
         body_ppr = body_prototype.find(qn("w:pPr"))
@@ -2009,7 +1959,7 @@ def assemble_markdown_template(
         front.append(_new_metadata_paragraph(template, styles["affiliations"], contact, prototype=prototypes.paragraphs.get("contacts")))
     if abstract:
         abstract_prototype = prototypes.paragraphs.get("abstract")
-        # MolCrysKit carries the label and the abstract in one styled paragraph.
+        # Some templates carry the label and the abstract in one styled paragraph.
         abstract_paragraph = _new_paragraph(template, styles["abstract"], f"**ABSTRACT:** {abstract}", prototype=abstract_prototype)
         if abstract_font_size is not None:
             _override_run_size(abstract_paragraph, abstract_font_size)
@@ -2277,6 +2227,8 @@ def assemble_markdown_template(
         tables=tuple(tables),
         numbering_prefix=numbering_prefix,
         bibliography_scope=resolved_bibliography_scope,
+        citation_numbering=citation_numbering,
+        bibliography_profile=bibliography_profile,
         include_metadata_back_matter=include_metadata_back_matter,
         native_toc=native_toc,
         restart_heading_numbering=restart_heading_numbering,
@@ -2351,6 +2303,8 @@ def write_assembly_sidecars(
         "used_citations": list(result.used_citations),
         "reference_keys": list(result.reference_keys),
         "bibliography_scope": result.bibliography_scope,
+        "citation_numbering": result.citation_numbering,
+        "bibliography_profile": result.bibliography_profile,
         "style_map": dict(result.style_map),
         "figures": [dict(figure) for figure in result.figures],
         "tables": [dict(table) for table in result.tables],

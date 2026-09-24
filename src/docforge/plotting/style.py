@@ -1,8 +1,8 @@
 """Shared Matplotlib visual system for docforge-generated figures.
 
-The palette and typography follow the restrained style used across the
-INVAR-2025 manuscripts: white backgrounds, sans-serif faces, thin charcoal
-lines, muted semantic colors, direct labels, and editable vector PDF output.
+The palette and typography use white backgrounds, sans-serif faces, thin
+charcoal lines, muted semantic colors, direct labels, and editable vector PDF
+output.
 """
 
 from __future__ import annotations
