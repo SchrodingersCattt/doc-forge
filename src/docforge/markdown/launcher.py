@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import re
 import tempfile
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -876,7 +877,14 @@ def convert_unicode_scripts_in_docx(path: Path) -> dict[str, int]:
                         root, xml_declaration=True, encoding="UTF-8", standalone=True
                     )
                 target.writestr(info, payload)
-        temporary_name.replace(path)
+        for attempt in range(10):
+            try:
+                temporary_name.replace(path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.5)
     except PermissionError as exc:
         raise PermissionError(
             f"Cannot update script formatting because the DOCX is open or locked: {path}"

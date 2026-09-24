@@ -1613,7 +1613,7 @@ def _word_compatible_image_bytes(image_path: Path, *, max_dimension: int = 4096)
                 Image.Resampling.LANCZOS,
             )
         payload = BytesIO()
-        image.save(payload, format="PNG", optimize=True)
+        image.save(payload, format="PNG", optimize=False)
         return payload.getvalue()
 
 
