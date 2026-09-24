@@ -5,8 +5,11 @@ docforge 是项目无关的通用 Python 包：把 Markdown、LaTeX 和 AI 生�
 ## 包边界
 
 - 只放通用逻辑：Markdown 解析/渲染、DOCX 跟踪修订 diff、TeX→DOCX、图像生成 sidecar、source ZIP 打包、绘图样式。
-- 不放项目特定内容：NSFC 官方标题/模板/variant 目录、PAP-H2 渠道策略、INVAR 稿件承诺等都留在消费方仓库。若从消费方脚本迁移代码，先剥离硬编码路径与变体常量。
+- 不放项目特定内容：官方标题、模板、variant 目录、渠道策略和稿件承诺等都留在消费方仓库。若从消费方脚本迁移代码，先剥离硬编码路径与变体常量。
 - 新需求优先作为通用 API 实现；若确实属于某一项目的专属逻辑，不要进本包。
+- Public examples, comments, tests, and manifests must not contain consumer
+  project names, journal-template identifiers, sample material names, or
+  consumer repository paths.
 
 ## 构建与测试
 

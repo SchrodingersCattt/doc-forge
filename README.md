@@ -2,9 +2,9 @@
 
 Assemble Markdown, LaTeX, and AI-generated art into auditable Word documents.
 
-`docforge` is a project-agnostic Python toolkit distilled from the NSFC
-proposal and manuscript tooling that previously lived inside individual
-research repositories. It keeps the three properties those scripts had:
+`docforge` is a project-agnostic Python toolkit distilled from document
+tooling that previously lived inside individual research repositories. It
+keeps the three properties those scripts had:
 
 - a thin CLI that runs standalone from a checkout without installation;
 - explicit input/output paths instead of a hard-coded repository layout;
@@ -43,15 +43,15 @@ docforge md2docx section_01.md section_02.md -o proposal.docx --title "..."
 
 # Markdown -> DOCX using an existing Word template and ordered references
 docforge md2docx 01.abstract.md 02.main.md -o main.docx \
-  --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
+  --template journal-template.docx --metadata 00.metadata.md \
   --bibliography 07.references.json --style template \
   --font "Times New Roman" --east-asia-font "Times New Roman" \
   --line-numbers on --columns two --figure-span column --force
 
 # Supporting information can request a readable one-column body
 docforge md2docx 06.supporting-information.md -o si.docx \
-  --template MolCrysKit_JCIM-0118.docx --metadata 00.metadata.md \
-  --bibliography 07.references.json --citation-base main-paph2.manifest.json \
+  --template journal-template.docx --metadata 00.metadata.md \
+  --bibliography 07.references.json --citation-base main.manifest.json \
   --style template --font "Times New Roman" --east-asia-font "Times New Roman" \
   --line-numbers on --columns one --figure-span column --numbering-prefix S --force
 
@@ -78,6 +78,10 @@ docforge sourcepack . --allow main.tex --allow si.tex --glob-dir figures -o dist
 
 # Validate a generated DOCX
 docforge check output.docx --verify-clean
+
+# Project-neutral source gates
+docforge gate abbr main.tex SI.tex --config gates.json --project paper
+docforge gate references --root . --config reference-gate.json
 ```
 
 All paths are explicit; nothing is inferred from the current directory.
@@ -128,7 +132,35 @@ entries by default; pass `--bibliography-scope all` to repeat shared entries.
 (`\\cite{key}` and `\\citep{key}`) are converted to numbered references from
 the insertion order of the JSON bibliography. Unknown keys fail the build.
 Each template output receives adjacent `.manifest.json` and `.sha256` audit
-files.
+files. The manifest records the bibliography source, formatter profile, and
+numbering policy.
+
+## Bibliography and gates
+
+`docforge.bibliography` provides a normalized `BibliographyEntry` model,
+JSON/BibTeX loaders, one citation resolver, inherited citation maps, and
+formatter profiles (`markdown` and `plain`). Markdown and TeX adapters use
+these same resolver semantics. Citation numbering is explicit: choose
+`first-citation` or `source-order`; supplement builds may inherit a map from a
+main-document manifest.
+
+The source gates are intentionally configuration-driven. An abbreviation
+configuration can be shared by several projects without putting project names
+or sample terms in the package:
+
+```json
+{
+  "abbr-whitelist": ["AI", "MLIP"],
+  "projects": {
+    "paper": {"abbr-whitelist": ["OOD", "SI"]}
+  }
+}
+```
+
+`docforge gate abbr` reports undefined or single-use abbreviations and
+`docforge gate style` applies configurable rules with stable fingerprints and
+an optional baseline. `docforge gate references` checks TeX figure/table
+labels and references from an explicit project configuration.
 
 ## Library layout
 

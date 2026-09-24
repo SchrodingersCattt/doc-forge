@@ -29,7 +29,7 @@ from docforge.output import validate_output_path
 def test_output_path_rejects_final_token(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="forbidden token 'final'"):
         validate_output_path(tmp_path / "main-final.docx")
-    validate_output_path(tmp_path / "main-paph2.docx")
+    validate_output_path(tmp_path / "main-manuscript.docx")
 
 
 def _template(path: Path) -> None:

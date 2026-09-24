@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--template", type=Path, help="DOCX template to preserve while assembling Markdown")
     md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
     md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
-    md.add_argument("--citation-base", type=Path, help="Existing main-manuscript manifest whose citation numbers SI should reuse")
+    md.add_argument("--citation-base", type=Path, help="Existing manifest whose citation numbers a supplement should reuse")
     md.add_argument("--citation-format", choices=("template", "superscript", "bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
     md.add_argument("--figure-span", choices=("column", "page"), default="column", help="Default figure span: current text column or printable page width; per-image span= overrides this value")
@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--page-break-before-h1", action="store_true", help="Start each level-one Markdown heading on a new page")
     md.add_argument("--numbering-prefix", default="", help="Prefix for figure, table-caption, and equation numbers (e.g. S for SI)")
     md.add_argument("--bibliography-scope", choices=("auto", "all", "new-only"), default="auto", help="Reference entries to render: auto uses new-only with --citation-base and all otherwise")
+    md.add_argument("--citation-numbering", choices=("first-citation", "source-order"), default="first-citation", help="Citation numbering policy")
+    md.add_argument("--bibliography-profile", choices=("markdown", "plain"), default="markdown", help="Bibliography formatter profile")
     md.add_argument("--omit-metadata-back-matter", action="store_true", help="Omit acknowledgment, author-contribution, and code-availability sections")
     md.add_argument("--no-title", action="store_true", help="Remove level-one Markdown headings; retain the metadata title block")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
@@ -105,6 +107,22 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--verify-clean", action="store_true", help="Require accepted revisions and no comments")
     check.add_argument("--verify-template", action="store_true", help="Check template placeholders, citations, sections, and image parts")
 
+    gate = sub.add_parser("gate", help="Run project-neutral source quality gates")
+    gate_sub = gate.add_subparsers(dest="gate_kind", required=True)
+    abbr = gate_sub.add_parser("abbr", help="Check abbreviations and project whitelist")
+    abbr.add_argument("paths", nargs="+", type=Path)
+    abbr.add_argument("--config", type=Path, help="JSON config containing abbr-whitelist")
+    abbr.add_argument("--project", help="Project key under config.projects")
+    abbr.add_argument("--allow-undefined", action="store_true")
+    abbr.add_argument("--require-reuse", action="store_true")
+    refs = gate_sub.add_parser("references", help="Check TeX figure/table references")
+    refs.add_argument("--root", type=Path, default=Path.cwd())
+    refs.add_argument("--config", type=Path, required=True)
+    style = gate_sub.add_parser("style", help="Check configurable prose style rules")
+    style.add_argument("paths", nargs="*", type=Path)
+    style.add_argument("--config", type=Path, required=True)
+    style.add_argument("--baseline", type=Path)
+
     return parser
 
 
@@ -130,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_sourcepack(args)
         if args.command == "check":
             return _cmd_check(args)
+        if args.command == "gate":
+            return _cmd_gate(args)
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -179,6 +199,8 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
             reference_font_size=args.reference_font_size,
             numbering_prefix=args.numbering_prefix,
             bibliography_scope=args.bibliography_scope,
+            citation_numbering=args.citation_numbering,
+            bibliography_profile=args.bibliography_profile,
             include_metadata_back_matter=not args.omit_metadata_back_matter,
             force=args.force,
         )
@@ -420,6 +442,49 @@ def _cmd_check(args: argparse.Namespace) -> int:
         verify_template_output(args.docx)
     print(f"OK {args.docx}")
     return 0
+
+
+def _cmd_gate(args: argparse.Namespace) -> int:
+    if args.gate_kind == "abbr":
+        import json
+        from ..gates import check_abbreviations, load_abbreviation_whitelist
+
+        whitelist = load_abbreviation_whitelist(args.config, project=args.project)
+        findings = check_abbreviations(
+            args.paths,
+            whitelist=whitelist,
+            require_definition=not args.allow_undefined,
+            require_reuse=args.require_reuse,
+        )
+        for finding in findings:
+            print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.message}", file=sys.stderr)
+        return 1 if findings else 0
+    if args.gate_kind == "references":
+        import json
+        from ..gates import audit_references
+
+        config = json.loads(args.config.read_text(encoding="utf-8-sig"))
+        issues = audit_references(args.root, config)
+        for issue in issues:
+            print(f"{issue.kind} {issue.label}: {issue.message}", file=sys.stderr)
+        return 1 if issues else 0
+    if args.gate_kind == "style":
+        import json
+        from ..gates import check_style, load_style_config, unresolved
+
+        config = load_style_config(args.config)
+        paths = args.paths
+        if not paths:
+            configured = config.get("documents", [])
+            if not isinstance(configured, list) or not configured:
+                raise ValueError("style gate requires paths or a documents list in config")
+            paths = [Path(item) for item in configured]
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8-sig")) if args.baseline else None
+        findings = unresolved(check_style(paths, config=config), baseline)
+        for finding in findings:
+            print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.message}", file=sys.stderr)
+        return 1 if findings else 0
+    raise ValueError(f"Unknown gate: {args.gate_kind}")
 
 
 if __name__ == "__main__":

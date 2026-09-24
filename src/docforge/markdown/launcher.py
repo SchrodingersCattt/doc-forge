@@ -1,10 +1,4 @@
-"""Markdown block parser and DOCX renderer.
-
-This is the project-agnostic core of the former NSFC proposal converter.
-Proposal-specific concerns (official heading lists, variant templates,
-résumé section layout, the B0510 positive-scope language policy) live in
-the consuming workflow, not here.
-"""
+"""Project-agnostic Markdown block parser and DOCX renderer."""
 
 from __future__ import annotations
 
@@ -1035,7 +1029,7 @@ def render_blocks_to_doc(
 
 # ── template preservation helpers ──────────────────────────────────────────
 #
-# These were originally part of the NSFC proposal workflow and are kept here
+# These helpers are kept here because they are useful to template workflows
 # because any template-driven Markdown→DOCX job needs them: locate a marker
 # paragraph, remove a body range, splice in generated content while remapping
 # image relationships and heading style IDs, and normalize typography across

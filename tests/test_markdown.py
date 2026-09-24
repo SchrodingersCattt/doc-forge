@@ -272,8 +272,8 @@ def test_default_table_uses_three_line_rules() -> None:
     assert header_bottom.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz") == "6"
 
 def test_chemical_bond_hyphens_use_en_dash() -> None:
-    value = normalize_typography("N-H, C-N, K-Cl6, A-X12, HClO4-forming, PAP-H2")
-    assert value == "N–H, C–N, K–Cl6, A–X12, HClO4-forming, PAP-H2"
+    value = normalize_typography("N-H, C-N, K-Cl6, A-X12, HClO4-forming, ABX4")
+    assert value == "N–H, C–N, K–Cl6, A–X12, HClO4-forming, ABX4"
 
 
 def test_scientific_units_and_r_squared_use_true_scripts() -> None:
