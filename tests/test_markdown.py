@@ -107,6 +107,26 @@ class OmmlTests(unittest.TestCase):
         text = document.paragraphs[0].text
         self.assertEqual(text, "A → B and C ⟶ D.")
 
+    def test_inline_math_greek_symbols_and_unbraced_macro_subscript(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"$\mathbf v_\kappa$, $\Pi_{i,\eta\kappa}$, "
+                r"$\boldsymbol\Xi$, $\boldsymbol\Theta_\tau$, and $\otimes$.")]
+        )
+        paragraph = document.paragraphs[0]
+        self.assertEqual(paragraph.text, "vκ, Πi,ηκ, Ξ, Θτ, and ⊗.")
+        self.assertTrue(any(run.text == "κ" and run.font.subscript for run in paragraph.runs))
+        self.assertTrue(any(run.text == "Ξ" and run.bold for run in paragraph.runs))
+        self.assertTrue(any(run.text == "τ" and run.font.subscript for run in paragraph.runs))
+
+    def test_inline_bold_vector_bar_and_max_operator(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"mean $\bar{\mathbf f}_i$ and $\max_i\mathrm{dev}_i$.")]
+        )
+        paragraph = document.paragraphs[0]
+        self.assertEqual(paragraph.text, "mean f\u0305i and maxidevi.")
+        self.assertTrue(any("f\u0305" in run.text and run.bold for run in paragraph.runs))
+        self.assertTrue(any(run.text == "i" and run.font.subscript for run in paragraph.runs))
+
     def test_inline_math_spaces_binary_operators(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"$\tau=t-t_{\mathrm{chem}}$ and $E=-mR$.")]

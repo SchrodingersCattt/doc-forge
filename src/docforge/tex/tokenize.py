@@ -14,6 +14,7 @@ GREEK = {
     r"\epsilon": "ε",
     r"\varepsilon": "ε",
     r"\eta": "η",
+    r"\kappa": "κ",
     r"\theta": "θ",
     r"\lambda": "λ",
     r"\mu": "μ",
@@ -30,11 +31,14 @@ GREEK = {
     r"\Delta": "Δ",
     r"\Theta": "Θ",
     r"\Lambda": "Λ",
+    r"\Pi": "Π",
     r"\Sigma": "Σ",
     r"\Phi": "Φ",
     r"\Psi": "Ψ",
     r"\Omega": "Ω",
+    r"\Xi": "Ξ",
     r"\times": "×",
+    r"\otimes": "⊗",
     r"\cdot": "·",
     r"\cdots": "⋯",
     r"\ldots": "…",
@@ -64,6 +68,7 @@ GREEK = {
     r"\cup": "∪",
     r"\gcd": "gcd",
     r"\arg": "arg",
+    r"\max": "max",
     r"\min": "min",
     r"\gets": "←",
     r"\leftarrow": "←",
@@ -239,6 +244,17 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                         )
                         i = cmd_end
                         continue
+                    if cmd == r"\boldsymbol" and cmd_end < len(s):
+                        if s[cmd_end] == "{":
+                            brace_end = _find_matching_brace(s, cmd_end)
+                            _parse_math(s[cmd_end + 1 : brace_end - 1], bold=True, sup=sup, sub=sub, color=color, hl=hl)
+                            i = brace_end
+                        else:
+                            following = re.match(r"\\[a-zA-Z]+\*?", s[cmd_end:]) if s[cmd_end] == "\\" else None
+                            end = cmd_end + (len(following.group(0)) if following else 1)
+                            _parse_math(s[cmd_end:end], bold=True, sup=sup, sub=sub, color=color, hl=hl)
+                            i = end
+                        continue
                     if cmd_end < len(s) and s[cmd_end] == "{":
                         brace_end = _find_matching_brace(s, cmd_end)
                         _parse(
@@ -282,6 +298,9 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                         inner = s[cmd_start:brace_end]
                         _parse(inner, bold=bold, italic=True, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl)
                         i = brace_end
+                    elif s[i + 1] == "\\" and (macro := re.match(r"\\[a-zA-Z]+\*?", s[i + 1 :])):
+                        _parse_math(macro.group(0), bold=bold, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl)
+                        i += 1 + len(macro.group(0))
                     else:
                         _parse_math(
                             s[i + 1],
@@ -534,6 +553,7 @@ def _tex_hl_name(name: str) -> str:
 
 def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = s.replace("~", "\u00A0")
+    s = re.sub(r"\\bar\{\\mathbf\s+([A-Za-z])\}", lambda m: r"\mathbf{" + m.group(1) + "\u0305}", s)
     s = re.sub(r"\\bar\{([^{}]*)\}", lambda m: "".join(ch + "\u0305" for ch in m.group(1)), s)
     s = s.replace("---", "—")
     s = s.replace("--", "–")
