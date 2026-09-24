@@ -118,6 +118,10 @@ def build_parser() -> argparse.ArgumentParser:
     refs = gate_sub.add_parser("references", help="Check TeX figure/table references")
     refs.add_argument("--root", type=Path, default=Path.cwd())
     refs.add_argument("--config", type=Path, required=True)
+    style = gate_sub.add_parser("style", help="Check configurable prose style rules")
+    style.add_argument("paths", nargs="*", type=Path)
+    style.add_argument("--config", type=Path, required=True)
+    style.add_argument("--baseline", type=Path)
 
     return parser
 
@@ -464,6 +468,22 @@ def _cmd_gate(args: argparse.Namespace) -> int:
         for issue in issues:
             print(f"{issue.kind} {issue.label}: {issue.message}", file=sys.stderr)
         return 1 if issues else 0
+    if args.gate_kind == "style":
+        import json
+        from ..gates import check_style, load_style_config, unresolved
+
+        config = load_style_config(args.config)
+        paths = args.paths
+        if not paths:
+            configured = config.get("documents", [])
+            if not isinstance(configured, list) or not configured:
+                raise ValueError("style gate requires paths or a documents list in config")
+            paths = [Path(item) for item in configured]
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8-sig")) if args.baseline else None
+        findings = unresolved(check_style(paths, config=config), baseline)
+        for finding in findings:
+            print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.message}", file=sys.stderr)
+        return 1 if findings else 0
     raise ValueError(f"Unknown gate: {args.gate_kind}")
 
 

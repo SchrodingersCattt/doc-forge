@@ -158,8 +158,9 @@ or sample terms in the package:
 ```
 
 `docforge gate abbr` reports undefined or single-use abbreviations and
-`docforge gate references` checks TeX figure/table labels and references from
-an explicit project configuration.
+`docforge gate style` applies configurable rules with stable fingerprints and
+an optional baseline. `docforge gate references` checks TeX figure/table
+labels and references from an explicit project configuration.
 
 ## Library layout
 
