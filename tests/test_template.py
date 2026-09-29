@@ -117,6 +117,28 @@ def test_correspondence_stars_render_literally(tmp_path: Path) -> None:
     assert all(run.font.italic is not True for run in author.runs)
 
 
+def test_template_assembly_keeps_inline_code_in_consolas(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Use `loss.type` in prose.\n\n| Key | Value |\n|---|---|\n| `loss.type` | `ener` |\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        font_family="Times New Roman", east_asia_font="Times New Roman",
+    )
+    document = Document(output)
+    body = next(paragraph for paragraph in document.paragraphs if "loss.type" in paragraph.text)
+    assert next(run for run in body.runs if run.text == "loss.type").font.name == "Consolas"
+    for cell in document.tables[0].rows[1].cells:
+        assert next(run for run in cell.paragraphs[0].runs if run.text).font.name == "Consolas"
+
+
 def test_structured_bibliography_record_matches_formatter_contract() -> None:
     formatted = _format_bibliography_record(
         {

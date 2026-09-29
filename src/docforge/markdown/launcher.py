@@ -292,6 +292,8 @@ def override_document_fonts(
         return
     for paragraph in doc.paragraphs:
         for run in paragraph.runs:
+            if run.font.name == "Consolas":
+                continue
             r_fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
             if latin:
                 run.font.name = latin
@@ -305,6 +307,8 @@ def override_document_fonts(
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
+                        if run.font.name == "Consolas":
+                            continue
                         r_fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
                         if latin:
                             run.font.name = latin
@@ -341,7 +345,8 @@ def apply_base_format(paragraph, *, size: float = 12.0, first_indent: bool = Fal
     if first_indent:
         paragraph.paragraph_format.first_line_indent = Pt(size * 2)
     for run in paragraph.runs:
-        set_run_font(run, size=size)
+        if run.font.name != "Consolas":
+            set_run_font(run, size=size)
 
 
 def set_highlight(run, fill: str = "FFF2CC") -> None:
@@ -492,6 +497,8 @@ def add_heading(doc: DocumentType, text: str, level: int):
     for run in paragraph.runs:
         run.bold = True
         run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        if run.font.name == "Consolas":
+            continue
         if level == 1:
             set_run_font(run, chinese="楷体", latin="Times New Roman", size=size)
         else:
@@ -586,7 +593,8 @@ def add_table_caption(
     label = f"Table {number_prefix}{number}. " if number is not None else "Table. "
     add_inline(paragraph, label + text, bold_default=False, size=10.0)
     for run in paragraph.runs:
-        set_run_font(run, size=10.0)
+        if run.font.name != "Consolas":
+            set_run_font(run, size=10.0)
 
 
 def add_quote(doc: DocumentType, text: str) -> None:
@@ -615,7 +623,8 @@ def add_image(doc: DocumentType, path: str, caption: str) -> None:
         set_paragraph_spacing(paragraph, before=0, after=5, line=1.0)
         add_inline(paragraph, caption, size=10.0)
         for run in paragraph.runs:
-            set_run_font(run, size=10.0)
+            if run.font.name != "Consolas":
+                set_run_font(run, size=10.0)
 
 
 def add_separator(doc: DocumentType) -> None:
@@ -727,7 +736,8 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 set_paragraph_spacing(paragraph, after=0, line=1.05)
                 for run in paragraph.runs:
-                    set_run_font(run, size=9.5)
+                    if run.font.name != "Consolas":
+                        set_run_font(run, size=9.5)
         if row_index == 0:
             set_repeat_table_header(row)
     set_table_three_line_borders(table)

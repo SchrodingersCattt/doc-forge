@@ -499,6 +499,12 @@ def _copy_positive_markers(source_rpr, target_rpr):
         return target_rpr
     if target_rpr is None:
         target_rpr = OxmlElement("w:rPr")
+    code_fonts = source_rpr.find(qn("w:rFonts"))
+    if code_fonts is not None and code_fonts.get(qn("w:ascii")) == "Consolas":
+        existing = target_rpr.find(qn("w:rFonts"))
+        if existing is not None:
+            target_rpr.remove(existing)
+        target_rpr.insert(0, copy.deepcopy(code_fonts))
     for tag in ("b", "bCs", "i", "iCs", "u", "strike", "vertAlign"):
         for marker in source_rpr.findall(qn("w:" + tag)):
             value = marker.get(qn("w:val"))
@@ -518,10 +524,12 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
     east_asia = east_asia_font or font_family
     for run in element.iter(qn("w:r")):
         properties = run.find(qn("w:rPr"))
+        fonts = properties.find(qn("w:rFonts")) if properties is not None else None
+        if fonts is not None and fonts.get(qn("w:ascii")) == "Consolas":
+            continue
         if properties is None:
             properties = OxmlElement("w:rPr")
             run.insert(0, properties)
-        fonts = properties.find(qn("w:rFonts"))
         if fonts is None:
             fonts = OxmlElement("w:rFonts")
             properties.insert(0, fonts)

@@ -163,6 +163,25 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.italic and run.text == "d" for run in runs))
         self.assertTrue(any(run.font.subscript and run.text == "36" for run in runs))
 
+    def test_inline_code_keeps_consolas_in_rendered_blocks(self) -> None:
+        document = render_blocks_to_doc(
+            [
+                Block("paragraph", "Use `loss.type` in prose."),
+                Block("bullet", "Select `ener` here."),
+                Block("heading", "Setting `loss.type`", level=2),
+                Block("table", rows=(("Key", "Value"), ("`loss.type`", "`ener`"))),
+            ],
+            font_family="Arial",
+            east_asia_font="SimHei",
+        )
+        for paragraph in document.paragraphs:
+            for run in paragraph.runs:
+                if run.text in {"loss.type", "ener"}:
+                    self.assertEqual(run.font.name, "Consolas")
+        for cell in document.tables[0].rows[1].cells:
+            self.assertEqual(next(run for run in cell.paragraphs[0].runs if run.text).font.name, "Consolas")
+        self.assertEqual(document.paragraphs[0].runs[0].font.name, "Arial")
+
     def test_display_equations_are_omml_and_numbered(self) -> None:
         document = render_blocks_to_doc(
             [Block("equation", r"E = mc^2"), Block("equation", r"a = b")]
