@@ -17,6 +17,8 @@ from docforge.docxdiff.redline import visible_text
 from docforge.markdown import (
     Block,
     docx_to_markdown,
+    normalize_html_tables,
+    normalize_inline_html,
     normalize_script_boundaries,
     render_blocks_to_doc,
     split_markdown_sections,
@@ -130,6 +132,17 @@ def test_pandoc_subscript_run_does_not_capture_formula_delimiters() -> None:
     assert any(text.endswith("]") and mode == "normal" for text, mode in run_modes)
 
 
+def test_raw_html_table_is_normalized_to_pipe_table_with_rowspans() -> None:
+    source = """<table><thead><tr><th>Pressure</th><th><em>χ</em><sup>(2)</sup></th></tr></thead>
+    <tbody><tr><td rowspan="2">3.7 GPa</td><td><em>χ</em><sub>xxy</sub></td></tr>
+    <tr><td><em>χ</em><sub>xyz</sub></td></tr></tbody></table>"""
+    normalized = normalize_inline_html(normalize_html_tables(source))
+    assert "| Pressure | *χ*<sup>(2)</sup> |" in normalized
+    assert normalized.count("| 3.7 GPa |") == 2
+    assert "*χ*<sub>xxy</sub>" in normalized
+    assert "<table" not in normalized
+
+
 def test_split_markdown_sections_handles_duplicate_headings() -> None:
     text = "**Title**\n\n**Abstract**:\n\nA\n\n**Main**\n\nB\n\n**References**\n\n1. R\n\n**Methods**\n\nC\n\n**References**\n\n51. S\n\n**Data availability**\n\nD\n"
     sections = split_markdown_sections(
@@ -216,3 +229,28 @@ def test_redline_accepts_current_revisions_before_diff(tmp_path: Path) -> None:
     assert visible_text(root, "final").strip() == "after"
     assert visible_text(root, "original").strip() == "before"
     assert not root.xpath(".//w:rPrChange", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+
+
+def test_redline_tracks_inserted_table_rows(tmp_path: Path) -> None:
+    base = tmp_path / "base-table.docx"
+    current = tmp_path / "current-table.docx"
+    for path, values in (
+        (base, (("Pressure", "Value"), ("0 GPa", "1"), ("10 GPa", "3"))),
+        (current, (("Pressure", "Value"), ("0 GPa", "1"), ("3.7 GPa", "2"), ("10 GPa", "3"))),
+    ):
+        document = Document()
+        table = document.add_table(rows=len(values), cols=2)
+        for row, data in zip(table.rows, values):
+            for cell, value in zip(row.cells, data):
+                cell.text = value
+        document.save(path)
+    output = tmp_path / "tracked-table.docx"
+    create_tracked_docx(base, current, output, overwrite=True)
+    with zipfile.ZipFile(output) as archive:
+        from lxml import etree
+
+        root = etree.fromstring(archive.read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.xpath(".//w:tr[w:trPr/w:ins]", namespaces=ns)) == 1
+    assert "3.7 GPa" in visible_text(root, "final")
+    assert "3.7 GPa" not in visible_text(root, "original")

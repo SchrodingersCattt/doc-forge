@@ -1134,6 +1134,14 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         front = [paragraph for paragraph in paragraphs[:first_heading] if paragraph.text.strip()]
         if len(front) >= 5:
             _, si_title, si_authors, si_affiliations, si_contacts = [copy.deepcopy(paragraph._p) for paragraph in front[:5]]
+    front_note = next(
+        (
+            copy.deepcopy(paragraph._p)
+            for paragraph in paragraphs
+            if paragraph.text.strip().casefold() == "supplementary information for"
+        ),
+        None,
+    )
     authors = si_authors if si_authors is not None else choose("authors")
     if styles["authors"] == styles["title"]:
         same_style = by_style.get(styles["authors"], [])
@@ -1152,6 +1160,7 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         "caption": caption,
         "reference": references,
         "references_heading": references_heading if references_heading is not None else choose("references_heading", text_match="references"),
+        "front_note": front_note,
     }
     figure_regions = _template_inline_figure_slots(regions)
     if not figure_regions:
@@ -1886,6 +1895,19 @@ def assemble_markdown_template(
     )
     rendered = _replace_block_citations(blocks, mapping, superscript=citation_superscript)
     abstract, body_blocks = _extract_abstract(rendered)
+    # Supplementary-information templates carry an italic lead-in immediately
+    # before the title.  Treat that source Markdown paragraph as front matter
+    # so it is emitted with the template's original run metrics and does not
+    # get duplicated in the generated body.
+    front_note = None
+    retained_blocks = []
+    for block in body_blocks:
+        plain = re.sub(r"[*_]+", "", block.text).strip().casefold() if block.kind == "paragraph" else ""
+        if front_note is None and plain == "supplementary information for":
+            front_note = block
+            continue
+        retained_blocks.append(block)
+    body_blocks = tuple(retained_blocks)
     if strip_level_one_headings:
         body_blocks = tuple(
             block for block in body_blocks
@@ -1957,6 +1979,12 @@ def assemble_markdown_template(
     front = []
     if prototypes.paragraphs.get("supporting_information") is not None:
         front.append(_new_metadata_paragraph(template, styles["body"], "Supporting Information", prototype=prototypes.paragraphs.get("supporting_information")))
+    if front_note is not None and prototypes.paragraphs.get("front_note") is not None:
+        note_prototype = prototypes.paragraphs["front_note"]
+        note_properties = note_prototype.find(qn("w:pPr"))
+        note_style = note_properties.find(qn("w:pStyle")) if note_properties is not None else None
+        note_style_id = note_style.get(qn("w:val")) if note_style is not None else styles["body"]
+        front.append(_new_paragraph(template, note_style_id, front_note.text, prototype=note_prototype, bold_default=False))
     if include_title:
         front.append(_new_metadata_paragraph(template, styles["title"], resolved_title, prototype=prototypes.paragraphs.get("title")))
     if metadata.authors:

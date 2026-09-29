@@ -59,7 +59,7 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 INLINE_TOKEN_RE = re.compile(
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<!--.*?-->|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
+    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -186,7 +186,10 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                 code.append(lines[i])
                 i += 1
             i += 1 if i < len(lines) else 0
-            blocks.append(Block("code", "\n".join(code), language=language))
+            if language.lower() in {"math", "tex", "latex"}:
+                blocks.append(Block("equation", " ".join(part.strip() for part in code)))
+            else:
+                blocks.append(Block("code", "\n".join(code), language=language))
             continue
         if stripped == "$$":
             flush_paragraph()
@@ -414,10 +417,10 @@ def add_inline(
             set_run_font(run, size=size)
         token = match.group(0)
         if token.startswith("<u>**"):
-            run = paragraph.add_run(token[5:-6])
-            run.bold = True
-            run.underline = True
-            set_run_font(run, size=size)
+            start = len(paragraph.runs)
+            add_inline(paragraph, token[5:-6], bold_default=True, size=size)
+            for run in paragraph.runs[start:]:
+                run.underline = True
         elif token.lower().startswith("<sup>"):
             run = paragraph.add_run(token[5:-6])
             run.bold = bold_default
@@ -428,6 +431,8 @@ def add_inline(
             run.bold = bold_default
             run.font.subscript = True
             set_run_font(run, size=size)
+        elif token.lower().startswith("<br"):
+            paragraph.add_run().add_break()
         elif token.startswith("<!--"):
             inner = token[4:-3].strip()
             if inner.upper().startswith("TODO:"):
@@ -435,14 +440,19 @@ def add_inline(
             run = paragraph.add_run(f"[TODO: {inner}]")
             set_run_font(run, chinese="宋体", latin="Times New Roman", size=size)
             run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+        elif token.startswith("***"):
+            start = len(paragraph.runs)
+            add_inline(paragraph, token[3:-3], bold_default=True, size=size)
+            for run in paragraph.runs[start:]:
+                run.bold = True
+                run.italic = True
         elif token.startswith("**"):
-            run = paragraph.add_run(token[2:-2])
-            run.bold = True
-            set_run_font(run, size=size)
+            add_inline(paragraph, token[2:-2], bold_default=True, size=size)
         elif token.startswith("*"):
-            run = paragraph.add_run(token[1:-1])
-            run.italic = True
-            set_run_font(run, size=size)
+            start = len(paragraph.runs)
+            add_inline(paragraph, token[1:-1], bold_default=bold_default, size=size)
+            for run in paragraph.runs[start:]:
+                run.italic = True
         elif token.startswith("`"):
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
@@ -719,6 +729,50 @@ def set_repeat_table_header(row) -> None:
     tr_pr.append(header)
 
 
+def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> None:
+    """Restore simple vertical rowspans expanded by ``docx2md``.
+
+    Pandoc expands rowspans when it serializes complex Word tables.  Rejoining
+    consecutive identical labels keeps generated tables visually compatible
+    with the reviewed template and gives the redline engine stable row
+    signatures for row-level insertions.
+    """
+    if len(rows) < 3:
+        return
+    width = max(len(row) for row in rows)
+    for col in range(width):
+        start = 1  # header row is never merged
+        while start < len(rows):
+            value = rows[start][col] if col < len(rows[start]) else ""
+            if not value:
+                start += 1
+                continue
+            end = start + 1
+            while end < len(rows):
+                candidate = rows[end][col] if col < len(rows[end]) else ""
+                if candidate != value:
+                    break
+                end += 1
+            if end - start > 1:
+                top = table.cell(start, col)
+                top_pr = top._tc.get_or_add_tcPr()
+                marker = top_pr.find(qn("w:vMerge"))
+                if marker is None:
+                    marker = OxmlElement("w:vMerge")
+                    top_pr.append(marker)
+                marker.set(qn("w:val"), "restart")
+                for row_index in range(start + 1, end):
+                    cell = table.cell(row_index, col)
+                    cell.text = ""
+                    cell_pr = cell._tc.get_or_add_tcPr()
+                    marker = cell_pr.find(qn("w:vMerge"))
+                    if marker is None:
+                        marker = OxmlElement("w:vMerge")
+                        cell_pr.append(marker)
+                    marker.set(qn("w:val"), "continue")
+            start = end
+
+
 def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
     if not rows:
         return
@@ -740,6 +794,7 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
                         set_run_font(run, size=9.5)
         if row_index == 0:
             set_repeat_table_header(row)
+    _merge_repeated_table_cells(table, rows)
     set_table_three_line_borders(table)
     doc.add_paragraph()
 

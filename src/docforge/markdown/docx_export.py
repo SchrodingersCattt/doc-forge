@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from PIL import Image
+from lxml import etree, html as lxml_html
 
 from .._pandoc import run_pandoc
 from ..output import validate_output_path
@@ -25,10 +26,14 @@ from ..output import validate_output_path
 IMAGE_TAG_RE = re.compile(r"<img\b(?P<attrs>[^>]*?)(?:/?)>", re.IGNORECASE)
 IMAGE_ATTR_RE = re.compile(r"\b(?P<name>src|alt)\s*=\s*(['\"])(?P<value>.*?)\2", re.IGNORECASE)
 MARKDOWN_IMAGE_RE = re.compile(r"(?P<start>!\[[^\]]*\]\()(?P<src>[^)\s]+)(?P<end>\))")
+INLINE_IMAGE_CAPTION_RE = re.compile(
+    r"(?m)^(?P<image>!\[[^\]]*\]\([^\n)]+\))(?P<caption>\s*(?:\*{0,3})?(?:Fig\.|Supplementary Fig\.|Table\b))"
+)
 BOLD_HEADING_RE = re.compile(r"^\*\*(?P<text>.+?)\*\*\s*:?[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
 SUBSCRIPT_RE = re.compile(r"<sub>(?P<value>[^<\n]*?)</sub>", re.IGNORECASE)
 SUBSCRIPT_CLOSING_DELIMITER_RE = re.compile(r"(\\\]|[)\]])")
+HTML_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,14 @@ def normalize_media_links(text: str, *, document_dir: Path, media_root: Path) ->
         return f"{match.group('start')}{relative}{match.group('end')}"
 
     text = MARKDOWN_IMAGE_RE.sub(replace_markdown, text)
+    # Pandoc can place a caption immediately after an inline image when the
+    # original Word paragraph contained both.  Split that pair into the
+    # block forms consumed by the Markdown parser; otherwise the image is
+    # mistaken for an ordinary paragraph and the following figure shifts.
+    text = INLINE_IMAGE_CAPTION_RE.sub(
+        lambda match: f"{match.group('image')}\n\n{match.group('caption').lstrip()}",
+        text,
+    )
     return text, tuple(sorted(media))
 
 
@@ -134,6 +147,117 @@ def normalize_script_boundaries(text: str) -> str:
         )
 
     return SUBSCRIPT_RE.sub(normalize_subscript, text)
+
+
+def _table_cell_markdown(cell) -> str:
+    """Serialize one Pandoc HTML table cell for the Markdown block parser.
+
+    Pandoc keeps tables containing row/column spans as raw HTML.  That is a
+    valid GFM document, but it cannot be consumed by the small, auditable
+    block parser used by ``md2docx``.  Keep semantic inline markup while
+    removing layout-only HTML so the resulting pipe table is portable.
+    """
+
+    def render(node) -> str:
+        pieces: list[str] = []
+        if node.text:
+            pieces.append(node.text)
+        for child in node:
+            tag = etree.QName(child).localname.lower()
+            value = render(child)
+            if tag in {"em", "i"}:
+                value = f"*{value}*"
+            elif tag in {"strong", "b"}:
+                value = f"**{value}**"
+            elif tag in {"sup", "sub"}:
+                value = f"<{tag}>{value}</{tag}>"
+            elif tag == "br":
+                value = "<br>"
+            elif tag == "p":
+                value = f"{value}<br>"
+            # ``p`` and other layout tags contribute their text only.
+            pieces.append(value)
+            if child.tail:
+                pieces.append(child.tail)
+        return "".join(pieces)
+
+    value = render(cell)
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"(?:<br>\s*)+$", "", value, flags=re.IGNORECASE)
+    # A literal pipe would change the table shape.  Markdown backslash
+    # escaping is understood by the parser and survives Word export.
+    return value.replace("|", r"\|")
+
+
+def _html_table_to_pipe(fragment: str) -> str:
+    """Convert one raw Pandoc HTML table to a rectangular pipe table."""
+
+    root = lxml_html.fragment_fromstring(fragment, create_parent=True)
+    table = root.find(".//table")
+    if table is None:
+        return fragment
+
+    rows: list[list[str]] = []
+    active: dict[int, tuple[str, int]] = {}
+    for tr in table.xpath(".//tr"):
+        values: list[str] = []
+        col = 0
+
+        def carry() -> None:
+            nonlocal col
+            while col in active:
+                value, remaining = active[col]
+                values.append(value)
+                if remaining <= 1:
+                    del active[col]
+                else:
+                    active[col] = (value, remaining - 1)
+                col += 1
+
+        carry()
+        for cell in tr.xpath("./th|./td"):
+            carry()
+            value = _table_cell_markdown(cell)
+            colspan = max(1, int(cell.get("colspan", "1")))
+            rowspan = max(1, int(cell.get("rowspan", "1")))
+            for offset in range(colspan):
+                values.append(value)
+                if rowspan > 1:
+                    active[col + offset] = (value, rowspan - 1)
+            col += colspan
+        carry()
+        rows.append(values)
+
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    rows = [row + [""] * (width - len(row)) for row in rows]
+    lines = [
+        "| " + " | ".join(rows[0]) + " |",
+        "| " + " | ".join("---" for _ in range(width)) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
+    return "\n".join(lines)
+
+
+def normalize_html_tables(text: str) -> str:
+    """Convert Pandoc's raw HTML tables to parser-compatible pipe tables."""
+
+    return HTML_TABLE_RE.sub(lambda match: _html_table_to_pipe(match.group(0)), text)
+
+
+def normalize_inline_html(text: str) -> str:
+    """Map harmless HTML emphasis/layout tags to Markdown equivalents."""
+
+    text = re.sub(r"<\s*(?:em|i)\s*>", "*", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*/\s*(?:em|i)\s*>", "*", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*(?:strong|b)\s*>", "**", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*/\s*(?:strong|b)\s*>", "**", text, flags=re.IGNORECASE)
+    # Paragraph tags occur inside table cells after Pandoc export.  They are
+    # layout markers, not manuscript text.
+    text = re.sub(r"<\s*/?\s*p\s*>", " ", text, flags=re.IGNORECASE)
+    return text
 
 
 def _heading_text(line: str) -> str | None:
@@ -326,6 +450,8 @@ def docx_to_markdown(
             media_root=media_root,
         )
         markdown = normalize_script_boundaries(markdown)
+        markdown = normalize_html_tables(markdown)
+        markdown = normalize_inline_html(markdown)
         # Word occasionally contains an empty bold marker paragraph.  Pandoc
         # serializes that artifact as ``**\\**``; it is not manuscript text.
         markdown = re.sub(r"(?m)^\*\*\\\*\*\s*\r?\n?", "", markdown)
@@ -374,6 +500,8 @@ __all__ = [
     "metadata_markdown",
     "normalize_media_links",
     "normalize_script_boundaries",
+    "normalize_html_tables",
+    "normalize_inline_html",
     "split_markdown_sections",
     "write_conversion_manifest",
 ]

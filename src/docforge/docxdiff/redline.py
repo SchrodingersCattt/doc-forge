@@ -127,11 +127,34 @@ def _inside(node: etree._Element, local_name: str) -> bool:
 def visible_text(element: etree._Element, view: str = "final") -> str:
     out: list[str] = []
 
+    if (
+        view == "final"
+        and element.tag == f"{{{W}}}p"
+        and element.find("./w:pPr/w:rPr/w:del", NS) is not None
+    ):
+        return ""
+
     def walk(node: etree._Element, hidden: bool = False) -> None:
+        if (
+            view == "final"
+            and node.tag == f"{{{W}}}p"
+            and node.find("./w:pPr/w:rPr/w:del", NS) is not None
+        ):
+            return
         if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
             hidden = view == "final"
         elif node.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
             hidden = view == "original"
+        elif node.tag == f"{{{W}}}tr":
+            # Word stores row-level insertions/deletions in ``w:trPr``.
+            # Treat those markers like run-level revisions for both text
+            # alignment and acceptance validation.
+            tr_pr = node.find("./w:trPr", NS)
+            if tr_pr is not None:
+                if tr_pr.find("./w:del", NS) is not None:
+                    hidden = view == "final"
+                elif tr_pr.find("./w:ins", NS) is not None:
+                    hidden = view == "original"
         if hidden:
             return
         if node.tag == f"{{{W}}}t":
@@ -478,46 +501,84 @@ def _carry_comment_markers(
     return result
 
 
-def _merge_table(
-    base: etree._Element, current: etree._Element, context: Context
-) -> etree._Element:
-    """Keep the current table layout and track cell-text edits where possible."""
-    result = copy.deepcopy(current)
-    base_paragraphs = base.findall(".//w:p", NS)
-    current_paragraphs = result.findall(".//w:p", NS)
+def _row_revision(row: etree._Element, kind: str, context: Context) -> etree._Element:
+    """Mark a table row with a valid Word row-level revision property."""
+    result = copy.deepcopy(row)
+    tr_pr = result.find("./w:trPr", NS)
+    if tr_pr is None:
+        tr_pr = etree.Element(f"{{{W}}}trPr")
+        result.insert(0, tr_pr)
+    # A row can carry at most one insertion/deletion marker in a single pass.
+    for name in ("ins", "del", "moveFrom", "moveTo"):
+        for marker in list(tr_pr.findall(f"./w:{name}", NS)):
+            tr_pr.remove(marker)
+    tr_pr.append(etree.Element(f"{{{W}}}{kind}", attrib=context.attrs()))
+    return result
 
-    # The official form normally keeps the same table geometry between drafts.
-    # In that common case, diff every corresponding cell paragraph so changes
-    # to metadata and abstracts remain visible as native Word revisions.
-    if len(base_paragraphs) == len(current_paragraphs):
-        for base_paragraph, current_paragraph in zip(base_paragraphs, list(current_paragraphs)):
+
+def _merge_row_cells(
+    base_row: etree._Element, current_row: etree._Element, context: Context
+) -> etree._Element:
+    """Merge corresponding cell paragraphs while retaining current row XML."""
+    result = copy.deepcopy(current_row)
+    base_cells = base_row.findall("./w:tc", NS)
+    current_cells = result.findall("./w:tc", NS)
+    if len(base_cells) != len(current_cells):
+        return result
+    for base_cell, current_cell in zip(base_cells, current_cells):
+        base_paragraphs = base_cell.findall("./w:p", NS)
+        current_paragraphs = current_cell.findall("./w:p", NS)
+        if len(base_paragraphs) != len(current_paragraphs):
+            continue
+        for base_paragraph, current_paragraph in zip(base_paragraphs, current_paragraphs):
             merged = _merge_paragraph(base_paragraph, current_paragraph, context)
             current_paragraph.getparent().replace(current_paragraph, merged)
-        return result
-
-    # If the table geometry changed, retain the current table and salvage any
-    # review comments that can be matched to unchanged cell text.
-    used: set[int] = set()
-    for base_paragraph in base_paragraphs:
-        if not _events(base_paragraph):
-            continue
-        target_text = _normalize(visible_text(base_paragraph))
-        match = next(
-            (
-                (index, paragraph)
-                for index, paragraph in enumerate(current_paragraphs)
-                if index not in used and _normalize(visible_text(paragraph)) == target_text
-            ),
-            None,
-        )
-        if match is None:
-            continue
-        index, paragraph = match
-        used.add(index)
-        merged = _merge_paragraph(base_paragraph, paragraph, context)
-        paragraph.getparent().replace(paragraph, merged)
-        current_paragraphs[index] = merged
     return result
+
+
+def _merge_table(
+    base: etree._Element, current: etree._Element, context: Context
+) -> tuple[etree._Element, bool]:
+    """Diff table rows and cell text, tracking inserted/deleted rows natively."""
+    result = copy.deepcopy(current)
+    base_rows = base.findall("./w:tr", NS)
+    current_rows = result.findall("./w:tr", NS)
+    if not base_rows or not current_rows:
+        return result, False
+
+    base_keys = [_normalize(visible_text(row)) for row in base_rows]
+    current_keys = [_normalize(visible_text(row)) for row in current_rows]
+    matcher = difflib.SequenceMatcher(None, base_keys, current_keys, autojunk=False)
+    output_rows: list[etree._Element] = []
+    row_revision = False
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
+                output_rows.append(_merge_row_cells(base_row, current_row, context))
+        elif tag == "replace" and (i2 - i1) == (j2 - j1):
+            # Same geometry, changed cell text: preserve row formatting and
+            # expose the cell-level insertions/deletions.
+            for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
+                output_rows.append(_merge_row_cells(base_row, current_row, context))
+        else:
+            for base_row in base_rows[i1:i2]:
+                output_rows.append(_row_revision(base_row, "del", context))
+                row_revision = True
+            for current_row in current_rows[j1:j2]:
+                output_rows.append(_row_revision(current_row, "ins", context))
+                row_revision = True
+
+    # Replace only the row children; table properties, grid, bookmarks and
+    # relationships remain sourced from the current DOCX.
+    for row in result.findall("./w:tr", NS):
+        result.remove(row)
+    insert_at = len(result)
+    for index, child in enumerate(result):
+        if child.tag == f"{{{W}}}tblGrid":
+            insert_at = index + 1
+    for offset, row in enumerate(output_rows):
+        result.insert(insert_at + offset, row)
+    return result, row_revision
 
 
 def _next_id(root: etree._Element) -> int:
@@ -669,6 +730,10 @@ def _final_special_structure(root: etree._Element) -> list[tuple]:
             hidden = True
         elif node.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
             hidden = False
+        elif node.tag == f"{{{W}}}tr":
+            tr_pr = node.find("./w:trPr", NS)
+            if tr_pr is not None and tr_pr.find("./w:del", NS) is not None:
+                hidden = True
         if hidden:
             return
         local = etree.QName(node).localname
@@ -694,7 +759,13 @@ def _final_special_structure(root: etree._Element) -> list[tuple]:
             continue
         items: list[tuple] = []
         walk(block, False, items)
-        result.append(tuple(items))
+        # Empty paragraphs carry no controls whose accepted-view identity can
+        # be audited here.  Redline alignment may legitimately retain a blank
+        # paragraph around a moved figure or section break, so compare only
+        # paragraphs that actually contain a drawing, break, tab, or section
+        # definition.
+        if items:
+            result.append(tuple(items))
     body_section = body.find("./w:sectPr", NS)
     result.append(("bodySectPr", _xml_signature(body_section) if body_section is not None else None))
     return result
@@ -718,6 +789,18 @@ def _accepted_revision_view(root: etree._Element) -> etree._Element:
         parent = paragraph.getparent()
         if parent is not None:
             parent.remove(paragraph)
+
+    # Table-row revisions are stored in w:trPr rather than as wrappers.
+    for row in list(result.xpath(".//w:tr[w:trPr/w:del or w:trPr/w:moveFrom]", namespaces=NS)):
+        parent = row.getparent()
+        if parent is not None:
+            parent.remove(row)
+    for row in result.xpath(".//w:tr[w:trPr/w:ins or w:trPr/w:moveTo]", namespaces=NS):
+        tr_pr = row.find("./w:trPr", NS)
+        if tr_pr is not None:
+            for name in ("ins", "moveTo"):
+                for marker in list(tr_pr.findall(f"./w:{name}", NS)):
+                    tr_pr.remove(marker)
 
     # Reject deleted/moved-from content.
     for name in ("del", "moveFrom"):
@@ -788,8 +871,16 @@ def create_tracked_docx(
                 )
                 summary["matched" if old.text == new.text else "changed"] += 1
             elif old.kind == "tbl":
-                children.append(_merge_table(old.element, new.element, context))
-                summary["matched" if _normalize(old.text) == _normalize(new.text) else "tables_replaced"] += 1
+                merged_table, row_revision = _merge_table(old.element, new.element, context)
+                children.append(merged_table)
+                if _normalize(old.text) == _normalize(new.text):
+                    summary["matched"] += 1
+                elif row_revision:
+                    # Row-level ``w:ins``/``w:del`` markers make the table
+                    # diff reviewable; it is not an opaque table replacement.
+                    summary["changed"] += 1
+                else:
+                    summary["tables_replaced"] += 1
             else:
                 children.append(
                     copy.deepcopy(old.element if _normalize(old.text) == _normalize(new.text) else new.element)

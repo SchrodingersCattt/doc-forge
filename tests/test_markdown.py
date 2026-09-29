@@ -182,6 +182,14 @@ class OmmlTests(unittest.TestCase):
             self.assertEqual(next(run for run in cell.paragraphs[0].runs if run.text).font.name, "Consolas")
         self.assertEqual(document.paragraphs[0].runs[0].font.name, "Arial")
 
+    def test_nested_scripts_inside_bold_or_italic_markup_are_preserved(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", "**(C<sub>6</sub>H<sub>8</sub>N)SnCl<sub>3</sub>**")]
+        )
+        runs = document.paragraphs[0].runs
+        assert any(run.text == "6" and run.font.subscript and run.bold for run in runs)
+        assert any(run.text == "3" and run.font.subscript and run.bold for run in runs)
+
     def test_display_equations_are_omml_and_numbered(self) -> None:
         document = render_blocks_to_doc(
             [Block("equation", r"E = mc^2"), Block("equation", r"a = b")]
@@ -273,6 +281,15 @@ M_{i,\ell} &= \sqrt{\frac14+\sum_{j\in\mathcal N_i}\chi_{ij,\ell}^2},\\
             assert paragraph.runs
             assert all(run.font.color.rgb is not None for run in paragraph.runs)
             assert all(str(run.font.color.rgb) == "000000" for run in paragraph.runs)
+
+    def test_math_fence_is_native_display_equation(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("``` math\nD_{zz}(r)=\\frac{n(+E_z)}{E_z^2}\n```\n", encoding="utf-8")
+            blocks = parse_markdown(path)
+        self.assertEqual([block.kind for block in blocks], ["equation"])
+        document = render_blocks_to_doc(blocks)
+        self.assertIn("oMathPara", document._element.xml)
 
 
 if __name__ == "__main__":
