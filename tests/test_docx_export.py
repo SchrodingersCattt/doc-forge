@@ -236,3 +236,25 @@ def test_redline_preserves_baseline_revisions_by_default(tmp_path: Path) -> None
     assert root.xpath('.//w:del[@w:id="1"]', namespaces=ns)
     assert visible_text(root, "final").strip() == "after"
     assert visible_text(root, "original").strip() == "before"
+
+
+def test_redline_tracks_changed_figures_and_keeps_both_media_payloads(tmp_path: Path) -> None:
+    base_image = tmp_path / "base.png"
+    current_image = tmp_path / "current.png"
+    Image.new("RGB", (16, 8), "red").save(base_image)
+    Image.new("RGB", (16, 8), "blue").save(current_image)
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    _sample_docx(base, base_image)
+    _sample_docx(current, current_image)
+    output = tmp_path / "merged.docx"
+    create_tracked_docx(base, current, output, author="gmy", overwrite=True)
+    with zipfile.ZipFile(output) as archive:
+        from lxml import etree
+
+        root = etree.fromstring(archive.read("word/document.xml"))
+        media = [name for name in archive.namelist() if name.startswith("word/media/")]
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(media) >= 2
+    assert root.xpath(".//w:del//w:drawing", namespaces=ns)
+    assert root.xpath(".//w:ins//w:drawing", namespaces=ns)

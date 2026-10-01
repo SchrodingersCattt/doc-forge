@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import copy
 import difflib
+import hashlib
+import posixpath
 import re
 import unicodedata
 import zipfile
@@ -416,7 +418,7 @@ def _revision(kind: str, tokens: list[Token], context: Context) -> etree._Elemen
 
 def _has_revisions(element: etree._Element) -> bool:
     return any(
-        element.iter(f"{{{W}}}{name}")
+        next(element.iter(f"{{{W}}}{name}"), None) is not None
         for name in ("ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange")
     )
 
@@ -611,6 +613,63 @@ def _carry_comment_markers(
     return result
 
 
+def _drawing_signature(drawing: etree._Element, package: Package) -> bytes:
+    """Compare drawing layout and image bytes without package-local rIds."""
+    result = copy.deepcopy(drawing)
+    rels = etree.fromstring(package.parts["word/_rels/document.xml.rels"])
+    by_id = {node.get("Id"): node for node in rels}
+    for blip in result.xpath(".//a:blip[@r:embed]", namespaces={"a": A, "r": R}):
+        rid = blip.get(f"{{{R}}}embed")
+        relation = by_id.get(rid)
+        if relation is None:
+            continue
+        target = relation.get("Target", "")
+        part = posixpath.normpath(posixpath.join("word", target))
+        payload = package.parts.get(part, b"")
+        blip.set(f"{{{R}}}embed", hashlib.sha256(payload).hexdigest())
+    return etree.tostring(result)
+
+
+def _merge_drawing_paragraph(
+    base: etree._Element,
+    current: etree._Element,
+    context: Context,
+    base_package: Package,
+    current_package: Package,
+    *,
+    preserve_base_revisions: bool,
+) -> etree._Element:
+    base_drawings = base.xpath(".//w:drawing", namespaces=NS)
+    current_drawings = current.xpath(".//w:drawing", namespaces=NS)
+    result = _carry_comment_markers(base, current) if _events(base) else copy.deepcopy(current)
+    if not preserve_base_revisions or not base_drawings or not current_drawings:
+        return result
+    if _drawing_signature(base_drawings[0], base_package) == _drawing_signature(
+        current_drawings[0], current_package
+    ):
+        return result
+    base_run = base_drawings[0].getparent()
+    current_run = current_drawings[0].getparent()
+    if base_run is None or current_run is None:
+        return result
+    target_run = next(
+        (node for node in result.iter() if node.tag == f"{{{W}}}r" and node.find("./w:drawing", NS) is not None),
+        None,
+    )
+    if target_run is None:
+        return result
+    parent = target_run.getparent()
+    index = parent.index(target_run)
+    parent.remove(target_run)
+    deleted = etree.Element(f"{{{W}}}del", attrib=context.attrs())
+    deleted.append(copy.deepcopy(base_run))
+    inserted = etree.Element(f"{{{W}}}ins", attrib=context.attrs())
+    inserted.append(copy.deepcopy(current_run))
+    parent.insert(index, deleted)
+    parent.insert(index + 1, inserted)
+    return result
+
+
 def _merge_table(
     base: etree._Element,
     current: etree._Element,
@@ -731,6 +790,48 @@ def _copy_comment_parts(base: Package, current: Package) -> None:
         current.parts[content_name] = etree.tostring(
             current_types, xml_declaration=True, encoding="UTF-8", standalone=True
         )
+
+
+def _import_base_drawing_relationships(
+    base: Package, current: Package, root: etree._Element
+) -> None:
+    """Make baseline drawing relationships valid in the current package."""
+    rel_name = "word/_rels/document.xml.rels"
+    base_rels = etree.fromstring(base.parts[rel_name])
+    current_rels = etree.fromstring(current.parts[rel_name])
+    by_id = {node.get("Id"): node for node in base_rels}
+    existing = {node.get("Id") for node in current_rels}
+    next_id = 1
+    for value in existing:
+        if value and value.startswith("rId"):
+            try:
+                next_id = max(next_id, int(value[3:]) + 1)
+            except ValueError:
+                pass
+    imported: dict[str, str] = {}
+    for blip in root.xpath("//a:blip[@r:embed]", namespaces={"a": A, "r": R}):
+        old_id = blip.get(f"{{{R}}}embed")
+        relation = by_id.get(old_id)
+        if relation is None or not relation.get("Type", "").endswith("/image"):
+            continue
+        target = relation.get("Target", "")
+        source_part = posixpath.normpath(posixpath.join("word", target))
+        payload = base.parts.get(source_part)
+        if payload is None:
+            continue
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest not in imported:
+            name = f"word/media/zwx-{digest[:16]}-{posixpath.basename(target)}"
+            current.parts.setdefault(name, payload)
+            new_id = f"rId{next_id}"
+            next_id += 1
+            copied = copy.deepcopy(relation)
+            copied.set("Id", new_id)
+            copied.set("Target", posixpath.relpath(name, "word"))
+            current_rels.append(copied)
+            imported[digest] = new_id
+        blip.set(f"{{{R}}}embed", imported[digest])
+    current.set_xml(rel_name, current_rels)
 
 
 def _enable_tracking(package: Package) -> None:
@@ -913,6 +1014,8 @@ def create_tracked_docx(
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
+    if preserve_base_revisions:
+        _import_base_drawing_relationships(base_package, current_package, raw_base_root)
     # A reviewed DOCX may already contain a prior author's tracked changes.
     # Keep that raw tree as the redline substrate by default; its final view is
     # still used for alignment and for computing only the new diff.
@@ -933,7 +1036,14 @@ def create_tracked_docx(
             new = current_blocks[current_index]  # type: ignore[index]
             if old.kind == "p":
                 children.append(
-                    _carry_comment_markers(old.element, new.element)
+                    _merge_drawing_paragraph(
+                        old.element,
+                        new.element,
+                        context,
+                        base_package,
+                        current_package,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
                     if old.drawing or new.drawing
                     else _merge_paragraph(
                         old.element,
