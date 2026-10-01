@@ -7,6 +7,8 @@ with a freshly generated DOCX, then rebuilds the current package so that:
   fields, drawings, and run-level formatting);
 - text edits become native Word revisions (``w:ins`` / ``w:del`` /
   ``w:moveFrom`` / ``w:moveTo`` / ``w:rPrChange`` / ``w:pPrChange``);
+- revisions already present in the reviewed baseline remain in the output by
+  default, while the newly generated DOCX is diffed against its final view;
 - review comments and their anchors are carried forward from the baseline;
 - the resulting package is validated (relationship ids, tracking ordering,
   and acceptance-identity against the fresh document).
@@ -29,6 +31,7 @@ from .package import Package
 from ..output import validate_output_path
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 XML = "http://www.w3.org/XML/1998/namespace"
@@ -67,6 +70,8 @@ PASSTHROUGH_LOCAL_NAMES = {
 @dataclass(frozen=True)
 class Style:
     rpr: etree._Element | None
+    opaque: etree._Element | None = None
+    revision: etree._Element | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,19 @@ def visible_text(element: etree._Element, view: str = "final") -> str:
         elif node.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
             hidden = view == "original"
         if hidden:
+            return
+        if node.tag == f"{{{M}}}d":
+            properties = node.find(f"{{{M}}}dPr")
+            begin = properties.find(f"{{{M}}}begChr") if properties is not None else None
+            end = properties.find(f"{{{M}}}endChr") if properties is not None else None
+            out.append(begin.get(f"{{{M}}}val", "(") if begin is not None else "(")
+            for child in node:
+                if child is not properties:
+                    walk(child, hidden)
+            out.append(end.get(f"{{{M}}}val", ")") if end is not None else ")")
+            return
+        if node.tag == f"{{{M}}}t":
+            out.append(node.text or "")
             return
         if node.tag == f"{{{W}}}t":
             out.append(node.text or "")
@@ -235,25 +253,42 @@ def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int
     pieces: list[str] = []
     spans: list[tuple[int, int, Style]] = []
     offset = 0
-    for node in paragraph.iter():
-        if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
+
+    def revision_shell(node: etree._Element) -> etree._Element | None:
+        ancestor = node.getparent()
+        while ancestor is not None and ancestor.tag != f"{{{W}}}p":
+            if ancestor.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
+                return etree.Element(ancestor.tag, attrib=dict(ancestor.attrib), nsmap=ancestor.nsmap)
+            ancestor = ancestor.getparent()
+        return None
+
+    def walk(node: etree._Element) -> None:
+        nonlocal offset
+        if view == "final" and node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
+            return
+        if node.tag == f"{{{M}}}oMath" and node.find(f".//{{{M}}}d") is not None:
+            value = visible_text(node, view)
+            style = Style(None, copy.deepcopy(node), revision_shell(node))
+        elif node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
             value = "\t" if node.tag == f"{{{W}}}tab" else "\n"
+            style = Style(None, revision=revision_shell(node))
         elif node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
             value = node.text or ""
+            run = node
+            while run is not None and run.tag != f"{{{W}}}r":
+                run = run.getparent()
+            rpr = run.find("./w:rPr", NS) if run is not None else None
+            style = Style(copy.deepcopy(rpr) if rpr is not None else None, revision=revision_shell(node))
         else:
-            continue
-        if view == "final" and (_inside(node, "del") or _inside(node, "moveFrom")):
-            continue
-        if not value:
-            continue
-        run = node
-        while run is not None and run.tag != f"{{{W}}}r":
-            run = run.getparent()
-        rpr = run.find("./w:rPr", NS) if run is not None else None
-        style = Style(copy.deepcopy(rpr) if rpr is not None else None)
-        pieces.append(value)
-        spans.append((offset, offset + len(value), style))
-        offset += len(value)
+            for child in node:
+                walk(child)
+            return
+        if value:
+            pieces.append(value)
+            spans.append((offset, offset + len(value), style))
+            offset += len(value)
+
+    walk(paragraph)
     return "".join(pieces), spans
 
 
@@ -274,11 +309,23 @@ def _tokenize(
     split_offsets.update(start for start, _, _ in spans)
     split_offsets.update(end for _, end, _ in spans)
     result: list[Token] = []
-    for match in TOKEN_RE.finditer(text):
+    opaque = {start: (end, style) for start, end, style in spans if style.opaque is not None}
+    position = 0
+    while position < len(text):
+        if position in opaque:
+            end, style = opaque[position]
+            result.append(Token(text[position:end], position, end, style))
+            position = end
+            continue
+        next_opaque = min((start for start in opaque if start > position), default=len(text))
+        match = TOKEN_RE.match(text, position)
+        if match is None:
+            raise AssertionError(f"Cannot tokenize DOCX text at offset {position}")
+        match_end = min(match.end(), next_opaque)
         points = [
-            match.start(),
-            *sorted(x for x in split_offsets if match.start() < x < match.end()),
-            match.end(),
+            position,
+            *sorted(x for x in split_offsets if position < x < match_end),
+            match_end,
         ]
         for start, end in zip(points, points[1:]):
             token = Token(text[start:end], start, end, _style_at(spans, start))
@@ -292,6 +339,7 @@ def _tokenize(
                 result[-1] = Token(previous.text + token.text, previous.start, token.end, previous.style)
             else:
                 result.append(token)
+        position = match_end
     return result
 
 
@@ -306,11 +354,13 @@ def _events(paragraph: etree._Element) -> list[Event]:
 
     def walk(node: etree._Element) -> None:
         nonlocal offset
+        if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
+            return
         if node.tag in tags:
             owner = node.getparent() if tags[node.tag] == "reference" else node
             events.append(Event(tags[node.tag], offset, len(events), copy.deepcopy(owner)))
             return
-        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
+        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText", f"{{{M}}}t"):
             offset += len(node.text or "")
             return
         if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
@@ -345,15 +395,66 @@ def _run(token: Token, deleted: bool = False) -> etree._Element:
     return run
 
 
+def _materialize(token: Token, *, deleted: bool = False) -> etree._Element:
+    if token.style.opaque is not None:
+        node = copy.deepcopy(token.style.opaque)
+    else:
+        node = _run(token, deleted=deleted)
+    if token.style.revision is not None and not deleted:
+        wrapper = copy.deepcopy(token.style.revision)
+        wrapper.append(node)
+        return wrapper
+    return node
+
+
 def _revision(kind: str, tokens: list[Token], context: Context) -> etree._Element:
     wrapper = etree.Element(f"{{{W}}}{kind}", attrib=context.attrs())
     for token in tokens:
-        wrapper.append(_run(token, deleted=kind == "del"))
+        wrapper.append(_materialize(token, deleted=kind == "del"))
     return wrapper
 
 
+def _has_revisions(element: etree._Element) -> bool:
+    return any(
+        element.iter(f"{{{W}}}{name}")
+        for name in ("ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange")
+    )
+
+
+def _hidden_revision_nodes(paragraph: etree._Element) -> list[tuple[int, etree._Element]]:
+    """Return baseline deletions with their final-view character offsets."""
+    result: list[tuple[int, etree._Element]] = []
+    offset = 0
+
+    def walk(node: etree._Element, hidden: bool = False) -> None:
+        nonlocal offset
+        if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
+            if node.find(f".//{{{W}}}delText") is not None:
+                result.append((offset, copy.deepcopy(node)))
+            return
+        if node.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
+            hidden = False
+        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText", f"{{{M}}}t"):
+            if not hidden:
+                offset += len(node.text or "")
+            return
+        if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
+            if not hidden:
+                offset += 1
+            return
+        for child in node:
+            walk(child, hidden)
+
+    walk(paragraph)
+    return result
+
+
 def _merge_paragraph(
-    base: etree._Element, current: etree._Element, context: Context
+    base: etree._Element,
+    current: etree._Element,
+    context: Context,
+    *,
+    preserve_base_revisions: bool = False,
 ) -> etree._Element:
     base_text, base_spans = _segments(base, "final")
     current_text, current_spans = _segments(current, "final")
@@ -362,8 +463,32 @@ def _merge_paragraph(
     # Character-level redlining would otherwise discard layout controls that
     # have no w:t representation. Review comments remain available by carrying
     # their anchors onto the preserved paragraph.
-    if _needs_passthrough(base) or _needs_passthrough(current):
+    base_has_revisions = preserve_base_revisions and _has_revisions(base)
+    if (_needs_passthrough(base) or _needs_passthrough(current)) and not (
+        base_has_revisions and not any(
+            etree.QName(node).localname in {"drawing", "pict", "object"} for node in base.iter()
+        )
+    ):
         return _carry_comment_markers(base, current) if events else copy.deepcopy(current)
+    # If the final text is unchanged and the freshly generated paragraph does
+    # not introduce an opaque math object, retain the reviewed paragraph
+    # byte-for-byte. This keeps every earlier w:ins/w:del id, author, date,
+    # and formatting boundary instead of needlessly splitting one review edit
+    # into several new wrappers.
+    if base_has_revisions and base_text == current_text and not any(
+        etree.QName(node).localname == "oMath" for node in current.iter()
+    ):
+        result = copy.deepcopy(base)
+        current_ppr = current.find("./w:pPr", NS)
+        old_ppr = result.find("./w:pPr", NS)
+        if current_ppr is not None:
+            if old_ppr is not None:
+                result.replace(old_ppr, copy.deepcopy(current_ppr))
+            else:
+                result.insert(0, copy.deepcopy(current_ppr))
+        elif old_ppr is not None:
+            result.remove(old_ppr)
+        return result
     # Identical, uncommented paragraphs already have the desired final XML in
     # the freshly generated document. Copying them intact preserves page
     # breaks, tabs, fields and other run-level controls that carry no text and
@@ -382,7 +507,11 @@ def _merge_paragraph(
         if tag == "equal":
             for offset, token in enumerate(current_tokens[j1:j2], i1):
                 boundary.setdefault(offset, len(nodes))
-                nodes.append(_run(token))
+                base_token = base_tokens[offset] if offset < len(base_tokens) else None
+                if base_has_revisions and base_token is not None and token.style.opaque is None:
+                    nodes.append(_materialize(base_token))
+                else:
+                    nodes.append(_materialize(token))
                 boundary[offset + 1] = len(nodes)
         elif tag == "delete":
             nodes.append(_revision("del", base_tokens[i1:i2], context))
@@ -399,6 +528,12 @@ def _merge_paragraph(
     for event in events:
         token_boundary = offset_map.get(event.offset, 0)
         placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(event)
+    if base_has_revisions:
+        for offset, revision in _hidden_revision_nodes(base):
+            token_boundary = offset_map.get(offset, 0)
+            placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(
+                Event("baseline-revision", offset, -1, revision)
+            )
     result = etree.Element(f"{{{W}}}p", nsmap=current.nsmap)
     ppr = current.find("./w:pPr", NS)
     ppr_from_current = ppr is not None
@@ -479,7 +614,11 @@ def _carry_comment_markers(
 
 
 def _merge_table(
-    base: etree._Element, current: etree._Element, context: Context
+    base: etree._Element,
+    current: etree._Element,
+    context: Context,
+    *,
+    preserve_base_revisions: bool = False,
 ) -> etree._Element:
     """Keep the current table layout and track cell-text edits where possible."""
     result = copy.deepcopy(current)
@@ -491,7 +630,12 @@ def _merge_table(
     # to metadata and abstracts remain visible as native Word revisions.
     if len(base_paragraphs) == len(current_paragraphs):
         for base_paragraph, current_paragraph in zip(base_paragraphs, list(current_paragraphs)):
-            merged = _merge_paragraph(base_paragraph, current_paragraph, context)
+            merged = _merge_paragraph(
+                base_paragraph,
+                current_paragraph,
+                context,
+                preserve_base_revisions=preserve_base_revisions,
+            )
             current_paragraph.getparent().replace(current_paragraph, merged)
         return result
 
@@ -514,7 +658,12 @@ def _merge_table(
             continue
         index, paragraph = match
         used.add(index)
-        merged = _merge_paragraph(base_paragraph, paragraph, context)
+        merged = _merge_paragraph(
+            base_paragraph,
+            paragraph,
+            context,
+            preserve_base_revisions=preserve_base_revisions,
+        )
         paragraph.getparent().replace(paragraph, merged)
         current_paragraphs[index] = merged
     return result
@@ -760,12 +909,16 @@ def create_tracked_docx(
     *,
     author: str = "M.Y.G.",
     overwrite: bool = False,
+    preserve_base_revisions: bool = True,
 ) -> dict[str, int]:
     validate_output_path(output_path)
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
-    base_root = _accepted_revision_view(raw_base_root)
+    # A reviewed DOCX may already contain a prior author's tracked changes.
+    # Keep that raw tree as the redline substrate by default; its final view is
+    # still used for alignment and for computing only the new diff.
+    base_root = raw_base_root if preserve_base_revisions else _accepted_revision_view(raw_base_root)
     # A freshly supplied current document may itself contain an earlier
     # review pass.  Diff only its accepted view so stale w:ins/w:del and
     # formatting-change markers cannot leak into the new redline.
@@ -784,11 +937,23 @@ def create_tracked_docx(
                 children.append(
                     _carry_comment_markers(old.element, new.element)
                     if old.drawing or new.drawing
-                    else _merge_paragraph(old.element, new.element, context)
+                    else _merge_paragraph(
+                        old.element,
+                        new.element,
+                        context,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
                 )
                 summary["matched" if old.text == new.text else "changed"] += 1
             elif old.kind == "tbl":
-                children.append(_merge_table(old.element, new.element, context))
+                children.append(
+                    _merge_table(
+                        old.element,
+                        new.element,
+                        context,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
+                )
                 summary["matched" if _normalize(old.text) == _normalize(new.text) else "tables_replaced"] += 1
             else:
                 children.append(
@@ -814,10 +979,10 @@ def create_tracked_docx(
         current_body.append(child)
     if current_sectpr is not None:
         current_body.append(copy.deepcopy(current_sectpr))
-    original_markers = _comment_counts(base_root)
+    expected_markers = _comment_counts(base_root)
     final_markers = _comment_counts(current_root)
-    if final_markers != original_markers:
-        missing = {key: value for key, value in original_markers.items() if final_markers.get(key) != value}
+    if final_markers != expected_markers:
+        missing = {key: value for key, value in expected_markers.items() if final_markers.get(key) != value}
         if missing:
             raise AssertionError(f"Comment anchors were not preserved: {missing}")
     current_package.set_xml("word/document.xml", current_root)

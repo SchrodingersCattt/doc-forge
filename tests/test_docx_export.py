@@ -216,3 +216,23 @@ def test_redline_accepts_current_revisions_before_diff(tmp_path: Path) -> None:
     assert visible_text(root, "final").strip() == "after"
     assert visible_text(root, "original").strip() == "before"
     assert not root.xpath(".//w:rPrChange", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+
+
+def test_redline_preserves_baseline_revisions_by_default(tmp_path: Path) -> None:
+    base = tmp_path / "reviewed.docx"
+    _tracked_current(base)
+    current = tmp_path / "current.docx"
+    document = Document()
+    document.add_paragraph("after")
+    document.save(current)
+    output = tmp_path / "merged.docx"
+    create_tracked_docx(base, current, output, author="gmy", overwrite=True)
+    with zipfile.ZipFile(output) as archive:
+        from lxml import etree
+
+        root = etree.fromstring(archive.read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert root.xpath('.//w:ins[@w:id="2"]', namespaces=ns)
+    assert root.xpath('.//w:del[@w:id="1"]', namespaces=ns)
+    assert visible_text(root, "final").strip() == "after"
+    assert visible_text(root, "original").strip() == "before"

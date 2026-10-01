@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     md2.add_argument("current", type=Path, help="Freshly generated DOCX")
     md2.add_argument("-o", "--output", type=Path, required=True, help="Output tracked DOCX path")
     md2.add_argument("--revision-author", default="M.Y.G.", help="Author recorded for revisions")
+    md2.add_argument(
+        "--drop-base-revisions",
+        action="store_true",
+        help="Accept tracked changes already present in the reviewed baseline before diffing",
+    )
     md2.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
     tex = sub.add_parser("tex2docx", help="LaTeX -> DOCX (main + optional SI)")
@@ -270,6 +275,7 @@ def _cmd_redline(args: argparse.Namespace) -> int:
         args.output,
         author=args.revision_author,
         overwrite=args.force,
+        preserve_base_revisions=not args.drop_base_revisions,
     )
     print("tracked revisions: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
     print(args.output)
