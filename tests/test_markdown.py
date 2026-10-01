@@ -113,6 +113,13 @@ class OmmlTests(unittest.TestCase):
         self.assertIn('<m:endChr m:val=")"', xml)
         self.assertIn("<m:sSub>", xml)
 
+    def test_inline_chemical_delimiter_keeps_following_space(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"loss of $[\mathrm{K}(\mathrm{ClO}_4)_6]$ coordination")]
+        )
+        xml = document.paragraphs[0]._p.xml
+        assert 'xml:space="preserve"> coordination' in xml
+
     def test_inline_math_preserves_reaction_arrows(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"$A \rightarrow B$ and $C \longrightarrow D$.")]

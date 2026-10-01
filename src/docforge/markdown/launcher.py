@@ -361,7 +361,7 @@ def set_highlight(run, fill: str = "FFF2CC") -> None:
 
 def append_inline_math(
     paragraph, expression: str, *, bold_default: bool = False, size: float = 11.0
-) -> None:
+) -> bool:
     r"""Render inline TeX with true scripts and scalable delimiters.
 
     Most inline formulae stay as ordinary Word runs so they inherit the
@@ -383,7 +383,7 @@ def append_inline_math(
             for element in elements:
                 omath.append(element)
             paragraph._p.append(omath)
-            return
+            return True
     spans = tokenize_tex(f"${expression}$")
     binary_operators = {"+", "–", "=", "<", ">", "≤", "≥", "≠", "≈", "∼", "±", "∓", "→", "⟶", "←", "⟵"}
     normalized_text = [span.text for span in spans]
@@ -412,6 +412,7 @@ def append_inline_math(
                 run.font.color.rgb = RGBColor.from_string(span.color)
             except ValueError:
                 pass
+    return False
 
 
 def add_inline(
@@ -420,6 +421,7 @@ def add_inline(
     """Render inline Markdown tokens (bold, italic, code, math, comments)."""
     text = normalize_typography(text)
     position = 0
+    last_math_was_omml = False
     for match in INLINE_TOKEN_RE.finditer(text):
         if match.start() > position:
             segment = text[position : match.start()]
@@ -430,21 +432,25 @@ def add_inline(
             set_run_font(run, size=size)
         token = match.group(0)
         if token.startswith("<u>**"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[5:-6])
             run.bold = True
             run.underline = True
             set_run_font(run, size=size)
         elif token.lower().startswith("<sup>"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[5:-6])
             run.bold = bold_default
             run.font.superscript = True
             set_run_font(run, size=size)
         elif token.lower().startswith("<sub>"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[5:-6])
             run.bold = bold_default
             run.font.subscript = True
             set_run_font(run, size=size)
         elif token.startswith("<!--"):
+            last_math_was_omml = False
             inner = token[4:-3].strip()
             if inner.upper().startswith("TODO:"):
                 inner = inner[5:].strip()
@@ -452,20 +458,25 @@ def add_inline(
             set_run_font(run, chinese="宋体", latin="Times New Roman", size=size)
             run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
         elif token.startswith("**"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[2:-2])
             run.bold = True
             set_run_font(run, size=size)
         elif token.startswith("*"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[1:-1])
             run.italic = True
             set_run_font(run, size=size)
         elif token.startswith("`"):
+            last_math_was_omml = False
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
         elif token.startswith("$"):
             before = paragraph.runs[-1] if paragraph.runs else None
             first_math_run = len(paragraph.runs)
-            append_inline_math(paragraph, token[1:-1], bold_default=bold_default, size=size)
+            last_math_was_omml = append_inline_math(
+                paragraph, token[1:-1], bold_default=bold_default, size=size
+            )
             if before is not None and len(paragraph.runs) > first_math_run:
                 first = paragraph.runs[first_math_run]
                 if before.text.endswith(" ") and first.text.startswith(" "):
@@ -473,7 +484,12 @@ def add_inline(
         position = match.end()
     if position < len(text):
         remainder = text[position:]
-        if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and remainder.startswith(" "):
+        if (
+            not last_math_was_omml
+            and paragraph.runs
+            and paragraph.runs[-1].text.endswith(" ")
+            and remainder.startswith(" ")
+        ):
             remainder = remainder.lstrip(" ")
         run = paragraph.add_run(remainder)
         run.bold = bold_default
