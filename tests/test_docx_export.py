@@ -324,3 +324,49 @@ def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Pa
     assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
     assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=ns)) == 2
     assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]", namespaces=ns)) == 2
+    deleted_drawings = root.xpath(".//w:p[w:pPr/w:rPr/w:del]//w:drawing", namespaces=ns)
+    assert deleted_drawings == []
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]//w:drawing", namespaces=ns)) == 1
+
+
+def _run_with_align(text: str, align: str | None):
+    run = OxmlElement("w:r")
+    if align is not None:
+        properties = OxmlElement("w:rPr")
+        marker = OxmlElement("w:vertAlign")
+        marker.set(qn("w:val"), align)
+        properties.append(marker)
+        run.append(properties)
+    node = OxmlElement("w:t")
+    node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    node.text = text
+    run.append(node)
+    return run
+
+
+def test_redline_does_not_subscript_formula_delimiters(tmp_path: Path) -> None:
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    for path, tail in ((base, "here."), (current, "now.")):
+        document = Document()
+        paragraph = document.add_paragraph()
+        paragraph._p.append(_run_with_align("[K(ClO", "baseline"))
+        paragraph._p.append(_run_with_align("4", "subscript"))
+        paragraph._p.append(_run_with_align(")", "baseline"))
+        paragraph._p.append(_run_with_align("6", "subscript"))
+        paragraph._p.append(_run_with_align("] units ", "baseline"))
+        paragraph._p.append(_run_with_align(tail, "baseline"))
+        document.save(path)
+    output = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, output, overwrite=True)
+    from lxml import etree
+
+    root = etree.fromstring(zipfile.ZipFile(output).read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    leaked = []
+    for run in root.xpath(".//w:r[not(ancestor::w:del)]", namespaces=ns):
+        text = "".join(run.xpath(".//w:t/text()", namespaces=ns))
+        align = run.xpath("string(w:rPr/w:vertAlign/@w:val)", namespaces=ns)
+        if any(char in text for char in "()[]") and align == "subscript":
+            leaked.append(text)
+    assert leaked == []

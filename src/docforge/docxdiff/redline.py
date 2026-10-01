@@ -68,6 +68,7 @@ PASSTHROUGH_LOCAL_NAMES = {
 @dataclass(frozen=True)
 class Style:
     rpr: etree._Element | None
+    revision: etree._Element | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,47 @@ def _align(base: list[Block], current: list[Block]) -> list[tuple[str, int | Non
     return list(reversed(edits))
 
 
+def _revision_shell(node: etree._Element) -> etree._Element | None:
+    """Copy an enclosing insertion marker without its children."""
+    ancestor = node.getparent()
+    while ancestor is not None and ancestor.tag != f"{{{W}}}p":
+        if ancestor.tag in (f"{{{W}}}ins", f"{{{W}}}moveTo"):
+            return etree.Element(ancestor.tag, attrib=dict(ancestor.attrib), nsmap=ancestor.nsmap)
+        ancestor = ancestor.getparent()
+    return None
+
+
+def _has_revisions(element: etree._Element) -> bool:
+    return any(
+        next(element.iter(f"{{{W}}}{name}"), None) is not None
+        for name in ("ins", "del", "moveFrom", "moveTo")
+    )
+
+
+def _hidden_revision_nodes(paragraph: etree._Element) -> list[tuple[int, etree._Element]]:
+    """Return baseline deletions with their final-view character offsets."""
+    result: list[tuple[int, etree._Element]] = []
+    offset = 0
+
+    def walk(node: etree._Element) -> None:
+        nonlocal offset
+        if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
+            if node.find(f".//{{{W}}}delText") is not None or node.find(f".//{{{W}}}t") is not None:
+                result.append((offset, copy.deepcopy(node)))
+            return
+        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
+            offset += len(node.text or "")
+            return
+        if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
+            offset += 1
+            return
+        for child in node:
+            walk(child)
+
+    walk(paragraph)
+    return result
+
+
 def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int, int, Style]]]:
     pieces: list[str] = []
     spans: list[tuple[int, int, Style]] = []
@@ -274,11 +316,23 @@ def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int
         while run is not None and run.tag != f"{{{W}}}r":
             run = run.getparent()
         rpr = run.find("./w:rPr", NS) if run is not None else None
-        style = Style(copy.deepcopy(rpr) if rpr is not None else None)
+        style = Style(
+            copy.deepcopy(rpr) if rpr is not None else None,
+            revision=_revision_shell(node),
+        )
         pieces.append(value)
         spans.append((offset, offset + len(value), style))
         offset += len(value)
     return "".join(pieces), spans
+
+
+def _vert_align(style: Style) -> str | None:
+    if style.rpr is None:
+        return None
+    marker = style.rpr.find(f"{{{W}}}vertAlign")
+    if marker is None:
+        return None
+    return marker.get(f"{{{W}}}val")
 
 
 def _style_at(spans: list[tuple[int, int, Style]], offset: int) -> Style:
@@ -312,8 +366,13 @@ def _tokenize(
                 # token. Word frequently stores it in a separate run (or at a
                 # review-format boundary); preserving that artificial boundary
                 # creates a standalone revision run that can wrap to the next
-                # line as an orphan punctuation mark.
-                result[-1] = Token(previous.text + token.text, previous.start, token.end, previous.style)
+                # line as an orphan punctuation mark. Do not glue across a
+                # script change: a baseline ")" or "]" after a subscript would
+                # otherwise inherit that subscript.
+                if _vert_align(previous.style) == _vert_align(token.style):
+                    result[-1] = Token(previous.text + token.text, previous.start, token.end, previous.style)
+                else:
+                    result.append(token)
             else:
                 result.append(token)
     return result
@@ -330,6 +389,8 @@ def _events(paragraph: etree._Element) -> list[Event]:
 
     def walk(node: etree._Element) -> None:
         nonlocal offset
+        if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
+            return
         if node.tag in tags:
             owner = node.getparent() if tags[node.tag] == "reference" else node
             events.append(Event(tags[node.tag], offset, len(events), copy.deepcopy(owner)))
@@ -369,19 +430,50 @@ def _run(token: Token, deleted: bool = False) -> etree._Element:
     return run
 
 
+def _materialize(token: Token, *, deleted: bool = False) -> etree._Element:
+    node = _run(token, deleted=deleted)
+    if token.style.revision is not None and not deleted:
+        wrapper = copy.deepcopy(token.style.revision)
+        wrapper.append(node)
+        return wrapper
+    return node
+
+
 def _revision(kind: str, tokens: list[Token], context: Context) -> etree._Element:
     wrapper = etree.Element(f"{{{W}}}{kind}", attrib=context.attrs())
     for token in tokens:
-        wrapper.append(_run(token, deleted=kind == "del"))
+        wrapper.append(_materialize(token, deleted=kind == "del"))
     return wrapper
 
 
 def _merge_paragraph(
-    base: etree._Element, current: etree._Element, context: Context
+    base: etree._Element,
+    current: etree._Element,
+    context: Context,
+    *,
+    preserve_base_revisions: bool = False,
 ) -> etree._Element:
     base_text, base_spans = _segments(base, "final")
     current_text, current_spans = _segments(current, "final")
     events = _events(base)
+    base_has_revisions = preserve_base_revisions and _has_revisions(base)
+    # Unchanged final text keeps the reviewed w:ins/w:del author, date, and
+    # boundaries. Rebuilding the paragraph would drop metadata deletions such
+    # as a removed corresponding-author mark or email.
+    if base_has_revisions and base_text == current_text and not (
+        _needs_passthrough(base) or _needs_passthrough(current)
+    ):
+        result = copy.deepcopy(base)
+        current_ppr = current.find("./w:pPr", NS)
+        old_ppr = result.find("./w:pPr", NS)
+        if current_ppr is not None:
+            if old_ppr is not None:
+                result.replace(old_ppr, copy.deepcopy(current_ppr))
+            else:
+                result.insert(0, copy.deepcopy(current_ppr))
+        elif old_ppr is not None:
+            result.remove(old_ppr)
+        return result
     # Preserve structurally complex paragraphs as complete current-package XML.
     # Character-level redlining would otherwise discard layout controls that
     # have no w:t representation. Review comments remain available by carrying
@@ -406,7 +498,11 @@ def _merge_paragraph(
         if tag == "equal":
             for offset, token in enumerate(current_tokens[j1:j2], i1):
                 boundary.setdefault(offset, len(nodes))
-                nodes.append(_run(token))
+                base_token = base_tokens[offset] if offset < len(base_tokens) else None
+                if base_has_revisions and base_token is not None:
+                    nodes.append(_materialize(base_token))
+                else:
+                    nodes.append(_run(token))
                 boundary[offset + 1] = len(nodes)
         elif tag == "delete":
             nodes.append(_revision("del", base_tokens[i1:i2], context))
@@ -423,6 +519,12 @@ def _merge_paragraph(
     for event in events:
         token_boundary = offset_map.get(event.offset, 0)
         placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(event)
+    if base_has_revisions:
+        for offset, revision in _hidden_revision_nodes(base):
+            token_boundary = offset_map.get(offset, 0)
+            placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(
+                Event("baseline-revision", offset, -1, revision)
+            )
     result = etree.Element(f"{{{W}}}p", nsmap=current.nsmap)
     ppr = current.find("./w:pPr", NS)
     ppr_from_current = ppr is not None
@@ -464,6 +566,17 @@ def _mark_paragraph(
         if rpr is None:
             rpr = etree.SubElement(result_ppr, f"{{{W}}}rPr")
         rpr.insert(0, etree.Element(f"{{{W}}}del", attrib=context.attrs()))
+        # A paragraph-mark deletion does not hide drawings. Word keeps rendering
+        # the old figure beside the inserted replacement, so drop the picture
+        # from the deleted paragraph and leave the deletion on the paragraph mark.
+        for drawing in list(result.findall(".//w:drawing", NS)):
+            parent = drawing.getparent()
+            if parent is not None:
+                parent.remove(drawing)
+        for pict in list(result.findall(".//w:pict", NS)):
+            parent = pict.getparent()
+            if parent is not None:
+                parent.remove(pict)
         return result
     result = copy.deepcopy(paragraph)
     ppr = result.find("./w:pPr", NS)
@@ -591,7 +704,12 @@ def _row_revision(row: etree._Element, kind: str, context: Context) -> etree._El
 
 
 def _merge_row_cells(
-    base_row: etree._Element, current_row: etree._Element, context: Context, carry_base
+    base_row: etree._Element,
+    current_row: etree._Element,
+    context: Context,
+    carry_base,
+    *,
+    preserve_base_revisions: bool = False,
 ) -> etree._Element:
     """Merge corresponding cell paragraphs while retaining current row XML."""
     result = copy.deepcopy(current_row)
@@ -613,13 +731,23 @@ def _merge_row_cells(
                 parent.insert(index, _mark_paragraph(carry_base(base_paragraph), "del", context))
                 parent.insert(index + 1, _mark_paragraph(current_paragraph, "ins", context))
                 continue
-            merged = _merge_paragraph(base_paragraph, current_paragraph, context)
+            merged = _merge_paragraph(
+                base_paragraph,
+                current_paragraph,
+                context,
+                preserve_base_revisions=preserve_base_revisions,
+            )
             current_paragraph.getparent().replace(current_paragraph, merged)
     return result
 
 
 def _merge_table(
-    base: etree._Element, current: etree._Element, context: Context, carry_base
+    base: etree._Element,
+    current: etree._Element,
+    context: Context,
+    carry_base,
+    *,
+    preserve_base_revisions: bool = False,
 ) -> tuple[etree._Element, bool]:
     """Diff table rows and cell text, tracking inserted/deleted rows natively."""
     result = copy.deepcopy(current)
@@ -636,12 +764,28 @@ def _merge_table(
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
-                output_rows.append(_merge_row_cells(base_row, current_row, context, carry_base))
+                output_rows.append(
+                    _merge_row_cells(
+                        base_row,
+                        current_row,
+                        context,
+                        carry_base,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
+                )
         elif tag == "replace" and (i2 - i1) == (j2 - j1):
             # Same geometry, changed cell text: preserve row formatting and
             # expose the cell-level insertions/deletions.
             for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
-                output_rows.append(_merge_row_cells(base_row, current_row, context, carry_base))
+                output_rows.append(
+                    _merge_row_cells(
+                        base_row,
+                        current_row,
+                        context,
+                        carry_base,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
+                )
         else:
             for base_row in base_rows[i1:i2]:
                 output_rows.append(_row_revision(base_row, "del", context))
@@ -940,12 +1084,15 @@ def create_tracked_docx(
     *,
     author: str = "M.Y.G.",
     overwrite: bool = False,
+    preserve_base_revisions: bool = True,
 ) -> dict[str, int]:
     validate_output_path(output_path)
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
-    base_root = _accepted_revision_view(raw_base_root)
+    # Keep the reviewed author's w:ins/w:del tree. Alignment still uses the
+    # final view, so only new differences are added on top of those traces.
+    base_root = raw_base_root if preserve_base_revisions else _accepted_revision_view(raw_base_root)
     # A freshly supplied current document may itself contain an earlier
     # review pass.  Diff only its accepted view so stale w:ins/w:del and
     # formatting-change markers cannot leak into the new redline.
@@ -974,11 +1121,22 @@ def create_tracked_docx(
                 children.append(
                     _carry_comment_markers(old.element, new.element)
                     if old.drawing or new.drawing
-                    else _merge_paragraph(old.element, new.element, context)
+                    else _merge_paragraph(
+                        old.element,
+                        new.element,
+                        context,
+                        preserve_base_revisions=preserve_base_revisions,
+                    )
                 )
                 summary["matched" if old.text == new.text else "changed"] += 1
             elif old.kind == "tbl":
-                merged_table, row_revision = _merge_table(old.element, new.element, context, carry_base)
+                merged_table, row_revision = _merge_table(
+                    old.element,
+                    new.element,
+                    context,
+                    carry_base,
+                    preserve_base_revisions=preserve_base_revisions,
+                )
                 children.append(merged_table)
                 if _normalize(old.text) == _normalize(new.text):
                     summary["matched"] += 1

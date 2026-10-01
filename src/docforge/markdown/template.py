@@ -83,6 +83,7 @@ class ManuscriptMetadata:
     author_contributions: str = ""
     code_availability: str = ""
     data_software_availability: str = ""
+    supporting_information: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,24 @@ def _metadata_key(label: str) -> str | None:
         "corresponding emails": "contacts",
         "code availability": "code_availability",
         "data and software availability": "data_software_availability",
+        "supporting information": "supporting_information",
     }.get(label)
+
+
+def _join_metadata_prose(lines: list[str]) -> str:
+    """Join wrapped lines, and keep a blank line as a paragraph break."""
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            current.append(stripped)
+        elif current:
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs)
 
 
 def parse_metadata(path: Path) -> ManuscriptMetadata:
@@ -189,16 +207,23 @@ def parse_metadata(path: Path) -> ManuscriptMetadata:
         authors=" ".join(retained_authors).strip(),
         affiliations=" ".join(raw_values.get("affiliations", [])).strip(),
         contacts=tuple(contact_lines),
-        acknowledgement=" ".join(raw_values.get("acknowledgement", [])).strip(),
-        author_contributions=" ".join(raw_values.get("author_contributions", [])).strip(),
-        code_availability=" ".join(raw_values.get("code_availability", [])).strip(),
-        data_software_availability=" ".join(raw_values.get("data_software_availability", [])).strip(),
+        acknowledgement=_join_metadata_prose(sections.get("acknowledgement", [])),
+        author_contributions=_join_metadata_prose(sections.get("author_contributions", [])),
+        code_availability=_join_metadata_prose(sections.get("code_availability", [])),
+        data_software_availability=_join_metadata_prose(sections.get("data_software_availability", [])),
+        supporting_information=_join_metadata_prose(sections.get("supporting_information", [])),
     )
 
 
 def _is_filled_metadata(value: str) -> bool:
     """Treat unresolved optional metadata markers as absent during assembly."""
     return value.strip().upper() not in {"", "TODO", "TBD", "TBA"}
+
+
+def _append_metadata_paragraphs(nodes: list, template, style_id: str, text: str, *, prototype=None) -> None:
+    for paragraph in text.split("\n\n"):
+        if paragraph.strip():
+            nodes.append(_new_paragraph(template, style_id, paragraph.strip(), prototype=prototype))
 
 
 def _format_bibliography_record(record: Mapping[str, object], key: str) -> str:
@@ -2168,18 +2193,21 @@ def assemble_markdown_template(
         key for key in used
         if resolved_bibliography_scope == "all" or key not in citation_base
     ) if citation_base is not None else tuple(used)
+    if include_metadata_back_matter and _is_filled_metadata(metadata.supporting_information):
+        output_nodes.append(_terminal_heading(template, styles["heading_1"], "SUPPORTING INFORMATION", prototype=prototypes.paragraphs.get("heading_1")))
+        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.supporting_information, prototype=prototypes.paragraphs.get("body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.acknowledgement):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1")))
-        output_nodes.append(_new_paragraph(template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body")))
+        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.author_contributions):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("heading_1")))
-        output_nodes.append(_new_paragraph(template, styles["body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("body")))
+        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.code_availability):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
-        output_nodes.append(_new_paragraph(template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body")))
+        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.data_software_availability):
         output_nodes.append(_terminal_heading(template, styles["heading_1"], "DATA AND SOFTWARE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
-        output_nodes.append(_new_paragraph(template, styles["body"], metadata.data_software_availability, prototype=prototypes.paragraphs.get("body")))
+        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.data_software_availability, prototype=prototypes.paragraphs.get("body"))
     if reference_keys:
         reference_heading = _terminal_heading(
             template,

@@ -91,6 +91,17 @@ def test_metadata_and_style_discovery(tmp_path: Path) -> None:
     assert styles["reference"] == "EndNoteBibliography"
 
 
+def test_metadata_keeps_blank_lines_as_paragraph_breaks(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# ACKNOWLEDGMENTS\n\nFunded.\n\nAI tools were used.\n",
+        encoding="utf-8",
+    )
+    assert parse_metadata(metadata).acknowledgement == "Funded.\n\nAI tools were used."
+    metadata.write_text("# SUPPORTING INFORMATION\n\nSee the SI.\n", encoding="utf-8")
+    assert parse_metadata(metadata).supporting_information == "See the SI."
+
+
 def test_metadata_parses_author_contributions(tmp_path: Path) -> None:
     metadata = tmp_path / "metadata.md"
     metadata.write_text("# TITLE\n\nA title\n# AUTHOR CONTRIBUTIONS\n\nA. Author contributed.\n", encoding="utf-8")
