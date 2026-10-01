@@ -100,6 +100,32 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.text == "4" and run.font.subscript for run in paragraph.runs))
         self.assertTrue(any(run.text == "–" and run.font.superscript for run in paragraph.runs))
 
+    def test_inline_chemical_delimiters_use_formatted_runs(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"The unit is $[\mathrm{K}(\mathrm{ClO}_4)_3]$.")]
+        )
+        paragraph = document.paragraphs[0]
+        self.assertNotIn("oMath", paragraph._p.xml)
+        self.assertEqual(paragraph.text, "The unit is [K(ClO4)3].")
+        placed = [
+            (char, "subscript" if run.font.subscript else "superscript" if run.font.superscript else "baseline")
+            for run in paragraph.runs
+            for char in run.text
+        ]
+        self.assertIn(("4", "subscript"), placed)
+        self.assertIn(("3", "subscript"), placed)
+        for char in "()[]":
+            self.assertIn((char, "baseline"), placed)
+            self.assertNotIn((char, "subscript"), placed)
+
+    def test_inline_chemical_delimiter_keeps_following_space(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"loss of $[\mathrm{K}(\mathrm{ClO}_4)_6]$ coordination")]
+        )
+        xml = document.paragraphs[0]._p.xml
+        self.assertNotIn("oMath", xml)
+        self.assertIn('xml:space="preserve"> coordination', xml)
+
     def test_inline_math_preserves_reaction_arrows(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"$A \rightarrow B$ and $C \longrightarrow D$.")]
@@ -373,3 +399,4 @@ def test_malformed_pipe_table_fails_with_source_location(tmp_path: Path) -> None
     with pytest.raises(ValueError) as excinfo:
         parse_markdown(path)
     assert "Malformed Markdown table" in str(excinfo.value)
+

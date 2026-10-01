@@ -278,6 +278,22 @@ def make_empty_doc(*, configure_normal: bool = True) -> DocumentType:
 # ── inline rendering ───────────────────────────────────────────────────────
 
 
+def set_run_vertical_align(run, mode: str) -> None:
+    """Set baseline, subscript, or superscript without relying on property absence.
+
+    Word treats a missing ``w:vertAlign`` as inheriting the previous run's
+    script position when that run is a single formula delimiter.
+    """
+    if mode not in {"baseline", "subscript", "superscript"}:
+        raise ValueError(f"unsupported vertical align: {mode}")
+    r_pr = run._element.get_or_add_rPr()
+    align = r_pr.find(qn("w:vertAlign"))
+    if align is None:
+        align = OxmlElement("w:vertAlign")
+        r_pr.append(align)
+    align.set(qn("w:val"), mode)
+
+
 def set_run_font(run, *, chinese: str = "仿宋", latin: str = "Times New Roman", size: float = 12.0) -> None:
     run.font.name = latin
     run.font.size = Pt(size)
@@ -370,6 +386,8 @@ def append_inline_math(
     normal italic convention, ``\mathrm`` text and numerals remain upright,
     and ``^``/``_`` become Word ``w:vertAlign`` run properties.  Standalone
     display formulae use :func:`add_equation` and native OMML instead.
+    Non-script runs set ``w:vertAlign`` to baseline so a following delimiter
+    does not keep the previous subscript position.
     """
     spans = tokenize_tex(f"${expression}$")
     binary_operators = {"+", "–", "=", "<", ">", "≤", "≥", "≠", "≈", "∼", "±", "∓", "→", "⟶", "←", "⟵"}
@@ -391,9 +409,15 @@ def append_inline_math(
         run = paragraph.add_run(text)
         run.bold = bold_default or span.bold
         run.italic = span.italic
-        run.font.subscript = span.subscript
-        run.font.superscript = span.superscript
         set_run_font(run, size=size)
+        # Explicit baseline is required. Omitting vertAlign lets Word keep the
+        # previous subscript position on a following delimiter such as ")" or "]".
+        if span.subscript:
+            set_run_vertical_align(run, "subscript")
+        elif span.superscript:
+            set_run_vertical_align(run, "superscript")
+        else:
+            set_run_vertical_align(run, "baseline")
         if span.color:
             try:
                 run.font.color.rgb = RGBColor.from_string(span.color)
