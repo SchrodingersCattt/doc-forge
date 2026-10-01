@@ -475,9 +475,7 @@ def _merge_paragraph(
     # byte-for-byte. This keeps every earlier w:ins/w:del id, author, date,
     # and formatting boundary instead of needlessly splitting one review edit
     # into several new wrappers.
-    if base_has_revisions and base_text == current_text and not any(
-        etree.QName(node).localname == "oMath" for node in current.iter()
-    ):
+    if base_has_revisions and base_text == current_text:
         result = copy.deepcopy(base)
         current_ppr = current.find("./w:pPr", NS)
         old_ppr = result.find("./w:pPr", NS)
