@@ -20,6 +20,10 @@ def _authors(entry: BibliographyEntry) -> str:
     return str(value).replace(" and others", " et al.").strip()
 
 
+def _sentence(text: str) -> str:
+    return text if text.endswith(".") else f"{text}."
+
+
 def plain(entry: BibliographyEntry, label: str = "") -> str:
     raw = entry.get("raw")
     if raw:
@@ -31,9 +35,9 @@ def plain(entry: BibliographyEntry, label: str = "") -> str:
     volume = str(entry.get("volume", "")).strip()
     pages = str(entry.get("pages", entry.get("locator", ""))).strip()
     doi = str(entry.get("doi", "")).strip()
-    parts = [f"{authors}."]
+    parts = [_sentence(authors)]
     if title:
-        parts.append(f"{title}.")
+        parts.append(_sentence(title))
     if venue:
         suffix = f" {volume}" if volume else ""
         if pages:
@@ -61,10 +65,10 @@ def markdown(entry: BibliographyEntry, label: str = "") -> str:
     journal = str(entry.get("journal", entry.get("booktitle", ""))).strip()
     if not journal:
         raise ValueError(f"Bibliography record {entry.key!r} requires journal or booktitle")
-    parts = [f"{authors}."]
+    parts = [_sentence(authors)]
     title = entry.get("title")
     if title:
-        parts.append(f"{str(title).strip()}.")
+        parts.append(_sentence(str(title).strip()))
     journal_part = f"*{journal}*, **{year}**"
     if entry.get("volume") not in (None, ""):
         journal_part += f", *{str(entry.get('volume')).strip()}*"

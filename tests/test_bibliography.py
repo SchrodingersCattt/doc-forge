@@ -1,4 +1,6 @@
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -33,4 +35,14 @@ def test_formatter_profiles_are_explicit() -> None:
     entry = load_json(Path(__file__).parent / "fixtures" / "bibliography.json")["paper"]
     assert "Journal" in format_entry(entry, profile="plain")
     assert "**2024**" in format_entry(entry, profile="markdown")
+
+
+@pytest.mark.parametrize("profile", ["plain", "markdown"])
+def test_formatter_does_not_double_terminal_period(profile: str) -> None:
+    entry = load_json(Path(__file__).parent / "fixtures" / "bibliography.json")["paper"]
+    fields = {**entry.fields, "authors": ["Doe, Jane", "Roe, Alex B. C."]}
+    entry = replace(entry, fields=MappingProxyType(fields))
+    text = format_entry(entry, profile=profile)
+    assert "Roe, Alex B. C. " in text
+    assert ".." not in text
 
