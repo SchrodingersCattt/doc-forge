@@ -100,6 +100,19 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.text == "4" and run.font.subscript for run in paragraph.runs))
         self.assertTrue(any(run.text == "–" and run.font.superscript for run in paragraph.runs))
 
+    def test_inline_chemical_delimiters_use_scalable_omml(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"The unit is $[\mathrm{K}(\mathrm{ClO}_4)_3]$.")]
+        )
+        xml = document.paragraphs[0]._p.xml
+        self.assertIn("<m:oMath>", xml)
+        self.assertEqual(xml.count("<m:d>"), 2)
+        self.assertIn('<m:begChr m:val="["', xml)
+        self.assertIn('<m:endChr m:val="]"', xml)
+        self.assertIn('<m:begChr m:val="("', xml)
+        self.assertIn('<m:endChr m:val=")"', xml)
+        self.assertIn("<m:sSub>", xml)
+
     def test_inline_math_preserves_reaction_arrows(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"$A \rightarrow B$ and $C \longrightarrow D$.")]

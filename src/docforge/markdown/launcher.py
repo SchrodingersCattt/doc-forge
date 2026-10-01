@@ -24,6 +24,7 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 import lxml.etree as etree
 
 from .blocks import Block, SectionSource
+from .omml import parse_math_omml
 from ..tex.tokenize import tokenize_tex
 
 __all__ = [
@@ -361,13 +362,28 @@ def set_highlight(run, fill: str = "FFF2CC") -> None:
 def append_inline_math(
     paragraph, expression: str, *, bold_default: bool = False, size: float = 11.0
 ) -> None:
-    r"""Render inline TeX as ordinary Word runs with true script formatting.
+    r"""Render inline TeX with true scripts and scalable delimiters.
 
-    Inline formulae are intentionally not OMML objects.  Variables retain the
-    normal italic convention, ``\mathrm`` text and numerals remain upright,
-    and ``^``/``_`` become Word ``w:vertAlign`` run properties.  Standalone
-    display formulae use :func:`add_equation` and native OMML instead.
+    Most inline formulae stay as ordinary Word runs so they inherit the
+    manuscript's body font.  Formulae with paired round or square delimiters
+    use inline OMML, because ordinary runs cannot make ``[ ... ]`` or
+    ``( ... )`` grow around a subscripted chemical formula.
     """
+    # Square-bracketed chemical coordination units are the case that needs
+    # scalable delimiters.  Ordinary parentheses in units and function-like
+    # notation (for example ``C_2(10\,\mathrm{ps})`` or ``\mathrm{ln}(k)``)
+    # retain the established run-based inline rendering.
+    if "[" in expression:
+        try:
+            elements = parse_math_omml(expression)
+        except (ValueError, TypeError):
+            elements = []
+        if elements and any(element.tag == f"{MATH}d" for element in elements):
+            omath = OxmlElement("m:oMath")
+            for element in elements:
+                omath.append(element)
+            paragraph._p.append(omath)
+            return
     spans = tokenize_tex(f"${expression}$")
     binary_operators = {"+", "–", "=", "<", ">", "≤", "≥", "≠", "≈", "∼", "±", "∓", "→", "⟶", "←", "⟵"}
     normalized_text = [span.text for span in spans]

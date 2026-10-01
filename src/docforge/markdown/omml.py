@@ -109,18 +109,27 @@ def math_matrix(rows: list[list[list]]) -> etree._Element:
     return matrix
 
 
-def math_parenthesized(element: etree._Element) -> etree._Element:
-    """Wrap one math element in scalable parentheses."""
+def math_delimited(
+    begin_char: str, end_char: str, elements: list[etree._Element]
+) -> etree._Element:
+    """Wrap math elements in Word's scalable delimiter object."""
     delimiter = etree.Element(f"{{{MATH_CONTEXT}}}d")
     properties = etree.Element(f"{{{MATH_CONTEXT}}}dPr")
     begin = etree.Element(f"{{{MATH_CONTEXT}}}begChr")
-    begin.set(f"{{{MATH_CONTEXT}}}val", "(")
+    begin.set(f"{{{MATH_CONTEXT}}}val", begin_char)
     end = etree.Element(f"{{{MATH_CONTEXT}}}endChr")
-    end.set(f"{{{MATH_CONTEXT}}}val", ")")
-    properties.extend((begin, end))
+    end.set(f"{{{MATH_CONTEXT}}}val", end_char)
+    grow = etree.Element(f"{{{MATH_CONTEXT}}}grow")
+    grow.set(f"{{{MATH_CONTEXT}}}val", "1")
+    properties.extend((begin, end, grow))
     delimiter.append(properties)
-    delimiter.append(math_arg("e", [element]))
+    delimiter.append(math_arg("e", elements))
     return delimiter
+
+
+def math_parenthesized(element: etree._Element) -> etree._Element:
+    """Wrap one math element in scalable parentheses."""
+    return math_delimited("(", ")", [element])
 
 
 def math_script(base, subscript=None, superscript=None) -> etree._Element:
@@ -182,6 +191,29 @@ def parse_script_arg(text: str, index: int, normal: bool = False) -> tuple[list,
     return parse_math_omml(text[index], normal=normal), index + 1
 
 
+def find_matching_delimiter(text: str, start: int) -> tuple[str, int] | None:
+    """Return the matching delimiter and its index for ``(`` or ``[``."""
+    pairs = {"(": ")", "[": "]"}
+    opening = text[start]
+    closing = pairs.get(opening)
+    if closing is None:
+        return None
+    stack = [opening]
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if char in pairs:
+            stack.append(char)
+            continue
+        if char not in pairs.values():
+            continue
+        if not stack or pairs[stack[-1]] != char:
+            continue
+        stack.pop()
+        if not stack:
+            return char, index
+    return None
+
+
 def parse_math_omml(text: str, normal: bool = False) -> list:
     """Parse the documented math subset into a flat list of OMML elements."""
     elements: list = []
@@ -197,6 +229,14 @@ def parse_math_omml(text: str, normal: bool = False) -> list:
             elements.extend(parse_math_omml(text[index + 1 : end - 1], normal=normal))
             index = end
             continue
+        if char in "([":
+            match = find_matching_delimiter(text, index)
+            if match is not None:
+                closing, end = match
+                inner = parse_math_omml(text[index + 1 : end], normal=normal)
+                elements.append(math_delimited(char, closing, inner))
+                index = end + 1
+                continue
         if char in "_^" and elements:
             base = elements.pop()
             subscript = None
@@ -231,6 +271,9 @@ def parse_math_omml(text: str, normal: bool = False) -> list:
                 continue
             command = match.group(0)
             command_end = index + len(command)
+            if command in (r"\left", r"\right"):
+                index = command_end
+                continue
             if command in (r"\frac", r"\tfrac", r"\dfrac"):
                 numerator, num_end = parse_command_arg(text, command_end)
                 denominator, den_end = parse_command_arg(text, num_end)
@@ -296,6 +339,8 @@ __all__ = [
     "math_fraction",
     "math_matrix",
     "math_parenthesized",
+    "math_delimited",
+    "find_matching_delimiter",
     "math_script",
     "find_matching_brace",
     "parse_command_arg",
