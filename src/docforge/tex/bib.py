@@ -133,9 +133,35 @@ class CitationResolver:
         return dict(self._key2num)
 
 
-# The shared resolver is the implementation source.  Keep this assignment
-# after the legacy compatibility class so old imports retain the same name.
-CitationResolver = SharedCitationResolver
+class CitationResolver(SharedCitationResolver):
+    """Use the shared numbering logic and TeX-aware reference formatting."""
+
+    def reference_items(self, *, profile: str = "plain") -> list[tuple[str, str]]:
+        if profile != "plain":
+            return super().reference_items(profile=profile)
+        items: list[tuple[str, str]] = []
+        for key in self.order:
+            if key not in self.entries:
+                continue
+            entry = self.entries[key]
+            authors = _author_short(str(entry.get("author", ""))).rstrip(".")
+            title = plain_tex(str(entry.get("title", ""))).rstrip(".")
+            journal = plain_tex(str(entry.get("journal", entry.get("booktitle", ""))))
+            volume = str(entry.get("volume", ""))
+            pages = plain_tex(str(entry.get("pages", "")))
+            year = str(entry.get("year", ""))
+            doi = str(entry.get("doi", ""))
+            parts = [f"{authors}.", f"{title}."]
+            if journal:
+                venue = journal + (f" {volume}" if volume else "")
+                venue += f", {pages}" if pages else ""
+                parts.append(f"{venue} ({year}).")
+            elif year:
+                parts.append(f"({year}).")
+            if doi:
+                parts.append(f"https://doi.org/{doi}")
+            items.append((f"{self.local_prefix}{self._key2num[key]}", " ".join(parts)))
+        return items
 
 
 def _citation_sort_key(label: str) -> tuple[int, int, str]:

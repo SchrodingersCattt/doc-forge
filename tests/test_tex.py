@@ -98,6 +98,20 @@ class BibTests(unittest.TestCase):
         self.assertEqual(resolver.resolve("b"), "[2]")
         self.assertEqual(resolver.resolve("a"), "[1]")
 
+    def test_tex_references_format_bibtex_authors_and_ranges(self) -> None:
+      with TemporaryDirectory() as directory:
+        path = Path(directory) / "ref.bib"
+        path.write_text(BIB_TEXT, encoding="utf-8")
+        resolver = CitationResolver(parse_bib(path))
+        resolver.resolve("author2020,author2021")
+        self.assertEqual(
+          resolver.reference_items(),
+          [
+                    ("1", "Alice Author & Bob Writer. A title. Journal of Things 1, 1–5 (2020)."),
+                    ("2", "Carol Author et al. Another title. Other Journal (2021)."),
+          ],
+        )
+
 
 class LabelMapTests(unittest.TestCase):
     def test_main_si_cross_reference(self) -> None:
