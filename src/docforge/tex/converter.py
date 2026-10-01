@@ -12,7 +12,7 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import OxmlElement, parse_xml
 from ..docxdiff import Package
-from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _blocks, visible_text
+from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_view, _blocks, visible_text
 from ..math import latex_to_omml
 from ..output import validate_output_path
 from .bib import CitationResolver, parse_bib, _compress_labels
@@ -1743,7 +1743,7 @@ def validate_docx_package(path: Path, tex_path: Path, auxiliary_tex_path: Path |
             raise ValueError(f"DOCX is missing required parts: {sorted(missing)}")
 
     document = Document(str(path))
-    root = Package.load(path).xml("word/document.xml")
+    root = _accepted_revision_view(Package.load(path).xml("word/document.xml"))
     visible = "\n".join(
         visible_text(block.element, "final") for block in _blocks(root)[1]
     )

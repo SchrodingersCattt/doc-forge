@@ -283,3 +283,44 @@ def test_redline_tracks_moved_table_rows(tmp_path: Path) -> None:
     with zipfile.ZipFile(current) as archive:
         current_root = etree.fromstring(archive.read("word/document.xml"))
     assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
+
+
+def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:
+    from lxml import etree
+
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    for path, text, color in ((base, "July wording", "red"), (current, "Current wording", "blue")):
+        image = tmp_path / f"{color}.png"
+        Image.new("RGB", (12, 12), color).save(image)
+        document = Document()
+        paragraph = document.add_paragraph()
+        hyperlink = OxmlElement("w:hyperlink")
+        run = OxmlElement("w:r")
+        node = OxmlElement("w:t")
+        node.text = text
+        run.append(node)
+        hyperlink.append(run)
+        paragraph._p.append(hyperlink)
+        document.add_paragraph().add_run().add_picture(str(image))
+        document.save(path)
+
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, tracked)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(tracked) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+        assert archive.testzip() is None
+    with zipfile.ZipFile(base) as archive:
+        base_root = etree.fromstring(archive.read("word/document.xml"))
+    with zipfile.ZipFile(current) as archive:
+        current_root = etree.fromstring(archive.read("word/document.xml"))
+    original = [
+        visible_text(p, "original")
+        for p in root.xpath(".//w:body/w:p[not(w:pPr/w:rPr/w:ins)]", namespaces=ns)
+    ]
+    expected = [visible_text(p) for p in base_root.xpath(".//w:body/w:p", namespaces=ns)]
+    assert original == expected
+    assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=ns)) == 2
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]", namespaces=ns)) == 2

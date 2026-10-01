@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import posixpath
 import re
 import unicodedata
 import zipfile
@@ -495,6 +496,62 @@ def _mark_table(table: etree._Element, kind: str, context: Context) -> etree._El
     return result
 
 
+def _base_relationships(base_package: Package, current_package: Package):
+    """Copy relationships referenced by deleted baseline paragraphs into the output."""
+    rel_name = "word/_rels/document.xml.rels"
+    original = base_package.xml(rel_name)
+    current = current_package.xml(rel_name)
+    sources = {rel.get("Id"): rel for rel in original}
+    used = {rel.get("Id") for rel in current}
+    copied: dict[str, str] = {}
+
+    def carry(paragraph: etree._Element) -> etree._Element:
+        result = copy.deepcopy(paragraph)
+        for node in result.iter():
+            for attr in (f"{{{R}}}id", f"{{{R}}}embed", f"{{{R}}}link"):
+                old_id = node.get(attr)
+                if old_id is None:
+                    continue
+                if old_id not in sources:
+                    raise ValueError(f"Missing baseline relationship: {old_id}")
+                if old_id not in copied:
+                    rel = copy.deepcopy(sources[old_id])
+                    number = 1
+                    while f"rId{number}" in used:
+                        number += 1
+                    new_id = f"rId{number}"
+                    used.add(new_id)
+                    rel.set("Id", new_id)
+                    if rel.get("TargetMode") != "External":
+                        target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
+                        if not target.startswith("word/media/") or target not in base_package.parts:
+                            raise ValueError(f"Unsupported baseline relationship target: {target}")
+                        suffix = posixpath.splitext(target)[1]
+                        new_target = f"media/redline_base_{number}{suffix}"
+                        current_package.parts[f"word/{new_target}"] = base_package.parts[target]
+                        rel.set("Target", new_target)
+                    current.append(rel)
+                    copied[old_id] = new_id
+                node.set(attr, copied[old_id])
+        return result
+
+    def save() -> None:
+        current_package.set_xml(rel_name, current)
+
+    return carry, save
+
+
+def _drawing_payloads(paragraph: etree._Element, package: Package) -> list[bytes]:
+    rels = {rel.get("Id"): rel for rel in package.xml("word/_rels/document.xml.rels")}
+    result = []
+    for node in paragraph.findall(".//a:blip", {"a": A}):
+        rel = rels.get(node.get(f"{{{R}}}embed"))
+        if rel is not None and rel.get("TargetMode") != "External":
+            target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
+            result.append(package.parts[target])
+    return result
+
+
 def _table_is_deleted(table: etree._Element) -> bool:
     rows = table.findall("./w:tr", NS)
     return bool(rows) and all(row.find("./w:trPr/w:del", NS) is not None for row in rows)
@@ -534,7 +591,7 @@ def _row_revision(row: etree._Element, kind: str, context: Context) -> etree._El
 
 
 def _merge_row_cells(
-    base_row: etree._Element, current_row: etree._Element, context: Context
+    base_row: etree._Element, current_row: etree._Element, context: Context, carry_base
 ) -> etree._Element:
     """Merge corresponding cell paragraphs while retaining current row XML."""
     result = copy.deepcopy(current_row)
@@ -548,13 +605,21 @@ def _merge_row_cells(
         if len(base_paragraphs) != len(current_paragraphs):
             continue
         for base_paragraph, current_paragraph in zip(base_paragraphs, current_paragraphs):
+            if (visible_text(base_paragraph) != visible_text(current_paragraph) and
+                    (_needs_passthrough(base_paragraph) or _needs_passthrough(current_paragraph))):
+                parent = current_paragraph.getparent()
+                index = parent.index(current_paragraph)
+                parent.remove(current_paragraph)
+                parent.insert(index, _mark_paragraph(carry_base(base_paragraph), "del", context))
+                parent.insert(index + 1, _mark_paragraph(current_paragraph, "ins", context))
+                continue
             merged = _merge_paragraph(base_paragraph, current_paragraph, context)
             current_paragraph.getparent().replace(current_paragraph, merged)
     return result
 
 
 def _merge_table(
-    base: etree._Element, current: etree._Element, context: Context
+    base: etree._Element, current: etree._Element, context: Context, carry_base
 ) -> tuple[etree._Element, bool]:
     """Diff table rows and cell text, tracking inserted/deleted rows natively."""
     result = copy.deepcopy(current)
@@ -571,12 +636,12 @@ def _merge_table(
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
-                output_rows.append(_merge_row_cells(base_row, current_row, context))
+                output_rows.append(_merge_row_cells(base_row, current_row, context, carry_base))
         elif tag == "replace" and (i2 - i1) == (j2 - j1):
             # Same geometry, changed cell text: preserve row formatting and
             # expose the cell-level insertions/deletions.
             for base_row, current_row in zip(base_rows[i1:i2], current_rows[j1:j2]):
-                output_rows.append(_merge_row_cells(base_row, current_row, context))
+                output_rows.append(_merge_row_cells(base_row, current_row, context, carry_base))
         else:
             for base_row in base_rows[i1:i2]:
                 output_rows.append(_row_revision(base_row, "del", context))
@@ -889,6 +954,7 @@ def create_tracked_docx(
     base_body, base_blocks = _blocks(base_root)
     current_body, current_blocks = _blocks(current_root)
     context = Context(author, _next_id(raw_base_root))
+    carry_base, save_base_relationships = _base_relationships(base_package, current_package)
     summary = {"matched": 0, "changed": 0, "inserted": 0, "deleted": 0, "tables_replaced": 0}
     children: list[etree._Element] = []
     for action, base_index, current_index in _align(base_blocks, current_blocks):
@@ -896,6 +962,15 @@ def create_tracked_docx(
             old = base_blocks[base_index]  # type: ignore[index]
             new = current_blocks[current_index]  # type: ignore[index]
             if old.kind == "p":
+                changed_drawing = (old.drawing or new.drawing) and (
+                    _drawing_payloads(old.element, base_package)
+                    != _drawing_payloads(new.element, current_package)
+                )
+                if (old.text != new.text and (_needs_passthrough(old.element) or _needs_passthrough(new.element))) or changed_drawing:
+                    children.append(_mark_paragraph(carry_base(old.element), "del", context))
+                    children.append(_mark_paragraph(new.element, "ins", context))
+                    summary["changed"] += 1
+                    continue
                 children.append(
                     _carry_comment_markers(old.element, new.element)
                     if old.drawing or new.drawing
@@ -903,7 +978,7 @@ def create_tracked_docx(
                 )
                 summary["matched" if old.text == new.text else "changed"] += 1
             elif old.kind == "tbl":
-                merged_table, row_revision = _merge_table(old.element, new.element, context)
+                merged_table, row_revision = _merge_table(old.element, new.element, context, carry_base)
                 children.append(merged_table)
                 if _normalize(old.text) == _normalize(new.text):
                     summary["matched"] += 1
@@ -921,7 +996,7 @@ def create_tracked_docx(
         elif action == "delete":
             old = base_blocks[base_index]  # type: ignore[index]
             children.append(
-                _mark_paragraph(old.element, "del", context) if old.kind == "p"
+                _mark_paragraph(carry_base(old.element), "del", context) if old.kind == "p"
                 else _mark_table(old.element, "del", context) if old.kind == "tbl"
                 else copy.deepcopy(old.element)
             )
@@ -948,6 +1023,7 @@ def create_tracked_docx(
         if missing:
             raise AssertionError(f"Comment anchors were not preserved: {missing}")
     current_package.set_xml("word/document.xml", current_root)
+    save_base_relationships()
     _copy_comment_parts(base_package, current_package)
     _enable_tracking(current_package)
     _validate_package_relationships(current_package)
