@@ -13,7 +13,7 @@ from PIL import Image
 
 from docforge import _pandoc
 from docforge.docxdiff import create_tracked_docx
-from docforge.docxdiff.redline import visible_text
+from docforge.docxdiff.redline import _accepted_revision_view, _final_blocks, visible_text
 from docforge.markdown import (
     Block,
     docx_to_markdown,
@@ -254,3 +254,32 @@ def test_redline_tracks_inserted_table_rows(tmp_path: Path) -> None:
     assert len(root.xpath(".//w:tr[w:trPr/w:ins]", namespaces=ns)) == 1
     assert "3.7 GPa" in visible_text(root, "final")
     assert "3.7 GPa" not in visible_text(root, "original")
+
+
+def test_redline_tracks_moved_table_rows(tmp_path: Path) -> None:
+    base = tmp_path / "base.docx"
+    old = Document()
+    old.add_paragraph("Before table.")
+    old.add_table(rows=1, cols=1).cell(0, 0).text = "Moved data"
+    old.add_paragraph("After table.")
+    old.save(base)
+
+    current = tmp_path / "current.docx"
+    new = Document()
+    new.add_paragraph("Before table.")
+    new.add_paragraph("After table.")
+    new.add_table(rows=1, cols=1).cell(0, 0).text = "Moved data"
+    new.save(current)
+
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, tracked)
+    with zipfile.ZipFile(tracked) as archive:
+        from lxml import etree
+
+        root = etree.fromstring(archive.read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert root.xpath(".//w:trPr/w:ins", namespaces=ns)
+    assert root.xpath(".//w:trPr/w:del", namespaces=ns)
+    with zipfile.ZipFile(current) as archive:
+        current_root = etree.fromstring(archive.read("word/document.xml"))
+    assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)

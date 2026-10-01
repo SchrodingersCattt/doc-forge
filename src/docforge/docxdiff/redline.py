@@ -483,6 +483,23 @@ def _mark_paragraph(
     return result
 
 
+def _mark_table(table: etree._Element, kind: str, context: Context) -> etree._Element:
+    """Track a whole table through native Word row insertions or deletions."""
+    result = copy.deepcopy(table)
+    for row in result.findall("./w:tr", NS):
+        properties = row.find("./w:trPr", NS)
+        if properties is None:
+            properties = etree.Element(f"{{{W}}}trPr")
+            row.insert(0, properties)
+        properties.append(etree.Element(f"{{{W}}}{kind}", attrib=context.attrs()))
+    return result
+
+
+def _table_is_deleted(table: etree._Element) -> bool:
+    rows = table.findall("./w:tr", NS)
+    return bool(rows) and all(row.find("./w:trPr/w:del", NS) is not None for row in rows)
+
+
 def _carry_comment_markers(
     base: etree._Element, current: etree._Element
 ) -> etree._Element:
@@ -707,6 +724,8 @@ def _final_blocks(root: etree._Element) -> list[str]:
             continue
         if element.tag == f"{{{W}}}p" and element.find("./w:pPr/w:rPr/w:del", NS) is not None:
             continue
+        if element.tag == f"{{{W}}}tbl" and _table_is_deleted(element):
+            continue
         result.append(visible_text(element, "final"))
     return result
 
@@ -757,6 +776,8 @@ def _final_special_structure(root: etree._Element) -> list[tuple]:
             continue
         if block.tag == f"{{{W}}}p" and block.find("./w:pPr/w:rPr/w:del", NS) is not None:
             continue
+        if block.tag == f"{{{W}}}tbl" and _table_is_deleted(block):
+            continue
         items: list[tuple] = []
         walk(block, False, items)
         # Empty paragraphs carry no controls whose accepted-view identity can
@@ -781,6 +802,17 @@ def _accepted_revision_view(root: etree._Element) -> etree._Element:
     retaining comment anchors and the separate comment parts.
     """
     result = copy.deepcopy(root)
+
+    # Word tracks whole-table changes by marking each row. Removing the last
+    # deleted row also removes its now-empty table from the accepted view.
+    for table in list(result.findall(".//w:tbl", NS)):
+        for row in list(table.findall("./w:tr", NS)):
+            if row.find("./w:trPr/w:del", NS) is not None:
+                table.remove(row)
+        if not table.findall("./w:tr", NS):
+            parent = table.getparent()
+            if parent is not None:
+                parent.remove(table)
 
     # Paragraph deletions use a revision marker in pPr rather than a wrapper
     # around the paragraph text. Remove those paragraphs before stripping the
@@ -889,13 +921,17 @@ def create_tracked_docx(
         elif action == "delete":
             old = base_blocks[base_index]  # type: ignore[index]
             children.append(
-                _mark_paragraph(old.element, "del", context) if old.kind == "p" else copy.deepcopy(old.element)
+                _mark_paragraph(old.element, "del", context) if old.kind == "p"
+                else _mark_table(old.element, "del", context) if old.kind == "tbl"
+                else copy.deepcopy(old.element)
             )
             summary["deleted"] += 1
         else:
             new = current_blocks[current_index]  # type: ignore[index]
             children.append(
-                _mark_paragraph(new.element, "ins", context) if new.kind == "p" else copy.deepcopy(new.element)
+                _mark_paragraph(new.element, "ins", context) if new.kind == "p"
+                else _mark_table(new.element, "ins", context) if new.kind == "tbl"
+                else copy.deepcopy(new.element)
             )
             summary["inserted"] += 1
     current_sectpr = current_body.find("./w:sectPr", NS)
