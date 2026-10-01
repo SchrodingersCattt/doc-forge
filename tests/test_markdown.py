@@ -125,6 +125,7 @@ class OmmlTests(unittest.TestCase):
         paragraph = document.paragraphs[0]
         self.assertEqual(paragraph.text, "mean f\u0305i and maxidevi.")
         self.assertTrue(any("f\u0305" in run.text and run.bold for run in paragraph.runs))
+        self.assertTrue(any(run.text == "max" and run.italic is not True for run in paragraph.runs))
         self.assertTrue(any(run.text == "i" and run.font.subscript for run in paragraph.runs))
 
     def test_inline_math_spaces_binary_operators(self) -> None:

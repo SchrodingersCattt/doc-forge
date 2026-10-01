@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from docforge.bibliography import CitationResolver, format_entry, load_bib, load_json
+from docforge.bibliography import BibliographyEntry, CitationResolver, format_entry, load_bib, load_json
 
 
 def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> None:
@@ -33,4 +33,18 @@ def test_formatter_profiles_are_explicit() -> None:
     entry = load_json(Path(__file__).parent / "fixtures" / "bibliography.json")["paper"]
     assert "Journal" in format_entry(entry, profile="plain")
     assert "**2024**" in format_entry(entry, profile="markdown")
+
+
+def test_formatter_does_not_duplicate_terminal_author_period() -> None:
+    entry = BibliographyEntry.from_mapping(
+        "paper",
+        {
+            "authors": ["Gao, Haixiang", "Shreeve, Jean'ne M."],
+            "year": 2011,
+            "journal": "Chemical Reviews",
+        },
+    )
+    rendered = format_entry(entry, profile="plain")
+    assert "Jean'ne M.." not in rendered
+    assert rendered.startswith("Gao, Haixiang, and Shreeve, Jean'ne M.")
 

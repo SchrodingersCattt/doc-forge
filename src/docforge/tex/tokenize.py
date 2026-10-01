@@ -66,16 +66,23 @@ GREEK = {
     r"\in": "∈",
     r"\setminus": "∖",
     r"\cup": "∪",
-    r"\gcd": "gcd",
-    r"\arg": "arg",
-    r"\max": "max",
-    r"\min": "min",
     r"\gets": "←",
     r"\leftarrow": "←",
     r"\longleftarrow": "⟵",
     r"\to": "→",
     r"\rightarrow": "→",
     r"\longrightarrow": "⟶",
+}
+
+# Named TeX operators are upright in mathematical typesetting.  Keep these
+# commands intact through preprocessing so ``_parse_math`` can emit the text
+# with ``italic=False`` instead of first converting (for example) ``\max`` to
+# plain ``max`` and then treating those letters as variables.
+UPRIGHT_OPERATOR_COMMANDS = {
+    r"\arg": "arg",
+    r"\gcd": "gcd",
+    r"\max": "max",
+    r"\min": "min",
 }
 
 # Commands whose textual content is skipped entirely (kept for compatibility
@@ -232,6 +239,18 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                                 _parse_math(den, bold=bold, sup=sup, sub=sub, color=color, hl=hl)
                                 i = den_end
                                 continue
+                    if cmd in UPRIGHT_OPERATOR_COMMANDS:
+                        _emit(
+                            UPRIGHT_OPERATOR_COMMANDS[cmd],
+                            bold=bold,
+                            italic=False,
+                            superscript=sup,
+                            subscript=sub,
+                            color=color,
+                            highlight=hl,
+                        )
+                        i = cmd_end
+                        continue
                     if cmd in GREEK:
                         _emit(
                             GREEK[cmd],

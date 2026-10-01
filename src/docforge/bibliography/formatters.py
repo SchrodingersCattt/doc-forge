@@ -10,6 +10,19 @@ from .model import BibliographyEntry
 Formatter = Callable[[BibliographyEntry, str], str]
 
 
+def _authors_with_terminal_period(authors: str) -> str:
+    """Normalize author text before the formatter adds its sentence period.
+
+    Author initials in source records may already end with a period (for
+    example, ``John Z. H.``).  Appending another period produces ``H..`` in
+    rendered DOCX references.  Remove one terminal period here while
+    preserving periods inside names and initials.
+    """
+
+    authors = authors.strip()
+    return authors[:-1].rstrip() if authors.endswith(".") else authors
+
+
 def _authors(entry: BibliographyEntry) -> str:
     value: Any = entry.get("authors", entry.get("author", ""))
     if isinstance(value, (list, tuple)):
@@ -24,7 +37,7 @@ def plain(entry: BibliographyEntry, label: str = "") -> str:
     raw = entry.get("raw")
     if raw:
         return str(raw)
-    authors = _authors(entry) or "unknown"
+    authors = _authors_with_terminal_period(_authors(entry) or "unknown")
     title = str(entry.get("title", "")).strip()
     venue = str(entry.get("journal", entry.get("booktitle", ""))).strip()
     year = str(entry.get("year", "")).strip()
@@ -52,7 +65,7 @@ def markdown(entry: BibliographyEntry, label: str = "") -> str:
     raw = entry.get("raw")
     if raw:
         return str(raw)
-    authors = _authors(entry)
+    authors = _authors_with_terminal_period(_authors(entry))
     if not authors:
         raise ValueError(f"Bibliography record {entry.key!r} requires authors/author")
     year = entry.get("year")
