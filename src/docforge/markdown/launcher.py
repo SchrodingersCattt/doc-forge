@@ -297,6 +297,7 @@ def set_run_vertical_align(run, mode: str) -> None:
 def set_run_font(run, *, chinese: str = "仿宋", latin: str = "Times New Roman", size: float = 12.0) -> None:
     run.font.name = latin
     run.font.size = Pt(size)
+    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
     run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), chinese)
 
 
@@ -463,7 +464,6 @@ def add_inline(
                 inner = inner[5:].strip()
             run = paragraph.add_run(f"[TODO: {inner}]")
             set_run_font(run, chinese="宋体", latin="Times New Roman", size=size)
-            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
         elif token.startswith("***"):
             start = len(paragraph.runs)
             add_inline(paragraph, token[3:-3], bold_default=True, size=size)
@@ -516,16 +516,16 @@ def add_heading(doc: DocumentType, text: str, level: int):
         outline_level = OxmlElement("w:outlineLvl")
         p_pr.append(outline_level)
     outline_level.set(qn("w:val"), str(word_level - 1))
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.keep_with_next = True
+    # 小二号 = 18 pt. Titles stay this size at every heading level.
+    size = 18.0
     if level == 1:
-        size, before, after = 14.0, 12, 5
+        before, after = 12, 6
     elif level == 2:
-        size, before, after = 13.0, 9, 3
-    elif level == 3:
-        size, before, after = 12.0, 6, 2
+        before, after = 10, 4
     else:
-        size, before, after = 11.0, 4, 1
+        before, after = 8, 3
     set_paragraph_spacing(paragraph, before=before, after=after, line=1.2)
     add_inline(paragraph, text, bold_default=True, size=size)
     for run in paragraph.runs:
@@ -881,6 +881,8 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
         style.quick_style = True
         style.priority = level
         style.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+        style.font.size = Pt(18)
+        style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p_pr = style._element.get_or_add_pPr()
         outline_level = p_pr.find(qn("w:outlineLvl"))
         if outline_level is None:

@@ -567,6 +567,34 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
             fonts.attrib.pop(qn(f"w:{slot}"), None)
 
 
+def _force_run_black(element) -> None:
+    """Default text color is black. Drop theme colors inherited from a template."""
+    for run in element.iter(qn("w:r")):
+        properties = run.find(qn("w:rPr"))
+        if properties is None:
+            properties = OxmlElement("w:rPr")
+            run.insert(0, properties)
+        color = properties.find(qn("w:color"))
+        if color is None:
+            color = OxmlElement("w:color")
+            properties.append(color)
+        color.set(qn("w:val"), "000000")
+        for attribute in ("themeColor", "themeShade", "themeTint"):
+            color.attrib.pop(qn(f"w:{attribute}"), None)
+
+
+def _center_paragraph(element) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    align = properties.find(qn("w:jc"))
+    if align is None:
+        align = OxmlElement("w:jc")
+        properties.append(align)
+    align.set(qn("w:val"), "center")
+
+
 def _override_run_size(element, points: float) -> None:
     value = str(round(points * 2))
     for run in element.iter(qn("w:r")):
@@ -2234,9 +2262,17 @@ def assemble_markdown_template(
         styles["heading_3"],
         styles["references_heading"],
     }
+    title_style_ids = heading_style_ids | {styles["title"]}
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
+        _force_run_black(node)
+        style_node = node.find(qn("w:pPr"))
+        style_ref = style_node.find(qn("w:pStyle")) if style_node is not None else None
+        style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
+        if style_id in title_style_ids:
+            _center_paragraph(node)
+            _override_run_size(node, 18)
     body_element = template._element.body
     for child in list(body_element):
         body_element.remove(child)
