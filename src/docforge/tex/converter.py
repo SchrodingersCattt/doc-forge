@@ -11,6 +11,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import OxmlElement, parse_xml
+from lxml import etree
 from ..docxdiff import Package
 from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_view, _blocks, visible_text
 from ..math import latex_to_omml
@@ -722,19 +723,46 @@ def _starts_lowercase_continuation(text: str) -> bool:
     return bool(match and match.group(0).islower())
 
 
+_MATH_NS="http://schemas.openxmlformats.org/officeDocument/2006/math"
+
+
+def _omath_element(omml: etree._Element) -> etree._Element:
+    for child in omml:
+        if etree.QName(child).localname=="oMath":
+            return child
+    raise RuntimeError("display math conversion did not return an oMath element")
+
+
+def _stacked_display_math(rows: list[str]) -> etree._Element:
+    """One OMML equation array, so a multi-row display keeps a single number."""
+    omath=etree.Element(f"{{{_MATH_NS}}}oMath")
+    array=etree.SubElement(omath,f"{{{_MATH_NS}}}eqArr")
+    props=etree.SubElement(array,f"{{{_MATH_NS}}}eqArrPr")
+    for name in ("maxDist","objDist"):
+        node=etree.SubElement(props,f"{{{_MATH_NS}}}{name}")
+        node.set(f"{{{_MATH_NS}}}val","0")
+    for row in rows:
+        slot=etree.SubElement(array,f"{{{_MATH_NS}}}e")
+        inner=_omath_element(latex_to_omml(row))
+        for child in list(inner):
+            slot.append(child)
+    return omath
+
+
 def add_display_math(doc: Document, math_tex: str, resolver: CitationResolver, equation_prefix: str=""):
     rows=_display_math_rows(math_tex)
     if not rows: return
     context=_context(); context.eq_counter+=1
     label=f"({equation_prefix}{context.eq_counter})"
-    for index,row in enumerate(rows):
-        p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(0)
-        p.paragraph_format.tab_stops.add_tab_stop(Cm(8),WD_TAB_ALIGNMENT.CENTER)
-        p.paragraph_format.tab_stops.add_tab_stop(Cm(16),WD_TAB_ALIGNMENT.RIGHT)
-        run=p.add_run("\t"); run.font.size=PT_BODY; run.font.name=FONT_BODY
-        p._p.append(latex_to_omml(row))
-        if index==len(rows)-1:
-            run=p.add_run(f"\t{label}"); run.font.size=PT_BODY; run.font.name=FONT_BODY
+    p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(0)
+    p.paragraph_format.tab_stops.add_tab_stop(Cm(8),WD_TAB_ALIGNMENT.CENTER)
+    p.paragraph_format.tab_stops.add_tab_stop(Cm(16),WD_TAB_ALIGNMENT.RIGHT)
+    run=p.add_run("\t"); run.font.size=PT_BODY; run.font.name=FONT_BODY
+    if len(rows)==1:
+        p._p.append(latex_to_omml(rows[0]))
+    else:
+        p._p.append(_stacked_display_math(rows))
+    run=p.add_run(f"\t{label}"); run.font.size=PT_BODY; run.font.name=FONT_BODY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1511,6 +1539,11 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             i += 1
             continue
 
+        if line == r"\docxpagebreak":
+            doc.add_page_break()
+            i += 1
+            continue
+
         # --- display math: \[ ... \] or \begin{equation} ... \end{equation} ---
         if line.startswith(r"\[") or re.match(r"\\begin\{equation\*?\}", line):
             math_block = line
@@ -1573,7 +1606,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 if nl.startswith("%") or _is_invisible_tex_line(nl):
                     j += 1
                     continue
-                if nl.startswith(r"\[") or re.match(r"\\(section|subsection|paragraph|begin\{)", nl):
+                if nl.startswith(r"\[") or nl == r"\docxpagebreak" or re.match(r"\\(section|subsection|paragraph|begin\{)", nl):
                     break
                 para_content += " " + nl
                 j += 1
@@ -1735,7 +1768,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             if nl.startswith("%") or _is_invisible_tex_line(nl):
                 j += 1
                 continue
-            if nl.startswith(r"\[") or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
+            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
                 break
             para_lines.append(nl)
             j += 1

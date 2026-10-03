@@ -420,3 +420,80 @@ def test_redline_does_not_subscript_formula_delimiters(tmp_path: Path) -> None:
         if any(char in text for char in "()[]") and align == "subscript":
             leaked.append(text)
     assert leaked == []
+
+
+def test_visible_text_includes_math_and_bookmarks_survive_merge() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import M, W, Context, _merge_paragraph
+
+    nsmap = {"w": W, "m": M}
+    base = etree.Element(f"{{{W}}}p", nsmap=nsmap)
+    start = etree.SubElement(base, f"{{{W}}}bookmarkStart")
+    start.set(f"{{{W}}}id", "4")
+    start.set(f"{{{W}}}name", "eq-anchor")
+    math = etree.SubElement(base, f"{{{M}}}oMath")
+    token = etree.SubElement(math, f"{{{M}}}t")
+    token.text = "Vdet"
+    end = etree.SubElement(base, f"{{{W}}}bookmarkEnd")
+    end.set(f"{{{W}}}id", "4")
+    assert visible_text(base) == "Vdet"
+
+    current = etree.Element(f"{{{W}}}p", nsmap=nsmap)
+    replacement = etree.SubElement(current, f"{{{M}}}oMath")
+    replacement_text = etree.SubElement(replacement, f"{{{M}}}t")
+    replacement_text.text = "V"
+    merged = _merge_paragraph(base, current, Context("tester", 1))
+    assert merged.find(f"{{{W}}}bookmarkStart").get(f"{{{W}}}name") == "eq-anchor"
+    assert merged.find(f"{{{W}}}bookmarkEnd") is not None
+
+    edited = etree.Element(f"{{{W}}}p", nsmap=nsmap)
+    edited_start = etree.SubElement(edited, f"{{{W}}}bookmarkStart")
+    edited_start.set(f"{{{W}}}id", "9")
+    edited_start.set(f"{{{W}}}name", "cite-anchor")
+    run = etree.SubElement(edited, f"{{{W}}}r")
+    text = etree.SubElement(run, f"{{{W}}}t")
+    text.text = "Alpha"
+    edited_end = etree.SubElement(edited, f"{{{W}}}bookmarkEnd")
+    edited_end.set(f"{{{W}}}id", "9")
+    changed = etree.Element(f"{{{W}}}p", nsmap=nsmap)
+    changed_run = etree.SubElement(changed, f"{{{W}}}r")
+    changed_text = etree.SubElement(changed_run, f"{{{W}}}t")
+    changed_text.text = "Alpha beta"
+    merged_text = _merge_paragraph(edited, changed, Context("tester", 1))
+    assert merged_text.find(f"{{{W}}}bookmarkStart").get(f"{{{W}}}name") == "cite-anchor"
+    assert merged_text.find(f"{{{W}}}bookmarkEnd") is not None
+
+
+def test_multiline_display_math_is_one_numbered_equation(tmp_path: Path) -> None:
+    from lxml import etree
+
+    from docforge.tex.converter import latex_to_docx
+
+    source = r"""
+\documentclass{article}
+\begin{document}
+Before the table.
+\docxpagebreak
+\begin{equation}
+\begin{aligned}
+a &= 1 \\
+b &= 2
+\end{aligned}
+\end{equation}
+\end{document}
+"""
+    out = tmp_path / "math.docx"
+    latex_to_docx(source, output=out)
+    root = etree.fromstring(zipfile.ZipFile(out).read("word/document.xml"))
+    ns = {
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    }
+    assert len(root.xpath(".//w:br[@w:type='page']", namespaces=ns)) == 1
+    arrays = root.xpath(".//m:eqArr", namespaces=ns)
+    assert len(arrays) == 1
+    assert len(arrays[0].xpath("./m:e", namespaces=ns)) == 2
+    equation = arrays[0].getparent().getparent()
+    assert "(1)" in visible_text(equation)
+    assert len(root.xpath(".//m:eqArr/ancestor::w:p", namespaces=ns)) == 1

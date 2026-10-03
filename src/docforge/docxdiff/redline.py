@@ -176,7 +176,7 @@ def visible_text(element: etree._Element, view: str = "final") -> str:
                     hidden = view == "original"
         if hidden:
             return
-        if node.tag == f"{{{W}}}t":
+        if node.tag in (f"{{{W}}}t", f"{{{M}}}t"):
             out.append(node.text or "")
             return
         if node.tag == f"{{{W}}}delText":
@@ -401,6 +401,8 @@ def _events(paragraph: etree._Element) -> list[Event]:
         f"{{{W}}}commentRangeStart": "start",
         f"{{{W}}}commentRangeEnd": "end",
         f"{{{W}}}commentReference": "reference",
+        f"{{{W}}}bookmarkStart": "start",
+        f"{{{W}}}bookmarkEnd": "end",
     }
     events: list[Event] = []
     offset = 0
@@ -413,7 +415,7 @@ def _events(paragraph: etree._Element) -> list[Event]:
             owner = node.getparent() if tags[node.tag] == "reference" else node
             events.append(Event(tags[node.tag], offset, len(events), copy.deepcopy(owner)))
             return
-        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
+        if node.tag in (f"{{{W}}}t", f"{{{W}}}delText", f"{{{M}}}t"):
             offset += len(node.text or "")
             return
         if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
