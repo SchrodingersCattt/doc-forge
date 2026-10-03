@@ -107,6 +107,7 @@ class Span:
     subscript: bool = False
     color: str | None = None  # hex like "FF0000"
     highlight: str | None = None  # highlight color name for OOXML e.g. "yellow"
+    mono: bool = False  # \texttt; rendered as Consolas in DOCX
 
 
 @dataclass
@@ -319,7 +320,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 i += 1
         flush()
 
-    def _parse(s: str, bold=False, italic=False, sup=False, sub=False, color=None, hl=None) -> None:
+    def _parse(s: str, bold=False, italic=False, sup=False, sub=False, color=None, hl=None, mono=False) -> None:
         i = 0
         buf = ""
 
@@ -334,6 +335,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     subscript=sub,
                     color=color,
                     highlight=hl,
+                    mono=mono,
                 )
                 buf = ""
 
@@ -351,7 +353,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                         brace2_end = _find_matching_brace(s, brace1_end)
                         inner = s[brace1_end + 1 : brace2_end - 1]
                         cval = _tex_color_to_hex(color_arg)
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=cval, hl=hl)
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=cval, hl=hl, mono=mono)
                         i = brace2_end
                     else:
                         i = brace1_end
@@ -363,7 +365,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     if brace1_end < len(s) and s[brace1_end] == "{":
                         brace2_end = _find_matching_brace(s, brace1_end)
                         inner = s[brace1_end + 1 : brace2_end - 1]
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=_tex_hl_name(bg_arg))
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=_tex_hl_name(bg_arg), mono=mono)
                         i = brace2_end
                     else:
                         i = brace1_end
@@ -373,7 +375,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     brace_end = _find_matching_brace(s, brace_start)
                     inner = s[brace_start + 1 : brace_end - 1]
                     if cmd == "highlight":
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl="yellow")
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl="yellow", mono=mono)
                     elif cmd == "aigc":
                         _emit(
                             "[",
@@ -383,8 +385,9 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                             subscript=sub,
                             color="FF0000",
                             highlight=hl,
+                            mono=mono,
                         )
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color="FF0000", hl=hl)
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color="FF0000", hl=hl, mono=mono)
                         _emit(
                             "]",
                             bold=bold,
@@ -393,9 +396,10 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                             subscript=sub,
                             color="FF0000",
                             highlight=hl,
+                            mono=mono,
                         )
                     elif cmd == "gmy":
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color="4472C4", hl=hl)
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color="4472C4", hl=hl, mono=mono)
                     i = brace_end
                     continue
             m_comment = re.match(r"\\Comment\{", s[i:])
@@ -413,7 +417,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     color="808080",
                     highlight=hl,
                 )
-                _parse(inner, bold=bold, italic=True, sup=sup, sub=sub, color="808080", hl=hl)
+                _parse(inner, bold=bold, italic=True, sup=sup, sub=sub, color="808080", hl=hl, mono=mono)
                 i = brace_end
                 continue
             m_cmd = re.match(
@@ -427,13 +431,15 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 brace_end = _find_matching_brace(s, brace_start)
                 inner = s[brace_start + 1 : brace_end - 1]
                 if cmd_name in ("emph", "textit"):
-                    _parse(inner, bold=bold, italic=True, sup=sup, sub=sub, color=color, hl=hl)
+                    _parse(inner, bold=bold, italic=True, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                 elif cmd_name in ("textbf", "mathbf"):
-                    _parse(inner, bold=True, italic=italic, sup=sup, sub=sub, color=color, hl=hl)
+                    _parse(inner, bold=True, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                 elif cmd_name == "mathrm":
-                    _parse(inner, bold=bold, italic=False, sup=sup, sub=sub, color=color, hl=hl)
+                    _parse(inner, bold=bold, italic=False, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
+                elif cmd_name == "texttt":
+                    _parse(inner, bold=bold, italic=False, sup=sup, sub=sub, color=color, hl=hl, mono=True)
                 else:
-                    _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl)
+                    _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                 i = brace_end
                 continue
             if ch == "^" or ch == "_":
@@ -442,7 +448,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 if i + 1 < len(s) and s[i + 1] == "{":
                     brace_end = _find_matching_brace(s, i + 1)
                     inner = s[i + 2 : brace_end - 1]
-                    _parse(inner, bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl)
+                    _parse(inner, bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl, mono=mono)
                     i = brace_end
                 elif i + 1 < len(s):
                     m_cmd = re.match(r"\\(text|mathrm|mathbf|emph|textit|textbf)\{", s[i + 1 :])
@@ -451,10 +457,10 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                         brace_start = cmd_start + m_cmd.end() - 1
                         brace_end = _find_matching_brace(s, brace_start)
                         inner = s[cmd_start:brace_end]
-                        _parse(inner, bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl)
+                        _parse(inner, bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl, mono=mono)
                         i = brace_end
                     else:
-                        _parse(s[i + 1], bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl)
+                        _parse(s[i + 1], bold=bold, italic=italic, sup=tag == "sup", sub=tag == "sub", color=color, hl=hl, mono=mono)
                         i += 2
                 else:
                     i += 1
@@ -485,7 +491,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     if after < len(s) and s[after] == "{":
                         brace_end = _find_matching_brace(s, after)
                         inner = s[after + 1 : brace_end - 1]
-                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl)
+                        _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                         i = brace_end
                     else:
                         i = after
@@ -497,7 +503,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 flush()
                 brace_end = _find_matching_brace(s, i)
                 inner = s[i + 1 : brace_end - 1]
-                _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl)
+                _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                 i = brace_end
                 continue
             if ch == "}":
@@ -518,6 +524,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
             and merged[-1].subscript == sp.subscript
             and merged[-1].color == sp.color
             and merged[-1].highlight == sp.highlight
+            and merged[-1].mono == sp.mono
         ):
             merged[-1].text += sp.text
         else:

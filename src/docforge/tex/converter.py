@@ -18,6 +18,7 @@ from ..output import validate_output_path
 from .bib import CitationResolver, parse_bib, _compress_labels
 from .tokenize import Span, TableCell, tokenize_tex, spans_to_plain, plain_tex
 FONT_BODY="Times New Roman"
+FONT_MONO="Consolas"
 FONT_HEADING="Arial"
 PT_BODY=Pt(10)
 PT_CAPTION=Pt(9)
@@ -151,11 +152,16 @@ def _tex_hl_name(c: str) -> str:
 
 
 def _apply_span(run, span: Span, font_size=PT_BODY, font_name=FONT_BODY):
+    face = FONT_MONO if span.mono else font_name
+    size = Pt(9) if span.mono and font_size.pt > 9 else font_size
     run.text = _normalize_docx_whitespace(span.text)
-    run.font.size = font_size
-    run.font.name = font_name
+    run.font.size = size
+    run.font.name = face
     rPr = run._element.get_or_add_rPr()
-    rFonts = parse_xml(f'<w:rFonts {nsdecls("w")} w:eastAsia="{font_name}"/>')
+    rFonts = parse_xml(
+        f'<w:rFonts {nsdecls("w")} w:ascii="{face}" w:hAnsi="{face}" '
+        f'w:cs="{face}" w:eastAsia="{face}"/>'
+    )
     rPr.insert(0, rFonts)
     if span.bold:
         run.bold = True

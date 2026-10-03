@@ -136,6 +136,23 @@ class CitationResolver:
 class CitationResolver(SharedCitationResolver):
     """Use the shared numbering logic and TeX-aware reference formatting."""
 
+    def citation_parts(self, keys: str, use_inherited: bool = True) -> list[tuple[str, str | None]]:
+        """Collapse consecutive labels and link each range to its first reference.
+
+        Two or more consecutive numbers become an en-dash range, matching the
+        PAP-H2 citation formatter: ``5,6`` is ``5–6`` and ``2,5,6,7,8`` is ``2,5–8``.
+        """
+        labels = self.labels_for(keys, use_inherited=use_inherited)
+        parts: list[tuple[str, str | None]] = []
+        for index, group in enumerate(_group_labels(labels)):
+            if index:
+                parts.append((",", None))
+            if len(group) == 1:
+                parts.append((group[0][2], group[0][2]))
+            else:
+                parts.append((f"{group[0][2]}–{group[-1][2]}", group[0][2]))
+        return parts
+
     def reference_items(self, *, profile: str = "plain") -> list[tuple[str, str]]:
         if profile != "plain":
             return super().reference_items(profile=profile)

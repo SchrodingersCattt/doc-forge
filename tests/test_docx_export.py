@@ -285,6 +285,48 @@ def test_redline_tracks_moved_table_rows(tmp_path: Path) -> None:
     assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
 
 
+def test_redline_keeps_small_citation_edits_inside_one_paragraph(tmp_path: Path) -> None:
+    from lxml import etree
+
+    def cited(path: Path, citation: str, anchor: str) -> None:
+        document = Document()
+        paragraph = document.add_paragraph()
+        paragraph.add_run("Detonation velocity is estimated by")
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("w:anchor"), anchor)
+        run = OxmlElement("w:r")
+        props = OxmlElement("w:rPr")
+        vert = OxmlElement("w:vertAlign")
+        vert.set(qn("w:val"), "superscript")
+        props.append(vert)
+        run.append(props)
+        node = OxmlElement("w:t")
+        node.text = citation
+        run.append(node)
+        hyperlink.append(run)
+        paragraph._p.append(hyperlink)
+        paragraph.add_run(".")
+        document.save(path)
+
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    cited(base, "37", "ref_37")
+    cited(current, "33", "ref_33")
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, tracked)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(tracked) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    paragraphs = root.xpath(".//w:body/w:p", namespaces=ns)
+    assert len(paragraphs) == 1
+    assert paragraphs[0].find("w:pPr/w:rPr/w:del", ns) is None
+    assert [node.text for node in paragraphs[0].findall(".//w:delText", ns)] == ["37"]
+    assert [node.text for node in paragraphs[0].findall(".//w:hyperlink//w:t", ns)] == ["33"]
+    with zipfile.ZipFile(current) as archive:
+        current_root = etree.fromstring(archive.read("word/document.xml"))
+    assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
+
+
 def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:
     from lxml import etree
 
@@ -322,11 +364,19 @@ def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Pa
     expected = [visible_text(p) for p in base_root.xpath(".//w:body/w:p", namespaces=ns)]
     assert original == expected
     assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
-    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=ns)) == 2
-    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]", namespaces=ns)) == 2
+    # The picture still moves as a whole paragraph. The hyperlink sentence is
+    # an in-paragraph revision, so its old wording is struck out rather than
+    # left behind as a second live paragraph.
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=ns)) == 1
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]", namespaces=ns)) == 1
     deleted_drawings = root.xpath(".//w:p[w:pPr/w:rPr/w:del]//w:drawing", namespaces=ns)
     assert deleted_drawings == []
     assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:ins]//w:drawing", namespaces=ns)) == 1
+    wording = next(p for p in root.xpath(".//w:body/w:p", namespaces=ns) if "wording" in visible_text(p, "original"))
+    assert visible_text(wording, "original") == "July wording"
+    assert visible_text(wording, "final") == "Current wording"
+    assert wording.find("w:pPr/w:rPr/w:del", ns) is None
+    assert wording.xpath(".//w:hyperlink", namespaces=ns)
 
 
 def _run_with_align(text: str, align: str | None):

@@ -6,9 +6,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from docx import Document
+from docx.oxml.ns import qn
+
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
+from docforge.tex.converter import add_rich_text
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -78,6 +82,23 @@ class TokenizeTests(unittest.TestCase):
         spans = tokenize_tex(r"\textbf{bold}")
         self.assertTrue(spans[0].bold)
 
+    def test_tokenize_texttt_is_mono(self) -> None:
+        spans = tokenize_tex(r"set \texttt{n\_dim} here")
+        mono = [span for span in spans if span.mono]
+        self.assertEqual([span.text for span in mono], ["n_dim"])
+        self.assertFalse(spans[0].mono)
+
+    def test_texttt_docx_uses_consolas(self) -> None:
+        document = Document()
+        paragraph = document.add_paragraph()
+        add_rich_text(paragraph, r"key \texttt{n\_dim}")
+        fonts = [
+            run._element.find(qn("w:rPr")).find(qn("w:rFonts")).get(qn("w:ascii"))
+            for run in paragraph.runs
+            if run.text == "n_dim"
+        ]
+        self.assertEqual(fonts, ["Consolas"])
+
     def test_resolve_ref(self) -> None:
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
@@ -97,6 +118,13 @@ class BibTests(unittest.TestCase):
         self.assertEqual(resolver.resolve("a"), "[1]")
         self.assertEqual(resolver.resolve("b"), "[2]")
         self.assertEqual(resolver.resolve("a"), "[1]")
+
+    def test_consecutive_citations_use_en_dash(self) -> None:
+        resolver = CitationResolver({})
+        for key in ("a", "b", "gap", "c", "d", "e"):
+            resolver.resolve(key)
+        self.assertEqual(resolver.citation_parts("a,c,d,e"), [("1", "1"), (",", None), ("4–6", "4")])
+        self.assertEqual(resolver.citation_parts("b,a"), [("1–2", "1")])
 
     def test_tex_references_format_bibtex_authors_and_ranges(self) -> None:
       with TemporaryDirectory() as directory:

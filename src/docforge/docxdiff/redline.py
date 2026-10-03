@@ -52,7 +52,6 @@ PASSTHROUGH_LOCAL_NAMES = {
     "object",
     "fldChar",
     "instrText",
-    "hyperlink",
     "footnoteReference",
     "endnoteReference",
     "sym",
@@ -63,12 +62,18 @@ PASSTHROUGH_LOCAL_NAMES = {
     "oMath",
     "sectPr",
 }
+# Internal citation links are ordinary runs plus a w:hyperlink wrapper.
+# Treating every hyperlink as opaque layout XML forces a whole-paragraph
+# replacement, so Word shows the old paragraph as live text and the new one
+# as a separate insertion. Relationship-bearing hyperlinks are still copied
+# only from the current package, whose relationship ids remain valid.
 
 
 @dataclass(frozen=True)
 class Style:
     rpr: etree._Element | None
     revision: etree._Element | None = None
+    link: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,17 @@ class Context:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
+
+
+def _hyperlink_attrs(node: etree._Element) -> tuple[tuple[str, str], ...] | None:
+    parent = node.getparent()
+    while parent is not None:
+        if parent.tag == f"{{{W}}}hyperlink":
+            return tuple(sorted(parent.attrib.items()))
+        if parent.tag == f"{{{W}}}p":
+            return None
+        parent = parent.getparent()
+    return None
 
 
 def _inside(node: etree._Element, local_name: str) -> bool:
@@ -319,6 +335,7 @@ def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int
         style = Style(
             copy.deepcopy(rpr) if rpr is not None else None,
             revision=_revision_shell(node),
+            link=_hyperlink_attrs(node),
         )
         pieces.append(value)
         spans.append((offset, offset + len(value), style))
@@ -446,6 +463,69 @@ def _revision(kind: str, tokens: list[Token], context: Context) -> etree._Elemen
     return wrapper
 
 
+def _emit_link(token: Token, kind: str | None) -> tuple[tuple[str, str], ...] | None:
+    link = token.style.link
+    if link is None:
+        return None
+    # Deleted text is copied from the reviewed package. An r:id on that
+    # hyperlink points at the baseline relationships, not the package being
+    # written, so keep the run formatting and drop the relationship.
+    if kind == "del" and any(key == f"{{{R}}}id" for key, _value in link):
+        return None
+    return link
+
+
+def _append_tracked(
+    nodes: list[etree._Element],
+    tokens: list[Token],
+    kind: str | None,
+    context: Context,
+    boundary: dict[int, int],
+    index0: int | None,
+) -> None:
+    """Append runs, grouping consecutive tokens that share one hyperlink."""
+    index = 0
+    while index < len(tokens):
+        link = _emit_link(tokens[index], kind)
+        end = index + 1
+        if link is not None:
+            while end < len(tokens) and _emit_link(tokens[end], kind) == link:
+                end += 1
+        else:
+            while end < len(tokens) and _emit_link(tokens[end], kind) is None:
+                end += 1
+        group = tokens[index:end]
+        if link is None and kind is None:
+            for offset, token in enumerate(group):
+                if index0 is not None:
+                    boundary.setdefault(index0 + index + offset, len(nodes))
+                nodes.append(_run(token))
+                if index0 is not None:
+                    boundary[index0 + index + offset + 1] = len(nodes)
+            index = end
+            continue
+        if index0 is not None:
+            for offset in range(index, end):
+                boundary.setdefault(index0 + offset, len(nodes))
+        payload = (
+            [_run(token) for token in group]
+            if kind is None
+            else [_revision(kind, group, context)]
+        )
+        if link is None:
+            nodes.extend(payload)
+        else:
+            hyperlink = etree.Element(f"{{{W}}}hyperlink")
+            for key, value in link:
+                hyperlink.set(key, value)
+            for node in payload:
+                hyperlink.append(node)
+            nodes.append(hyperlink)
+        if index0 is not None:
+            boundary[index0 + end] = len(nodes)
+        index = end
+
+
 def _merge_paragraph(
     base: etree._Element,
     current: etree._Element,
@@ -496,21 +576,24 @@ def _merge_paragraph(
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         boundary.setdefault(i1, len(nodes))
         if tag == "equal":
-            for offset, token in enumerate(current_tokens[j1:j2], i1):
-                boundary.setdefault(offset, len(nodes))
-                base_token = base_tokens[offset] if offset < len(base_tokens) else None
-                if base_has_revisions and base_token is not None:
-                    nodes.append(_materialize(base_token))
-                else:
-                    nodes.append(_run(token))
-                boundary[offset + 1] = len(nodes)
+            if base_has_revisions:
+                for offset, token in enumerate(current_tokens[j1:j2], i1):
+                    boundary.setdefault(offset, len(nodes))
+                    base_token = base_tokens[offset] if offset < len(base_tokens) else None
+                    if base_token is not None:
+                        nodes.append(_materialize(base_token))
+                    else:
+                        nodes.append(_run(token))
+                    boundary[offset + 1] = len(nodes)
+            else:
+                _append_tracked(nodes, current_tokens[j1:j2], None, context, boundary, i1)
         elif tag == "delete":
-            nodes.append(_revision("del", base_tokens[i1:i2], context))
+            _append_tracked(nodes, base_tokens[i1:i2], "del", context, boundary, i1)
         elif tag == "insert":
-            nodes.append(_revision("ins", current_tokens[j1:j2], context))
+            _append_tracked(nodes, current_tokens[j1:j2], "ins", context, boundary, None)
         else:
-            nodes.append(_revision("del", base_tokens[i1:i2], context))
-            nodes.append(_revision("ins", current_tokens[j1:j2], context))
+            _append_tracked(nodes, base_tokens[i1:i2], "del", context, boundary, i1)
+            _append_tracked(nodes, current_tokens[j1:j2], "ins", context, boundary, None)
         boundary[i2] = len(nodes)
     offset_map = {0: 0}
     for index, token in enumerate(base_tokens, 1):
@@ -549,6 +632,28 @@ def _merge_paragraph(
     return result
 
 
+def _mark_deleted_runs(element: etree._Element, context: Context) -> None:
+    """Mark surviving runs deleted without pulling hyperlinks inside ``w:del``."""
+    for child in list(element):
+        local = etree.QName(child).localname
+        if local in ("pPr", "del", "moveFrom"):
+            continue
+        if local == "r":
+            for text in child.iter(f"{{{W}}}t"):
+                text.tag = f"{{{W}}}delText"
+            parent = child.getparent()
+            if parent is None:
+                continue
+            index = parent.index(child)
+            parent.remove(child)
+            wrapper = etree.Element(f"{{{W}}}del", attrib=context.attrs())
+            wrapper.append(child)
+            parent.insert(index, wrapper)
+            continue
+        if len(child):
+            _mark_deleted_runs(child, context)
+
+
 def _mark_paragraph(
     paragraph: etree._Element, kind: str, context: Context
 ) -> etree._Element:
@@ -577,6 +682,10 @@ def _mark_paragraph(
             parent = pict.getparent()
             if parent is not None:
                 parent.remove(pict)
+        # The paragraph-mark marker only joins this paragraph into the next
+        # one when the revision is accepted. The runs themselves stay live
+        # unless they are wrapped in w:del.
+        _mark_deleted_runs(result, context)
         return result
     result = copy.deepcopy(paragraph)
     ppr = result.find("./w:pPr", NS)
