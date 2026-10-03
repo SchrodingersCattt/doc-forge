@@ -2262,7 +2262,6 @@ def assemble_markdown_template(
         styles["heading_3"],
         styles["references_heading"],
     }
-    title_style_ids = heading_style_ids | {styles["title"]}
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
@@ -2270,7 +2269,7 @@ def assemble_markdown_template(
         style_node = node.find(qn("w:pPr"))
         style_ref = style_node.find(qn("w:pStyle")) if style_node is not None else None
         style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
-        if style_id in title_style_ids:
+        if style_id == styles["title"]:
             _center_paragraph(node)
             _override_run_size(node, 18)
     body_element = template._element.body

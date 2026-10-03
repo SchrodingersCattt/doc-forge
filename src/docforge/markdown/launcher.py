@@ -516,16 +516,16 @@ def add_heading(doc: DocumentType, text: str, level: int):
         outline_level = OxmlElement("w:outlineLvl")
         p_pr.append(outline_level)
     outline_level.set(qn("w:val"), str(word_level - 1))
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     paragraph.paragraph_format.keep_with_next = True
-    # 小二号 = 18 pt. Titles stay this size at every heading level.
-    size = 18.0
     if level == 1:
-        before, after = 12, 6
+        size, before, after = 14.0, 12, 5
     elif level == 2:
-        before, after = 10, 4
+        size, before, after = 13.0, 9, 3
+    elif level == 3:
+        size, before, after = 12.0, 6, 2
     else:
-        before, after = 8, 3
+        size, before, after = 11.0, 4, 1
     set_paragraph_spacing(paragraph, before=before, after=after, line=1.2)
     add_inline(paragraph, text, bold_default=True, size=size)
     for run in paragraph.runs:
@@ -881,8 +881,6 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
         style.quick_style = True
         style.priority = level
         style.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-        style.font.size = Pt(18)
-        style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p_pr = style._element.get_or_add_pPr()
         outline_level = p_pr.find(qn("w:outlineLvl"))
         if outline_level is None:

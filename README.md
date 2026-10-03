@@ -30,7 +30,7 @@ pip install -e ".[tex]"     # + numpy for TeX rendering
 
 Python 3.10+.
 
-Default typography is black throughout. Titles, including the metadata title and Heading styles, are centered at 小二 (18 pt).
+Default typography is black throughout. The document title is centered at 小二 (18 pt). Heading styles keep their own size and alignment.
 
 The `md2docx` and `tex2docx` commands require Pandoc 2.9.2.1 to compile
 display mathematics into native Word OMML. The `docx2md` and `docx2tex`
