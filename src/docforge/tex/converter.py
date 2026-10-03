@@ -507,6 +507,10 @@ def add_body_paragraph(doc: Document, text: str, resolver: CitationResolver,
         p.paragraph_format.first_line_indent = Cm(0)
     elif indent is not None:
         p.paragraph_format.first_line_indent = indent
+        pPr = p._p.get_or_add_pPr()
+        ind = pPr.find(qn("w:ind"))
+        if ind is not None:
+            ind.set(qn("w:firstLineChars"), "200")
     else:
         p.paragraph_format.first_line_indent = Cm(0)
 
@@ -1248,6 +1252,7 @@ def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | Non
     r.bold = True
     r.font.size = PT_CAPTION
     r.font.name = FONT_BODY
+    cp.paragraph_format.keep_with_next = True
     if caption_tex:
         caption_tex = re.sub(r"\n\s*", " ", caption_tex)
         caption_tex = re.sub(r"  +", " ", caption_tex).strip()
@@ -1308,13 +1313,24 @@ def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | Non
     _apply_repeated_cell_merges(tbl, rows, header_rows, occupied)
 
     _clear_all_borders(tbl)
+    for row_index, row in enumerate(tbl.rows):
+        tr_pr = row._tr.get_or_add_trPr()
+        if tr_pr.find(qn("w:cantSplit")) is None:
+            tr_pr.append(OxmlElement("w:cantSplit"))
+        if row_index < header_rows and tr_pr.find(qn("w:tblHeader")) is None:
+            tr_pr.append(OxmlElement("w:tblHeader"))
     nrows = len(rows)
     SZ_THICK = 8   # 1.0 pt = 8 eighths
     SZ_THIN = 4    # 0.5 pt = 4 eighths
+    last_cells = list(tbl.rows[-1]._tr.tc_lst)
     for j in range(ncols):
         _set_cell_border(tbl.cell(0, j), top=(SZ_THICK, "single"))
         _set_cell_border(tbl.cell(header_rows - 1, j), bottom=(SZ_THIN, "single"))
-        _set_cell_border(tbl.cell(nrows - 1, j), bottom=(SZ_THICK, "single"))
+        if j < len(last_cells):
+            class _Tc:
+                def __init__(self, tc):
+                    self._tc = tc
+            _set_cell_border(_Tc(last_cells[j]), bottom=(SZ_THICK, "single"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

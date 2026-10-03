@@ -30,6 +30,7 @@ from .package import Package
 from ..output import validate_output_path
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 XML = "http://www.w3.org/XML/1998/namespace"
@@ -654,6 +655,35 @@ def _mark_deleted_runs(element: etree._Element, context: Context) -> None:
             _mark_deleted_runs(child, context)
 
 
+_MATH_STRUCTURES = {
+    "f", "sSub", "sSup", "sSubSup", "nary", "d", "rad", "acc", "bar", "func",
+    "eqArr", "m", "limLow", "limUpp", "groupChr", "box", "borderBox", "sPre", "phant",
+}
+
+
+def _mark_math_structures(element: etree._Element, kind: str, context: Context) -> None:
+    """Hide empty math slots when only the text of an equation is revised."""
+    tag = "del" if kind == "del" else "ins"
+    for node in element.iter():
+        if etree.QName(node).localname not in _MATH_STRUCTURES:
+            continue
+        if etree.QName(node).namespace != M:
+            continue
+        props_tag = f"{{{M}}}{etree.QName(node).localname}Pr"
+        props = node.find(props_tag)
+        if props is None:
+            props = etree.Element(props_tag)
+            node.insert(0, props)
+        ctrl = props.find(f"{{{M}}}ctrlPr")
+        if ctrl is None:
+            ctrl = etree.SubElement(props, f"{{{M}}}ctrlPr")
+        rpr = ctrl.find(f"{{{W}}}rPr")
+        if rpr is None:
+            rpr = etree.SubElement(ctrl, f"{{{W}}}rPr")
+        if rpr.find(f"{{{W}}}{tag}") is None:
+            rpr.insert(0, etree.Element(f"{{{W}}}{tag}", attrib=context.attrs()))
+
+
 def _mark_paragraph(
     paragraph: etree._Element, kind: str, context: Context
 ) -> etree._Element:
@@ -686,6 +716,7 @@ def _mark_paragraph(
         # one when the revision is accepted. The runs themselves stay live
         # unless they are wrapped in w:del.
         _mark_deleted_runs(result, context)
+        _mark_math_structures(result, "del", context)
         return result
     result = copy.deepcopy(paragraph)
     ppr = result.find("./w:pPr", NS)
@@ -703,6 +734,7 @@ def _mark_paragraph(
     for child in children:
         wrapper.append(child)
     result.append(wrapper)
+    _mark_math_structures(result, "ins", context)
     return result
 
 
