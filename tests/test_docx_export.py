@@ -511,3 +511,27 @@ b &= 2
     equation = arrays[0].getparent().getparent()
     assert "(1)" in visible_text(equation)
     assert len(root.xpath(".//m:eqArr/ancestor::w:p", namespaces=ns)) == 1
+
+
+def test_ratio_cache_keeps_tracked_output_and_is_reused(tmp_path: Path) -> None:
+    base, current = Document(), Document()
+    for index in range(12):
+        base.add_paragraph(f"Paragraph {index} describes cluster growth from seed ions.")
+        current.add_paragraph(f"Paragraph {index} describes cluster growth from {index} seed ions.")
+    current.add_paragraph("An inserted closing paragraph.")
+    base.save(tmp_path / "base.docx")
+    current.save(tmp_path / "current.docx")
+    cache = tmp_path / "cache" / "ratios.json"
+
+    plain = create_tracked_docx(tmp_path / "base.docx", tmp_path / "current.docx", tmp_path / "plain.docx", workers=1)
+    cold = create_tracked_docx(tmp_path / "base.docx", tmp_path / "current.docx", tmp_path / "cold.docx", ratio_cache=cache, workers=1)
+    stored = json.loads(cache.read_text(encoding="utf-8"))
+    warm = create_tracked_docx(tmp_path / "base.docx", tmp_path / "current.docx", tmp_path / "warm.docx", ratio_cache=cache, workers=1)
+
+    assert plain == cold == warm
+    assert stored and json.loads(cache.read_text(encoding="utf-8")) == stored
+    views = {
+        name: [visible_text(p._p) for p in Document(tmp_path / f"{name}.docx").paragraphs]
+        for name in ("plain", "cold", "warm")
+    }
+    assert views["plain"] == views["cold"] == views["warm"]

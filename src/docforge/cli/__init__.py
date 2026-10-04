@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     md2.add_argument("-o", "--output", type=Path, required=True, help="Output tracked DOCX path")
     md2.add_argument("--revision-author", default="M.Y.G.", help="Author recorded for revisions")
     md2.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+    md2.add_argument("--ratio-cache", type=Path, help="JSON file that keeps paragraph similarity ratios between runs")
+    md2.add_argument("--workers", type=int, help="Processes for uncached ratios; 1 disables the process pool")
 
     tex = sub.add_parser("tex2docx", help="LaTeX -> DOCX (main + optional SI)")
     tex.add_argument("main", type=Path, help="main.tex path")
@@ -270,6 +272,8 @@ def _cmd_redline(args: argparse.Namespace) -> int:
         args.output,
         author=args.revision_author,
         overwrite=args.force,
+        ratio_cache=args.ratio_cache,
+        workers=args.workers,
     )
     print("tracked revisions: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
     print(args.output)

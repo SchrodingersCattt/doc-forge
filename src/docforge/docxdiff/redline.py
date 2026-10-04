@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import copy
 import difflib
+import hashlib
+import json
+import os
 import posixpath
 import re
 import unicodedata
 import zipfile
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,7 +226,70 @@ def _blocks(root: etree._Element) -> tuple[etree._Element, list[Block]]:
     return body, blocks
 
 
-def _score(left: Block, right: Block) -> float:
+def _pair_ratio(pair: tuple[str, str]) -> float:
+    return difflib.SequenceMatcher(None, pair[0], pair[1], autojunk=False).ratio()
+
+
+def _ratio_key(a: str, b: str) -> str:
+    return hashlib.sha1(a.encode("utf-8")).hexdigest() + hashlib.sha1(b.encode("utf-8")).hexdigest()
+
+
+class _RatioTable:
+    """Paragraph similarity ratios, optionally persisted across runs.
+
+    The ratio of two texts never changes, so a cache keyed by both text hashes
+    returns exactly what ``SequenceMatcher`` would compute.
+    """
+
+    def __init__(self, cache_path: Path | None) -> None:
+        self.cache_path = cache_path
+        self.values: dict[str, float] = {}
+        self.used: set[str] = set()
+        self.dirty = False
+        if cache_path is not None and cache_path.is_file():
+            try:
+                self.values = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self.values = {}
+
+    def fill(self, pairs: set[tuple[str, str]], workers: int | None) -> None:
+        keys = {pair: _ratio_key(*pair) for pair in pairs}
+        self.used.update(keys.values())
+        if len(self.used) != len(self.values):
+            self.dirty = True
+        missing = [pair for pair, key in keys.items() if key not in self.values]
+        if not missing:
+            return
+        if workers != 1 and len(missing) >= 200:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                ratios = list(pool.map(_pair_ratio, missing, chunksize=32))
+        else:
+            ratios = [_pair_ratio(pair) for pair in missing]
+        for pair, ratio in zip(missing, ratios):
+            self.values[_ratio_key(*pair)] = ratio
+        self.dirty = True
+
+    def get(self, a: str, b: str) -> float:
+        key = _ratio_key(a, b)
+        if key not in self.used:
+            self.used.add(key)
+            self.dirty = True
+        if key not in self.values:
+            self.values[key] = _pair_ratio((a, b))
+            self.dirty = True
+        return self.values[key]
+
+    def save(self) -> None:
+        if self.cache_path is None or not self.dirty:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_suffix(".tmp")
+        kept = {key: self.values[key] for key in self.used if key in self.values}
+        temporary.write_text(json.dumps(kept), encoding="utf-8")
+        os.replace(temporary, self.cache_path)
+
+
+def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> float:
     if left.kind != right.kind:
         return -10.0
     a, b = _normalize(left.text), _normalize(right.text)
@@ -236,11 +303,39 @@ def _score(left: Block, right: Block) -> float:
         return -2.0
     if a == b:
         return 6.0
-    ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    ratio = ratios.get(a, b) if ratios is not None else _pair_ratio((a, b))
     return -2.5 if ratio < 0.22 else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
 
 
-def _align(base: list[Block], current: list[Block]) -> list[tuple[str, int | None, int | None]]:
+def _align(
+    base: list[Block],
+    current: list[Block],
+    *,
+    cache_path: Path | None = None,
+    workers: int | None = None,
+) -> list[tuple[str, int | None, int | None]]:
+    ratios = _RatioTable(cache_path)
+    base_text = [_normalize(block.text) if block.kind == "p" else "" for block in base]
+    current_text = [_normalize(block.text) if block.kind == "p" else "" for block in current]
+    ratios.fill(
+        {
+            (a, b)
+            for a in set(base_text) if a
+            for b in set(current_text) if b and b != a
+        },
+        workers,
+    )
+    try:
+        return _align_scored(base, current, ratios)
+    finally:
+        ratios.save()
+
+
+def _align_scored(
+    base: list[Block],
+    current: list[Block],
+    ratios: _RatioTable,
+) -> list[tuple[str, int | None, int | None]]:
     n, m, gap = len(base), len(current), -1.35
     scores = [[0.0] * (m + 1) for _ in range(n + 1)]
     steps: list[list[str | None]] = [[None] * (m + 1) for _ in range(n + 1)]
@@ -251,7 +346,7 @@ def _align(base: list[Block], current: list[Block]) -> list[tuple[str, int | Non
     for i in range(1, n + 1):
         for j in range(1, m + 1):
             scores[i][j], steps[i][j] = max(
-                (scores[i - 1][j - 1] + _score(base[i - 1], current[j - 1]), "match"),
+                (scores[i - 1][j - 1] + _score(base[i - 1], current[j - 1], ratios), "match"),
                 (scores[i - 1][j] + gap, "delete"),
                 (scores[i][j - 1] + gap, "insert"),
                 key=lambda item: item[0],
@@ -1232,7 +1327,15 @@ def create_tracked_docx(
     author: str = "M.Y.G.",
     overwrite: bool = False,
     preserve_base_revisions: bool = True,
+    ratio_cache: Path | None = None,
+    workers: int | None = None,
 ) -> dict[str, int]:
+    """Write ``output_path`` as ``current_path`` tracked against ``base_path``.
+
+    ``ratio_cache`` persists paragraph similarity ratios between runs, and
+    ``workers`` sets the process count for ratios not yet cached (``1`` keeps
+    the computation in this process). Neither changes the result.
+    """
     validate_output_path(output_path)
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
@@ -1251,7 +1354,9 @@ def create_tracked_docx(
     carry_base, save_base_relationships = _base_relationships(base_package, current_package)
     summary = {"matched": 0, "changed": 0, "inserted": 0, "deleted": 0, "tables_replaced": 0}
     children: list[etree._Element] = []
-    for action, base_index, current_index in _align(base_blocks, current_blocks):
+    for action, base_index, current_index in _align(
+        base_blocks, current_blocks, cache_path=ratio_cache, workers=workers
+    ):
         if action == "match":
             old = base_blocks[base_index]  # type: ignore[index]
             new = current_blocks[current_index]  # type: ignore[index]
