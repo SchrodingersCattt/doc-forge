@@ -78,6 +78,20 @@ GREEK = {
     r"\longrightarrow": "⟶",
 }
 
+# Relations take a space on each side. TeX inserts that space and then
+# discards the author's spaces, so a converter that drops math spaces
+# glues "a = b" into "a=b".
+SPACED_RELATIONS = {
+    r"\le": "≤",
+    r"\leq": "≤",
+    r"\ge": "≥",
+    r"\geq": "≥",
+    r"\neq": "≠",
+    r"\approx": "≈",
+    r"\sim": "∼",
+}
+RELATION_CHARS = "=<>≤≥≠≈∼"
+
 # Commands whose textual content is skipped entirely (kept for compatibility
 # with hand-authored .tex sources).
 DISCARD_COMMANDS = (
@@ -200,7 +214,19 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 # TeX ignores ordinary spaces in math mode.
                 flush()
                 i += 1
-            elif ch in "+-=<>()[].,;:!?":
+            elif ch in RELATION_CHARS:
+                flush()
+                _emit(
+                    f" {ch} ",
+                    bold=bold,
+                    italic=False,
+                    superscript=sup,
+                    subscript=sub,
+                    color=color,
+                    highlight=hl,
+                )
+                i += 1
+            elif ch in "+-()[].,;:!?":
                 if buf and buf_italic:
                     flush()
                 buf += ch
@@ -233,6 +259,30 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                                 _parse_math(den, bold=bold, sup=sup, sub=sub, color=color, hl=hl)
                                 i = den_end
                                 continue
+                    if cmd == r"\highlight" and cmd_end < len(s) and s[cmd_end] == "{":
+                        brace_end = _find_matching_brace(s, cmd_end)
+                        _parse_math(
+                            s[cmd_end + 1 : brace_end - 1],
+                            bold=bold,
+                            sup=sup,
+                            sub=sub,
+                            color=color,
+                            hl="yellow",
+                        )
+                        i = brace_end
+                        continue
+                    if cmd in SPACED_RELATIONS:
+                        _emit(
+                            f" {SPACED_RELATIONS[cmd]} ",
+                            bold=bold,
+                            italic=False,
+                            superscript=sup,
+                            subscript=sub,
+                            color=color,
+                            highlight=hl,
+                        )
+                        i = cmd_end
+                        continue
                     if cmd in GREEK:
                         _emit(
                             GREEK[cmd],
@@ -514,6 +564,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
         flush()
 
     _parse(s)
+    spans = _tighten_relation_spaces(spans)
     merged: list[Span] = []
     for sp in spans:
         if (
@@ -530,6 +581,25 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
         else:
             merged.append(sp)
     return merged
+
+
+def _tighten_relation_spaces(spans: list[Span]) -> list[Span]:
+    """Drop a relation's padding space when the neighboring run already has one.
+
+    A relation that is its own math group, as in ``X $>$ A``, sits between
+    prose spaces. Padding it again would print a double space. A relation
+    inside a larger expression has no neighboring spaces, because math mode
+    discarded them, and keeps both padding spaces.
+    """
+    symbols = set(SPACED_RELATIONS.values()) | set(RELATION_CHARS)
+    for index, span in enumerate(spans):
+        core = span.text.strip()
+        if span.text != f" {core} " or core not in symbols:
+            continue
+        left = "" if index == 0 or spans[index - 1].text.endswith((" ", "\n")) else " "
+        right = "" if index + 1 == len(spans) or spans[index + 1].text.startswith((" ", "\n")) else " "
+        span.text = f"{left}{core}{right}"
+    return spans
 
 
 def spans_to_plain(spans: list[Span]) -> str:

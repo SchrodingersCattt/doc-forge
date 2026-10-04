@@ -78,6 +78,23 @@ class TokenizeTests(unittest.TestCase):
         spans = tokenize_tex(r"$x_i$")
         self.assertTrue(spans[0].subscript or spans[1].subscript)
 
+    def test_relation_inside_math_keeps_spaces_and_upright_digits(self) -> None:
+        plain = spans_to_plain(tokenize_tex(r"$r = 5.6$ and $\delta \approx 0.909$"))
+        self.assertEqual(plain, "r = 5.6 and δ ≈ 0.909")
+        digits = [span for span in tokenize_tex(r"$r = 5.6$") if "5.6" in span.text]
+        self.assertEqual(len(digits), 1)
+        self.assertFalse(digits[0].italic)
+
+    def test_highlight_inside_math_does_not_italicize_digits(self) -> None:
+        spans = tokenize_tex(r"$r_c = \highlight{5.6}$ and $\approx \highlight{0.909}$")
+        marked = [span for span in spans if span.highlight == "yellow"]
+        self.assertTrue(marked)
+        self.assertTrue(all(not span.italic for span in marked))
+        self.assertEqual(spans_to_plain(spans), "rc = 5.6 and ≈ 0.909")
+
+    def test_relation_that_is_its_own_math_group_is_not_double_spaced(self) -> None:
+        self.assertEqual(spans_to_plain(tokenize_tex(r"X $>$ A $\approx$ B")), "X > A ≈ B")
+
     def test_tokenize_tex_bold(self) -> None:
         spans = tokenize_tex(r"\textbf{bold}")
         self.assertTrue(spans[0].bold)
