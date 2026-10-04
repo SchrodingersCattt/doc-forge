@@ -430,7 +430,11 @@ def _events(paragraph: etree._Element) -> list[Event]:
 
 def _needs_passthrough(paragraph: etree._Element) -> bool:
     """Identify paragraphs whose layout-bearing XML must remain intact."""
-    return any(etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES for node in paragraph.iter())
+    return any(
+        etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES
+        or (node.tag == f"{{{W}}}br" and node.get(f"{{{W}}}type") in ("page", "column"))
+        for node in paragraph.iter()
+    )
 
 
 def _run(token: Token, deleted: bool = False) -> etree._Element:

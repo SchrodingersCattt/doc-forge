@@ -465,6 +465,20 @@ def test_visible_text_includes_math_and_bookmarks_survive_merge() -> None:
     assert merged_text.find(f"{{{W}}}bookmarkEnd") is not None
 
 
+def test_page_break_survives_merge_against_empty_base_paragraph() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import W, Context, _merge_paragraph
+
+    base = etree.Element(f"{{{W}}}p", nsmap={"w": W})
+    current = etree.Element(f"{{{W}}}p", nsmap={"w": W})
+    run = etree.SubElement(current, f"{{{W}}}r")
+    etree.SubElement(run, f"{{{W}}}br").set(f"{{{W}}}type", "page")
+    merged = _merge_paragraph(base, current, Context("tester", 1))
+    breaks = merged.findall(f".//{{{W}}}br")
+    assert [item.get(f"{{{W}}}type") for item in breaks] == ["page"]
+
+
 def test_multiline_display_math_is_one_numbered_equation(tmp_path: Path) -> None:
     from lxml import etree
 
