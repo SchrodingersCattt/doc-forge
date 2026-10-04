@@ -17,7 +17,7 @@ from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_vi
 from ..math import latex_to_omml
 from ..output import validate_output_path
 from .bib import CitationResolver, parse_bib, _compress_labels
-from .tokenize import Span, TableCell, tokenize_tex, spans_to_plain, plain_tex
+from .tokenize import Span, TableCell, tokenize_tex, spans_to_plain, plain_tex, unpaired_quote_errors
 FONT_BODY="Times New Roman"
 FONT_MONO="Consolas"
 FONT_HEADING="Arial"
@@ -1835,6 +1835,9 @@ def validate_docx_package(path: Path, tex_path: Path, auxiliary_tex_path: Path |
     leak = _LATEX_LEAK_RE.search(visible)
     if leak:
         raise ValueError(f"LaTeX command leaked into DOCX: {leak.group(0)}")
+    quote_errors = unpaired_quote_errors(visible)
+    if quote_errors:
+        raise ValueError("unpaired quotation marks in DOCX: " + "; ".join(quote_errors[:3]))
     if r"\bibliography{" in primary_source and "References" not in visible:
         raise ValueError("DOCX is missing the References heading")
 

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from docx import Document
 from docx.oxml.ns import qn
 
-from docforge.tex.tokenize import spans_to_plain, tokenize_tex
+from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
 from docforge.tex.converter import add_rich_text
@@ -102,6 +102,19 @@ class TokenizeTests(unittest.TestCase):
     def test_resolve_ref(self) -> None:
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
+
+    def test_single_quotes_pair_and_math_primes_stay(self) -> None:
+        quoted = spans_to_plain(tokenize_tex(r"Both `1/80' and ``SY''."))
+        self.assertIn("\u20181/80\u2019", quoted)
+        self.assertIn("\u201cSY\u201d", quoted)
+        self.assertEqual(unpaired_quote_errors(quoted), [])
+        primed = spans_to_plain(tokenize_tex(r"the model's $b'$ term"))
+        self.assertIn("model\u2019s", primed)
+        self.assertIn("b'", primed)
+        self.assertNotEqual(
+            unpaired_quote_errors("Both \u20181/80' ratios"),
+            [],
+        )
 
 
 class BibTests(unittest.TestCase):

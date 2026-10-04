@@ -558,6 +558,64 @@ def _tex_hl_name(name: str) -> str:
     return mapping.get(name.strip().lower(), "yellow")
 
 
+_MATH_SPAN_RE = re.compile(
+    r"\$\$[\s\S]*?\$\$"
+    r"|\$[^$]*\$"
+    r"|\\\[[\s\S]*?\\\]"
+    r"|\\begin\{(?:equation|align|eqnarray|gather|multline)\*?\}[\s\S]*?"
+    r"\\end\{(?:equation|align|eqnarray|gather|multline)\*?\}"
+)
+
+
+def _replace_prose_apostrophes(s: str) -> str:
+    """Turn prose apostrophes into closing single quotes, leaving math primes."""
+    pieces: list[str] = []
+    cursor = 0
+    for match in _MATH_SPAN_RE.finditer(s):
+        pieces.append(s[cursor:match.start()].replace("'", "\u2019"))
+        pieces.append(match.group(0))
+        cursor = match.end()
+    pieces.append(s[cursor:].replace("'", "\u2019"))
+    return "".join(pieces)
+
+
+def unpaired_quote_errors(text: str) -> list[str]:
+    """Return quote-pairing failures in reader-facing text.
+
+    Opening quotes must close with the matching curly mark. A straight
+    apostrophe or straight double quote may not close an open quotation.
+    A closing single quote with no open quote is an apostrophe.
+    """
+    closers = {"\u2019": "\u2018", "\u201d": "\u201c"}
+    straight = {"'": "\u2018", '"': "\u201c"}
+    names = {"\u2018": "single", "\u201c": "double"}
+    stack: list[str] = []
+    errors: list[str] = []
+    for index, char in enumerate(text):
+        if char in closers:
+            expected = closers[char]
+            if stack and stack[-1] == expected:
+                stack.pop()
+            elif char == "\u201d":
+                errors.append(f"closing double quote without an opening quote at offset {index}")
+        elif char in ("\u2018", "\u201c"):
+            stack.append(char)
+        elif char in straight:
+            if stack and stack[-1] == straight[char]:
+                snippet = text[max(0, index - 20):index + 12].replace("\n", " ")
+                errors.append(
+                    f"straight mark closes a {names[straight[char]]} quote near {snippet!r}"
+                )
+                stack.pop()
+            elif char == '"':
+                snippet = text[max(0, index - 20):index + 12].replace("\n", " ")
+                errors.append(f"straight double quote near {snippet!r}")
+    if stack:
+        opened = ", ".join(names[char] for char in stack)
+        errors.append(f"unclosed {opened} quote(s)")
+    return errors
+
+
 def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = s.replace("~", "\u00A0")
     s = re.sub(r"\\bar\{\\mathbf\s+([A-Za-z])\}", lambda m: r"\mathbf{" + m.group(1) + "\u0305}", s)
@@ -567,6 +625,7 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = s.replace("``", "\u201C")
     s = s.replace("''", "\u201D")
     s = s.replace("`", "\u2018")
+    s = _replace_prose_apostrophes(s)
     s = re.sub(r"\$([^$]+)\$", lambda m: "$" + m.group(1).replace("-", "–") + "$", s)
     s = re.sub(r"\\vdet\b", lambda _: "V_{\\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: "\\eta^{2}", s)
@@ -604,4 +663,7 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     return s
 
 
-__all__ = ["Span", "TableCell", "tokenize_tex", "spans_to_plain", "plain_tex", "GREEK"]
+__all__ = [
+    "Span", "TableCell", "tokenize_tex", "spans_to_plain", "plain_tex",
+    "unpaired_quote_errors", "GREEK",
+]
