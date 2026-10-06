@@ -28,6 +28,13 @@ from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .blocks import Block
+from .citations import (
+    CITATION_RE,
+    CitationStyle,
+    format_citation_labels as _format_citation_labels,
+    materialize_citations,
+    replace_block_citations as _replace_block_citations,
+)
 from ..output import validate_output_path
 from .launcher import (
     accept_docx_revisions,
@@ -57,7 +64,6 @@ __all__ = [
     "CitationResolver",
 ]
 
-CITATION_RE = re.compile(r"\\citep?\{([^{}]+)\}")
 HEADING_RE = re.compile(r"^#\s+(.+?)\s*$")
 FORBIDDEN_TOKENS = (
     "[placeholder text]",
@@ -278,62 +284,6 @@ def _citation_plan(
     }
     resolver = CitationResolver(entries, numbering=numbering, strict=True)
     return resolver.plan(cited, inherited_numbers=base, numbering=numbering)
-
-
-def _format_citation_labels(labels: Iterable[str | int]) -> str:
-    """Sort and collapse consecutive numeric or SI-prefixed citation labels."""
-    grouped: dict[str, set[int]] = {"": set(), "S": set()}
-    for label in labels:
-        value = str(label)
-        prefix = "S" if value.startswith("S") else ""
-        grouped[prefix].add(int(value.removeprefix("S")))
-
-    ranges: list[str] = []
-    for prefix in ("", "S"):
-        values = sorted(grouped[prefix])
-        start = end = None
-        for value in values + [None]:
-            if start is None:
-                start = end = value
-            elif value is not None and value == end + 1:
-                end = value
-            else:
-                ranges.append(f"{prefix}{start}" if start == end else f"{prefix}{start}–{prefix}{end}")
-                start = end = value
-    return ",".join(ranges)
-
-
-def _replace_citations(text: str, mapping: Mapping[str, str | int], *, superscript: bool = False) -> str:
-    def replace(match: re.Match[str]) -> str:
-        keys = [key.strip() for key in match.group(1).split(",") if key.strip()]
-        missing = [key for key in keys if key not in mapping]
-        if missing:
-            raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
-        numbers = _format_citation_labels(mapping[key] for key in keys)
-        return ("\ue000" + numbers + "\ue001") if superscript else "[" + numbers + "]"
-
-    pattern = r"\s*" + CITATION_RE.pattern if superscript else CITATION_RE.pattern
-    return re.sub(pattern, replace, text)
-
-
-def _replace_block_citations(
-    blocks: Iterable[Block], mapping: Mapping[str, str | int], *, superscript: bool = False
-) -> tuple[Block, ...]:
-    return tuple(
-        Block(
-            kind=block.kind,
-            text=_replace_citations(block.text, mapping, superscript=superscript),
-            level=block.level,
-            rows=tuple(
-                tuple(_replace_citations(value, mapping, superscript=superscript) for value in row)
-                for row in block.rows
-            ),
-            language=block.language,
-            path=block.path,
-            options=block.options,
-        )
-        for block in blocks
-    )
 
 
 def _extract_abstract(blocks: Iterable[Block]) -> tuple[str, tuple[Block, ...]]:
@@ -1231,53 +1181,6 @@ def _template_uses_superscript_citations(document: DocumentType) -> bool:
     return False
 
 
-def _materialize_superscript_citations(document: DocumentType) -> int:
-    """Replace private citation sentinels with template-style superscripts."""
-    converted = 0
-    pattern = re.compile(r"(\ue000(?:S?[0-9]+)(?:[–,](?:S?[0-9]+))*\ue001)")
-    # Materialize the run list before replacing nodes; mutating a live lxml
-    # iterator otherwise skips sibling paragraphs after the first citation.
-    for parent in list(document._element.body.iter(qn("w:r"))):
-        text_nodes = [child for child in parent if child.tag == qn("w:t") and child.text and pattern.search(child.text)]
-        if not text_nodes:
-            continue
-        grandparent = parent.getparent()
-        if grandparent is None:
-            continue
-        base_properties = parent.find(qn("w:rPr"))
-        replacements = []
-        for node in text_nodes:
-            for fragment in pattern.split(node.text):
-                if not fragment:
-                    continue
-                run = OxmlElement("w:r")
-                if base_properties is not None:
-                    run.append(copy.deepcopy(base_properties))
-                text = OxmlElement("w:t")
-                text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                if fragment.startswith("\ue000"):
-                    text.text = fragment[1:-1]
-                    properties = run.find(qn("w:rPr"))
-                    if properties is None:
-                        properties = OxmlElement("w:rPr")
-                        run.insert(0, properties)
-                    for existing in list(properties.findall(qn("w:vertAlign"))):
-                        properties.remove(existing)
-                    marker = OxmlElement("w:vertAlign")
-                    marker.set(qn("w:val"), "superscript")
-                    properties.append(marker)
-                    converted += 1
-                else:
-                    text.text = fragment
-                run.append(text)
-                replacements.append(run)
-        position = list(grandparent).index(parent)
-        grandparent.remove(parent)
-        for offset, run in enumerate(replacements):
-            grandparent.insert(position + offset, run)
-    return converted
-
-
 FIGURE_CAPTION_RE = re.compile(r"\s*(?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:|]?", re.IGNORECASE)
 FIGURE_CAPTION_SLOT_RE = re.compile(
     r"\s*\[(?:Figure|Scheme|Chart)\s+Caption\]", re.IGNORECASE
@@ -1920,12 +1823,15 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
-    if citation_format not in {"template", "superscript", "bracketed"}:
-        raise ValueError("citation_format must be one of: template, superscript, bracketed")
     template = Document(template_path)
-    citation_superscript = citation_format == "superscript" or (
-        citation_format == "template" and _template_uses_superscript_citations(template)
-    )
+    if citation_format == "template":
+        citation_style = (
+            CitationStyle.SUPERSCRIPT
+            if _template_uses_superscript_citations(template)
+            else CitationStyle.BRACKETED
+        )
+    else:
+        citation_style = CitationStyle.by_name(citation_format)
     blocks = tuple(
         block
         for path in inputs
@@ -1946,7 +1852,7 @@ def assemble_markdown_template(
     used, mapping = _citation_plan(
         cited, bibliography_entries, citation_base, numbering=citation_numbering
     )
-    rendered = _replace_block_citations(blocks, mapping, superscript=citation_superscript)
+    rendered = _replace_block_citations(blocks, mapping, citation_style)
     abstract, body_blocks = _extract_abstract(rendered)
     # Supplementary-information templates carry an italic lead-in immediately
     # before the title.  Treat that source Markdown paragraph as front matter
@@ -2280,7 +2186,7 @@ def assemble_markdown_template(
     template.core_properties.title = resolved_title
     template.core_properties.author = metadata.authors
     _update_fields(template)
-    citation_converted = _materialize_superscript_citations(template) if citation_superscript else 0
+    citation_converted = materialize_citations(template, citation_style)
     normalize_document_typography(template)
     output.parent.mkdir(parents=True, exist_ok=True)
     template.save(output)
@@ -2296,7 +2202,7 @@ def assemble_markdown_template(
         expected_body_columns=body_columns_after,
         expected_reference_labels=tuple(str(mapping[key]) for key in reference_keys),
     )
-    verification["citation_format"] = "superscript" if citation_superscript else "bracketed"
+    verification["citation_format"] = citation_style.name
     verification["citation_count"] = citation_converted
     return AssemblyResult(
         output=output,

@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
     md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
     md.add_argument("--citation-base", type=Path, help="Existing manifest whose citation numbers a supplement should reuse")
-    md.add_argument("--citation-format", choices=("template", "superscript", "bracketed"), default="template", help="Citation rendering policy")
+    md.add_argument("--citation-format", choices=("template", "bracketed", "superscript", "superscript-bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
     md.add_argument("--figure-span", choices=("column", "page"), default="column", help="Default figure span: current text column or printable page width; per-image span= overrides this value")
     md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
