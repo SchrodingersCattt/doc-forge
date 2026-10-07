@@ -1448,7 +1448,7 @@ def create_tracked_docx(
                     _drawing_payloads(old.element, base_package)
                     != _drawing_payloads(new.element, current_package)
                 )
-                if (old.text != new.text and (_needs_passthrough(old.element) or _needs_passthrough(new.element))) or changed_drawing:
+                if (_normalize(old.text) != _normalize(new.text) and (_needs_passthrough(old.element) or _needs_passthrough(new.element))) or changed_drawing:
                     children.append(_mark_paragraph(carry_base(old.element), "del", context))
                     children.append(_mark_paragraph(new.element, "ins", context))
                     summary["changed"] += 1
