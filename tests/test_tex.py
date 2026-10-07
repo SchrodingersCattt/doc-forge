@@ -115,6 +115,9 @@ class TokenizeTests(unittest.TestCase):
             if run.text == "n_dim"
         ]
         self.assertEqual(fonts, ["Consolas"])
+        for run in paragraph.runs:
+            rpr = run._element.find(qn("w:rPr"))
+            self.assertEqual(len(rpr.findall(qn("w:rFonts"))), 1)
 
     def test_layout_commands_and_superscripts_do_not_leak(self) -> None:
         spans = tokenize_tex(

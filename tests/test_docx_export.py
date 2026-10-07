@@ -535,3 +535,44 @@ def test_ratio_cache_keeps_tracked_output_and_is_reused(tmp_path: Path) -> None:
         for name in ("plain", "cold", "warm")
     }
     assert views["plain"] == views["cold"] == views["warm"]
+
+
+def test_deleted_hyperlink_field_does_not_keep_field_codes(tmp_path: Path) -> None:
+    from lxml import etree
+
+    def add_hyperlink_field(paragraph, text: str) -> None:
+        def append_run(*nodes) -> None:
+            run = OxmlElement("w:r")
+            for node in nodes:
+                run.append(node)
+            paragraph._p.append(run)
+
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        instruction = OxmlElement("w:instrText")
+        instruction.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        instruction.text = ' HYPERLINK "https://example.com" '
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        append_run(begin)
+        append_run(instruction)
+        append_run(separate)
+        paragraph.add_run(text)
+        append_run(end)
+
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    document = Document()
+    add_hyperlink_field(document.add_paragraph(), "Andreas Marek")
+    document.save(base)
+    document = Document()
+    document.add_paragraph("Replacement author")
+    document.save(current)
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, tracked, overwrite=True)
+    root = etree.fromstring(zipfile.ZipFile(tracked).read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert root.xpath(".//w:del//w:fldChar", namespaces=ns) == []
+    assert "Andreas Marek" in visible_text(root, "original")

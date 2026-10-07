@@ -777,6 +777,20 @@ def _append_block(children: list[etree._Element], element: etree._Element, compa
         children.append(companion)
 
 
+def _drop_complex_field_codes(element: etree._Element) -> None:
+    """Keep a deleted field's visible text and drop its field codes.
+
+    A hyperlink field is several runs (begin, instruction, separate, result,
+    end). Wrapping each run in its own ``w:del`` makes Word report the file
+    as unreadable. The result text is what the deletion needs to show.
+    """
+    for run in list(element.findall(".//w:r", NS)):
+        if run.find("./w:fldChar", NS) is not None or run.find("./w:instrText", NS) is not None:
+            parent = run.getparent()
+            if parent is not None:
+                parent.remove(run)
+
+
 def _mark_deleted_runs(element: etree._Element, context: Context) -> None:
     """Mark surviving runs deleted without pulling hyperlinks inside ``w:del``."""
     for child in list(element):
@@ -856,6 +870,7 @@ def _mark_paragraph(
             parent = pict.getparent()
             if parent is not None:
                 parent.remove(pict)
+        _drop_complex_field_codes(result)
         # The paragraph-mark marker only joins this paragraph into the next
         # one when the revision is accepted. The runs themselves stay live
         # unless they are wrapped in w:del.

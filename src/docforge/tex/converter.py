@@ -183,11 +183,14 @@ def _apply_span(run, span: Span, font_size=PT_BODY, font_name=FONT_BODY):
     run.font.size = size
     run.font.name = face
     rPr = run._element.get_or_add_rPr()
-    rFonts = parse_xml(
-        f'<w:rFonts {nsdecls("w")} w:ascii="{face}" w:hAnsi="{face}" '
-        f'w:cs="{face}" w:eastAsia="{face}"/>'
-    )
-    rPr.insert(0, rFonts)
+    # python-docx already wrote one w:rFonts. A second copy makes Word
+    # report unreadable content and offer to repair the file.
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.insert(0, rFonts)
+    for key in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+        rFonts.set(qn(key), face)
     if span.bold:
         run.bold = True
     if span.italic:
