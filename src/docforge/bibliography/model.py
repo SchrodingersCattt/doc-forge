@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
+
+
+def _empty_fields() -> Mapping[str, Any]:
+    # Python 3.11 treats MappingProxyType as an unhashable default and rejects it.
+    return MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -13,7 +18,7 @@ class BibliographyEntry:
 
     key: str
     entry_type: str = "misc"
-    fields: Mapping[str, Any] = MappingProxyType({})
+    fields: Mapping[str, Any] = field(default_factory=_empty_fields)
     source_format: str = "unknown"
 
     @classmethod
