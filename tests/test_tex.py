@@ -99,6 +99,13 @@ class TokenizeTests(unittest.TestCase):
         spans = tokenize_tex(r"\textbf{bold}")
         self.assertTrue(spans[0].bold)
 
+    def test_texorpdfstring_keeps_typeset_argument_only(self) -> None:
+        spans = tokenize_tex(r"\texorpdfstring{ABX$_4$}{ABX4} branch")
+        self.assertEqual(spans_to_plain(spans), "ABX4 branch")
+        self.assertEqual(sum(1 for span in spans if span.text == "ABX4"), 0)
+        subscript = [span.text for span in spans if span.subscript]
+        self.assertEqual(subscript, ["4"])
+
     def test_tokenize_texttt_is_mono(self) -> None:
         spans = tokenize_tex(r"set \texttt{n\_dim} here")
         mono = [span for span in spans if span.mono]

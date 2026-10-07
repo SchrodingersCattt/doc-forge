@@ -564,6 +564,13 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                         inner = s[after + 1 : brace_end - 1]
                         _parse(inner, bold=bold, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                         i = brace_end
+                        # hyperref prints only the typeset argument; the second
+                        # brace is the PDF-bookmark fallback and must not appear.
+                        if cmd_full == r"\texorpdfstring":
+                            while i < len(s) and s[i] in " \t":
+                                i += 1
+                            if i < len(s) and s[i] == "{":
+                                i = _find_matching_brace(s, i)
                     else:
                         i = after
                     continue
