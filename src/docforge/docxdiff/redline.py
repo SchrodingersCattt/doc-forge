@@ -335,8 +335,13 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
         return 6.0
     ratio = ratios.get(a, b) if ratios is not None else _pair_ratio((a, b))
     # Two gaps cost -2.70, so a weak match must score below that or the
-    # aligner splices unrelated sentences into one paragraph.
-    return -8.0 if ratio < 0.22 else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
+    # aligner splices unrelated sentences into one paragraph. Long paragraphs
+    # need a higher bar: a 0.3 overlap is still a different sentence, and
+    # word-merging it is unreadable. Short strings stay on the 0.22 bar so
+    # small edits such as "before"/"after" remain in-paragraph revisions.
+    heading = "heading" in left.style.lower() or "heading" in right.style.lower()
+    cutoff = 0.22 if heading or min(len(a), len(b)) < 80 else 0.55
+    return -8.0 if ratio < cutoff else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
 
 
 def _align(
