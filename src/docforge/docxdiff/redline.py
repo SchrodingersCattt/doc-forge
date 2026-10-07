@@ -334,7 +334,9 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     if a == b:
         return 6.0
     ratio = ratios.get(a, b) if ratios is not None else _pair_ratio((a, b))
-    return -2.5 if ratio < 0.22 else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
+    # Two gaps cost -2.70, so a weak match must score below that or the
+    # aligner splices unrelated sentences into one paragraph.
+    return -8.0 if ratio < 0.22 else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
 
 
 def _align(
