@@ -116,6 +116,18 @@ class TokenizeTests(unittest.TestCase):
         ]
         self.assertEqual(fonts, ["Consolas"])
 
+    def test_layout_commands_and_superscripts_do_not_leak(self) -> None:
+        spans = tokenize_tex(
+            r"\begin{center}\vspace{12pt}\begin{minipage}{0.98\textwidth}"
+            r"\textsuperscript{\#}Equal\end{minipage}\end{center}"
+        )
+        text = spans_to_plain(spans)
+        self.assertNotIn("center", text)
+        self.assertNotIn("minipage", text)
+        self.assertNotIn("12pt", text)
+        self.assertEqual(text, "#Equal")
+        self.assertTrue(spans[0].superscript)
+
     def test_resolve_ref(self) -> None:
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
@@ -178,6 +190,26 @@ class LabelMapTests(unittest.TestCase):
         # the SI prefix is present and the SI figure label resolves.
         self.assertIn("fig:one", label_map)
         self.assertTrue(label_map["fig:one"].isdigit())
+
+    def test_external_document_prefix_resolves_supplementary_floats(self) -> None:
+        main = r"\begin{document}\end{document}"
+        si = r"""
+        \begin{document}
+        \refstepcounter{suppnote}
+        \section*{Supplementary Note}
+        \label{sn:model}
+        \begin{table}
+        \label{tab:one}
+        \end{table}
+        \begin{figure}
+        \label{fig:S1}
+        \end{figure}
+        \end{document}
+        """
+        labels = build_label_map(main, si)
+        self.assertEqual(labels["S-tab:one"], "S1")
+        self.assertEqual(labels["S-fig:S1"], "S1")
+        self.assertEqual(labels["S-sn:model"], "1")
 
 
 if __name__ == "__main__":

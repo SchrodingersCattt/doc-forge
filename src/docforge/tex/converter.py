@@ -40,23 +40,37 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
     ed_tbl_n = 0
     sec_n = 0
     subsec_n = 0
+    suppnote_n = 0
+    supprecord_n = 0
     in_extended_data = False
     for m in re.finditer(
-        r"\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm)\b|\\label\{([^}]*)\}",
+        r"\\refstepcounter\{(suppnote|supprecord)\}|\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm)\b|\\label\{([^}]*)\}",
         body
     ):
-        if m.group(1):  # section
-            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group(1)).strip()
+        if m.group(1):
+            if m.group(1) == "suppnote":
+                suppnote_n += 1
+            else:
+                supprecord_n += 1
+            continue
+        if m.group(2):  # section
+            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group(2)).strip()
+            note_match = re.match(r"Supplementary Note\s+(\d+)", heading)
+            record_match = re.match(r"Supplementary Record\s+(\d+)", heading)
+            if note_match:
+                suppnote_n = int(note_match.group(1))
+            if record_match:
+                supprecord_n = int(record_match.group(1))
             if heading == "Extended Data":
                 in_extended_data = True
             else:
                 sec_n += 1
                 subsec_n = 0
             continue
-        if m.group(2):  # subsection
+        if m.group(3):  # subsection
             subsec_n += 1
             continue
-        env = m.group(3)
+        env = m.group(4)
         if env == "figure":
             if in_extended_data:
                 ed_fig_n += 1
@@ -69,8 +83,8 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
                 tbl_n += 1
         elif env == "algorithm":
             alg_n += 1
-        elif m.group(4):
-            key = m.group(4)
+        elif m.group(5):
+            key = m.group(5)
             if key.startswith("fig:"):
                 result[key] = f"{ed_fig_n}" if key.startswith("fig:ed_") else f"{prefix}{fig_n}"
             elif key.startswith("tab:"):
@@ -83,6 +97,13 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
                     result[key] = f"{prefix}{sec_n}.{subsec_n}"
                 else:
                     result[key] = f"{prefix}{sec_n}"
+            elif key.startswith("sn:"):
+                if supprecord_n:
+                    result[key] = f"{supprecord_n}"
+                elif suppnote_n:
+                    result[key] = f"{suppnote_n}"
+                else:
+                    result[key] = f"{sec_n}"
             elif key.startswith("sec:"):
                 result[key] = f"{prefix}{sec_n}"
             else:
@@ -94,7 +115,10 @@ def _build_label_map(full_text: str, aux_text: str | None = None,
                      current_prefix: str = "", aux_prefix: str = "S") -> dict[str,str]:
     labels=_scan_labels(full_text, prefix=current_prefix)
     if aux_text:
-        for key,value in _scan_labels(aux_text,prefix=aux_prefix).items(): labels.setdefault(key,value)
+        for key, value in _scan_labels(aux_text, prefix=aux_prefix).items():
+            labels.setdefault(key, value)
+            # xr-hyper \externaldocument[S-]{si} cites the other file as S-<label>.
+            labels.setdefault(f"S-{key}", value)
     return labels
 
 
@@ -425,10 +449,12 @@ def add_title(doc: Document, title_tex: str, si_mode: bool = False):
         if not part_clean.strip():
             continue
 
-        p = doc.add_paragraph(style="Title")
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(12)
         # First part (e.g., "Supplementary Information") gets slightly smaller font
-        font_size = Pt(14) if part_idx == 0 and len(parts) > 1 else Pt(16)
+        font_size = Pt(12) if part_idx == 0 and len(parts) > 1 else Pt(14)
         is_si_header = si_mode and part_idx == 0
         add_rich_text(p, part_clean, font_size=font_size, font_name=FONT_HEADING)
         for run in p.runs:
@@ -439,9 +465,11 @@ def add_title(doc: Document, title_tex: str, si_mode: bool = False):
                 run.bold = True
 
 
-def add_authors(doc: Document, authors: list, affils: list[str]):
+def add_authors(doc: Document, authors: list, affils: list[str], notes: list[str] | None = None):
+    structured = notes is not None
     p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if structured else WD_ALIGN_PARAGRAPH.CENTER
+    author_size = Pt(12) if structured else Pt(11)
     for i, a in enumerate(authors):
         if isinstance(a, tuple):
             name, is_corr = a
@@ -449,22 +477,27 @@ def add_authors(doc: Document, authors: list, affils: list[str]):
             name, is_corr = a, False
         if not name.strip():
             continue
-        add_rich_text(p, name, font_size=Pt(11))
+        add_rich_text(p, name, font_size=author_size)
         if is_corr:
             r = p.add_run("*")
-            r.font.size = Pt(11)
+            r.font.size = author_size
             r.font.name = FONT_BODY
             r.font.superscript = True
         if i < len(authors) - 1:
             r = p.add_run(", ")
-            r.font.size = Pt(11)
+            r.font.size = author_size
             r.font.name = FONT_BODY
+    for note in notes or []:
+        pn = doc.add_paragraph()
+        pn.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        add_rich_text(pn, note, font_size=Pt(10))
     for aff in affils:
         pa = doc.add_paragraph()
-        pa.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        add_rich_text(pa, aff, font_size=Pt(9))
-        for run in pa.runs:
-            run.italic = True
+        pa.alignment = WD_ALIGN_PARAGRAPH.LEFT if structured else WD_ALIGN_PARAGRAPH.CENTER
+        add_rich_text(pa, aff, font_size=Pt(10) if structured else Pt(9))
+        if not structured:
+            for run in pa.runs:
+                run.italic = True
 
 
 def add_abstract(doc: Document, text: str, resolver: CitationResolver):
@@ -1037,6 +1070,85 @@ def _set_cell_border(cell, top=None, bottom=None):
         ))
 
 
+def _set_cell_shading(cell, fill: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shading = tc_pr.find(qn("w:shd"))
+    if shading is None:
+        shading = OxmlElement("w:shd")
+        tc_pr.append(shading)
+    shading.set(qn("w:fill"), fill)
+    shading.set(qn("w:val"), "clear")
+
+
+def _set_cell_margins(cell, *, top: int = 40, start: int = 60, bottom: int = 40, end: int = 60) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = tc_pr.find(qn("w:tcMar"))
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+    for side, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        margin = tc_mar.find(qn(f"w:{side}"))
+        if margin is None:
+            margin = OxmlElement(f"w:{side}")
+            tc_mar.append(margin)
+        margin.set(qn("w:w"), str(value))
+        margin.set(qn("w:type"), "dxa")
+
+
+def _listing_caption_text(caption: str) -> str:
+    return plain_tex(re.sub(r"\s+", " ", caption).strip())
+
+
+def add_listing_text(doc: Document, lines: list[str], caption: str = "") -> None:
+    """Render a source listing as one table row per line."""
+    if caption:
+        p = doc.add_paragraph()
+        p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.keep_with_next = True
+        r = p.add_run(_listing_caption_text(caption))
+        r.bold = True
+        r.font.name = FONT_BODY
+        r.font.size = Pt(9)
+    if not lines:
+        return
+    table = doc.add_table(rows=len(lines), cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    _clear_all_borders(table)
+    for line_no, line in enumerate(lines, start=1):
+        number_cell, code_cell = table.rows[line_no - 1].cells
+        number_cell.width = Cm(0.9)
+        code_cell.width = Cm(15.5)
+        for cell in (number_cell, code_cell):
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            _set_cell_shading(cell, "F3F4F6")
+            _set_cell_margins(cell)
+        number = number_cell.paragraphs[0]
+        number.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        number.paragraph_format.space_before = Pt(0)
+        number.paragraph_format.space_after = Pt(0)
+        number_run = number.add_run(f"{line_no:02d}")
+        number_run.font.name = "Consolas"
+        number_run.font.size = Pt(7)
+        number_run.font.color.rgb = RGBColor(100, 100, 100)
+        code = code_cell.paragraphs[0]
+        code.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        code.paragraph_format.first_line_indent = Cm(0)
+        code.paragraph_format.space_before = Pt(0)
+        code.paragraph_format.space_after = Pt(0)
+        code_run = code.add_run(line.expandtabs(4) or " ")
+        code_run.font.name = "Consolas"
+        code_run.font.size = Pt(7.5)
+
+
+def add_source_listing(doc: Document, source_path: Path, caption: str = "") -> None:
+    if not source_path.exists():
+        raise FileNotFoundError(f"Supplementary record not found: {source_path}")
+    lines = source_path.read_text(encoding="utf-8").splitlines()
+    add_listing_text(doc, lines, caption)
+
+
 def _clear_all_borders(tbl):
     """Remove all borders from a table and its cells."""
     tblPr = tbl._tbl.tblPr
@@ -1386,11 +1498,50 @@ def _extract_braced_arg(text: str, command: str) -> str:
 #  Preamble extraction
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _iter_macro_calls(text: str, command: str, nargs: int) -> list[list[str]]:
+    """Extract balanced arguments from explicit metadata macros in *text*."""
+    calls: list[list[str]] = []
+    for match in re.finditer(r"\\" + re.escape(command) + r"\b", text):
+        pos = match.end()
+        args: list[str] = []
+        while len(args) < nargs:
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text) or text[pos] != "{":
+                break
+            end = _find_matching_brace(text, pos)
+            args.append(text[pos + 1:end - 1])
+            pos = end
+        if len(args) == nargs:
+            calls.append(args)
+    return calls
+
+
 def _extract_preamble(full_text: str) -> dict:
-    data: dict = {"title": "", "authors": [], "affils": [], "abstract": ""}
+    data: dict = {"title": "", "authors": [], "affils": [], "notes": [], "abstract": ""}
     m = re.search(r"\\title\{", full_text)
     if m:
         data["title"] = _extract_braced_arg(full_text, r"\title")
+
+    center_m = re.search(r"\\begin\{center\}(.*?)\\end\{center\}", full_text, re.DOTALL)
+    if center_m and not data["title"]:
+        center_content = center_m.group(1)
+        title_lines = re.findall(
+            r"\{\\(?:LARGE|Large|large|huge|Huge)\\bfseries\s+([^}]+)\}",
+            center_content,
+        )
+        if title_lines:
+            data["title"] = r" \\ ".join(line.strip() for line in title_lines)
+        structured_authors = _iter_macro_calls(center_content, "authorline", 1)
+        structured_notes = _iter_macro_calls(center_content, "authornote", 1)
+        structured_affils = _iter_macro_calls(center_content, "authoraffil", 2)
+        if structured_authors or structured_notes or structured_affils:
+            data["authors"] = [args[0].strip() for args in structured_authors]
+            data["notes"] = [args[0].strip() for args in structured_notes]
+            data["affils"] = [
+                r"\textsuperscript{[" + args[0].strip() + r"]}\," + args[1].strip()
+                for args in structured_affils
+            ]
 
     for am in re.finditer(r"\\author(?:\[([^\]]*)\])?\{([^}]+)\}", full_text):
         annotation = am.group(1) or ""
@@ -1441,11 +1592,36 @@ def _expand_inputs(text: str, base_dir: Path, seen: set[Path] | None = None) -> 
     return re.sub(r"\\(input|include)\{([^}]+)\}", repl, text)
 
 
+def _expand_supplementary_counters(text: str) -> str:
+    """Replace the SI note and record counters with the numbers readers see."""
+    values = {"suppnote": 0, "supprecord": 0}
+    pattern = re.compile(
+        r"\\refstepcounter\{(suppnote|supprecord)\}|\\the(suppnote|supprecord)"
+    )
+
+    def repl(match: re.Match) -> str:
+        stepped = match.group(1)
+        if stepped:
+            values[stepped] += 1
+            return ""
+        return str(values[match.group(2)])
+
+    return pattern.sub(repl, text)
+
+
 def _body_from_text(text: str) -> str:
     m0 = re.search(r"\\begin\{document\}", text)
     m1 = re.search(r"\\end\{document\}", text)
     if m0 and m1:
         text = text[m0.end():m1.start()]
+
+    text = re.sub(
+        r"\\begin\{center\}.*?\\end\{center\}\s*(?:\\vspace\{[^}]*\}\s*)?",
+        "",
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
 
     # Remove \title{...}, \author{...}, \date{...} with brace-balanced extraction
     for cmd in (r"\title", r"\author", r"\date"):
@@ -1483,9 +1659,13 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 float_prefix: str = "",
                 main_authors=None,
                 main_affils=None):
-    full_text = _expand_inputs(tex_path.read_text(encoding="utf-8"), tex_path.parent)
+    full_text = _expand_supplementary_counters(
+        _expand_inputs(tex_path.read_text(encoding="utf-8"), tex_path.parent)
+    )
     aux_text = (
-        _expand_inputs(aux_path.read_text(encoding="utf-8"), aux_path.parent)
+        _expand_supplementary_counters(
+            _expand_inputs(aux_path.read_text(encoding="utf-8"), aux_path.parent)
+        )
         if aux_path and aux_path.exists() else None
     )
     _context().label_map=_build_label_map(
@@ -1514,7 +1694,14 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
     if preamble["title"]:
         add_title(doc, preamble["title"], si_mode=is_si_doc)
     if preamble["authors"]:
-        add_authors(doc, preamble["authors"], preamble["affils"])
+        notes = preamble.get("notes") or []
+        structured = bool(notes) or not isinstance(preamble["authors"][0], tuple)
+        add_authors(
+            doc,
+            preamble["authors"],
+            preamble["affils"],
+            notes if structured else None,
+        )
     elif is_si_doc and main_authors:
         add_authors(doc, main_authors, main_affils or [])
     if preamble["abstract"]:
@@ -1744,6 +1931,33 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             i += 1
             continue
 
+        # --- supplementary source listing ---
+        if line.startswith(r"\lstinputlisting"):
+            listing_block = line
+            j = i + 1
+            listing_match = re.search(
+                r"\\lstinputlisting(?:\[(.*?)\])?\s*\{([^}]+)\}",
+                listing_block,
+                re.DOTALL,
+            )
+            while listing_match is None and j < len(lines):
+                listing_block += "\n" + lines[j].strip()
+                j += 1
+                listing_match = re.search(
+                    r"\\lstinputlisting(?:\[(.*?)\])?\s*\{([^}]+)\}",
+                    listing_block,
+                    re.DOTALL,
+                )
+            if listing_match is None:
+                raise ValueError(f"Malformed lstinputlisting near line {i + 1}")
+            options = listing_match.group(1) or ""
+            caption_match = re.search(r"caption=\{([^}]*)\}", options, re.DOTALL)
+            caption = caption_match.group(1).strip() if caption_match else ""
+            source_path = (tex_path.parent / listing_match.group(2).strip()).resolve()
+            add_source_listing(doc, source_path, caption)
+            i = j
+            continue
+
         # --- skip no-ops ---
         if re.match(r"\\(begin|end)\{(document|abstract)\}", line):
             i += 1
@@ -1768,7 +1982,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             if nl.startswith("%") or _is_invisible_tex_line(nl):
                 j += 1
                 continue
-            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
+            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
                 break
             para_lines.append(nl)
             j += 1
@@ -1856,7 +2070,7 @@ def validate_docx_package(path: Path, tex_path: Path, auxiliary_tex_path: Path |
         )
     expected_tables = len(re.findall(
         r"\\begin\{(?:table\*?|longtable)\}", primary_source
-    ))
+    )) + len(re.findall(r"\\lstinputlisting\b", primary_source))
     actual_tables = 0
     for table in root.findall("./w:body/w:tbl", DIFF_NS):
         rows = table.findall("./w:tr", DIFF_NS)

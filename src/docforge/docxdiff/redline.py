@@ -104,6 +104,7 @@ class Block:
     text: str
     style: str
     drawing: bool
+    companion: etree._Element | None = None
 
 
 class Context:
@@ -124,6 +125,12 @@ class Context:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
+
+
+_NOISE_PARAGRAPH = re.compile(
+    r"^(?:suppnote|supprecord|landscape|small(?:\s+\d+pt)?)$",
+    re.IGNORECASE,
+)
 
 
 def _hyperlink_attrs(node: etree._Element) -> tuple[tuple[str, str], ...] | None:
@@ -209,20 +216,30 @@ def _blocks(root: etree._Element) -> tuple[etree._Element, list[Block]]:
     body = root.find(".//w:body", NS)
     if body is None:
         raise ValueError("DOCX has no document body")
+    raw = [element for element in body if element.tag != f"{{{W}}}sectPr"]
     blocks: list[Block] = []
-    for element in body:
-        if element.tag == f"{{{W}}}sectPr":
-            continue
+    index = 0
+    while index < len(raw):
+        element = raw[index]
         kind = "p" if element.tag == f"{{{W}}}p" else "tbl" if element.tag == f"{{{W}}}tbl" else "other"
+        drawing = element.find(".//w:drawing", NS) is not None
+        companion = None
+        if drawing and index + 1 < len(raw):
+            following = visible_text(raw[index + 1]).strip()
+            if re.match(r"Figure S\d+\.", following):
+                companion = raw[index + 1]
+        text_element = companion if companion is not None else element
         blocks.append(
             Block(
                 element,
                 kind,
-                visible_text(element),
+                visible_text(text_element),
                 _paragraph_style(element) if kind == "p" else "",
-                element.find(".//w:drawing", NS) is not None,
+                drawing,
+                companion,
             )
         )
+        index += 2 if companion is not None else 1
     return body, blocks
 
 
@@ -289,10 +306,23 @@ class _RatioTable:
         os.replace(temporary, self.cache_path)
 
 
+def _float_label(text: str) -> str | None:
+    match = re.match(r"((?:Figure|Table)\s+S?\d+)\b", text)
+    return match.group(1) if match else None
+
+
 def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> float:
     if left.kind != right.kind:
         return -10.0
+    # An image paragraph must not be aligned with body text, and two different
+    # images must not inherit each other's place. Otherwise a later caption is
+    # word-merged onto the wrong figure.
+    if left.drawing != right.drawing:
+        return -8.0
     a, b = _normalize(left.text), _normalize(right.text)
+    label_a, label_b = _float_label(a), _float_label(b)
+    if label_a and label_b and label_a != label_b:
+        return -8.0
     if left.kind != "p":
         if a == b:
             return 5.0
@@ -732,6 +762,12 @@ def _merge_paragraph(
         if position < len(nodes):
             result.append(nodes[position])
     return result
+
+
+def _append_block(children: list[etree._Element], element: etree._Element, companion: etree._Element | None) -> None:
+    children.append(element)
+    if companion is not None:
+        children.append(companion)
 
 
 def _mark_deleted_runs(element: etree._Element, context: Context) -> None:
@@ -1350,17 +1386,42 @@ def create_tracked_docx(
     current_root = _accepted_revision_view(raw_current_root)
     base_body, base_blocks = _blocks(base_root)
     current_body, current_blocks = _blocks(current_root)
+    # Converter leftovers such as "suppnote" are not manuscript text. Leaving
+    # them in the baseline makes Word paint them on top of the new cover.
+    base_blocks = [
+        block for block in base_blocks
+        if block.drawing or not _NOISE_PARAGRAPH.fullmatch(_normalize(block.text))
+    ]
     context = Context(author, _next_id(raw_base_root))
     carry_base, save_base_relationships = _base_relationships(base_package, current_package)
     summary = {"matched": 0, "changed": 0, "inserted": 0, "deleted": 0, "tables_replaced": 0}
     children: list[etree._Element] = []
-    for action, base_index, current_index in _align(
+    aligned = _align(
         base_blocks, current_blocks, cache_path=ratio_cache, workers=workers
-    ):
+    )
+    matched = sum(action == "match" for action, _, _ in aligned)
+    # A rewritten document has too few shared paragraphs to interleave. Word
+    # then drops old sentences into the new cover and headings. Keep the new
+    # pages intact and put the old document after them as deletions.
+    block_replace = matched < 0.25 * max(len(aligned), 1)
+    if block_replace:
+        aligned = [("insert", None, index) for index in range(len(current_blocks))]
+        aligned += [("delete", index, None) for index in range(len(base_blocks))]
+    for action, base_index, current_index in aligned:
         if action == "match":
             old = base_blocks[base_index]  # type: ignore[index]
             new = current_blocks[current_index]  # type: ignore[index]
-            if old.kind == "p":
+            if old.kind == "p" and (old.companion is not None or new.companion is not None):
+                _append_block(children, copy.deepcopy(new.element), None)
+                if old.companion is not None and new.companion is not None:
+                    children.append(_merge_paragraph(
+                        old.companion, new.companion, context,
+                        preserve_base_revisions=preserve_base_revisions,
+                    ))
+                elif new.companion is not None:
+                    children.append(copy.deepcopy(new.companion))
+                summary["matched" if old.text == new.text else "changed"] += 1
+            elif old.kind == "p":
                 changed_drawing = (old.drawing or new.drawing) and (
                     _drawing_payloads(old.element, base_package)
                     != _drawing_payloads(new.element, current_package)
@@ -1405,20 +1466,44 @@ def create_tracked_docx(
                 summary["matched" if _normalize(old.text) == _normalize(new.text) else "tables_replaced"] += 1
         elif action == "delete":
             old = base_blocks[base_index]  # type: ignore[index]
-            children.append(
-                _mark_paragraph(carry_base(old.element), "del", context) if old.kind == "p"
-                else _mark_table(old.element, "del", context) if old.kind == "tbl"
-                else copy.deepcopy(old.element)
-            )
+            if old.kind == "p":
+                _append_block(
+                    children,
+                    _mark_paragraph(carry_base(old.element), "del", context),
+                    _mark_paragraph(carry_base(old.companion), "del", context) if old.companion is not None else None,
+                )
+            elif old.kind == "tbl":
+                children.append(_mark_table(old.element, "del", context))
+            else:
+                children.append(copy.deepcopy(old.element))
             summary["deleted"] += 1
         else:
             new = current_blocks[current_index]  # type: ignore[index]
-            children.append(
-                _mark_paragraph(new.element, "ins", context) if new.kind == "p"
-                else _mark_table(new.element, "ins", context) if new.kind == "tbl"
-                else copy.deepcopy(new.element)
-            )
+            if new.kind == "p":
+                _append_block(
+                    children,
+                    _mark_paragraph(new.element, "ins", context),
+                    _mark_paragraph(new.companion, "ins", context) if new.companion is not None else None,
+                )
+            elif new.kind == "tbl":
+                children.append(_mark_table(new.element, "ins", context))
+            else:
+                children.append(copy.deepcopy(new.element))
             summary["inserted"] += 1
+    # Interleaved redlines need a break after each caption so a deleted heading
+    # cannot sit on the figure. A block replacement already keeps the new pages
+    # intact, and an extra break there opens a blank page.
+    if not block_replace:
+        for index, child in enumerate(children[1:], start=1):
+            previous = visible_text(children[index - 1]).strip()
+            if child.tag != f"{{{W}}}p" or not re.match(r"Figure S\d+\.", previous):
+                continue
+            props = child.find("./w:pPr", NS)
+            if props is None:
+                props = etree.Element(f"{{{W}}}pPr")
+                child.insert(0, props)
+            if props.find("./w:pageBreakBefore", NS) is None:
+                etree.SubElement(props, f"{{{W}}}pageBreakBefore")
     current_sectpr = current_body.find("./w:sectPr", NS)
     for child in list(current_body):
         current_body.remove(child)

@@ -471,7 +471,7 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 i = brace_end
                 continue
             m_cmd = re.match(
-                r"\\(emph|textit|textbf|textsc|texttt|textrm|textsf|text|mathrm|mathbf)\{",
+                r"\\(textsuperscript|emph|textit|textbf|textsc|texttt|textrm|textsf|text|mathrm|mathbf)\{",
                 s[i:],
             )
             if m_cmd:
@@ -480,7 +480,9 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                 brace_start = i + m_cmd.end() - 1
                 brace_end = _find_matching_brace(s, brace_start)
                 inner = s[brace_start + 1 : brace_end - 1]
-                if cmd_name in ("emph", "textit"):
+                if cmd_name == "textsuperscript":
+                    _parse(inner, bold=bold, italic=italic, sup=True, sub=sub, color=color, hl=hl, mono=mono)
+                elif cmd_name in ("emph", "textit"):
                     _parse(inner, bold=bold, italic=True, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
                 elif cmd_name in ("textbf", "mathbf"):
                     _parse(inner, bold=True, italic=italic, sup=sup, sub=sub, color=color, hl=hl, mono=mono)
@@ -535,6 +537,25 @@ def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> l
                     if m_unk.group(0) in DISCARD_COMMANDS:
                         i += len(m_unk.group(0))
                         continue
+                    cmd_name = m_unk.group(1)
+                    cmd_full = m_unk.group(0)
+                    after = i + len(cmd_full)
+                    if cmd_name in {"vspace", "hspace"} and after < len(s) and s[after] == "{":
+                        i = _find_matching_brace(s, after)
+                        continue
+                    if cmd_name in {"begin", "end"} and after < len(s) and s[after] == "{":
+                        brace_end = _find_matching_brace(s, after)
+                        env_name = s[after + 1 : brace_end - 1].strip()
+                        if env_name in {"center", "minipage", "flushleft", "flushright"}:
+                            i = brace_end
+                            if (
+                                cmd_name == "begin"
+                                and env_name == "minipage"
+                                and i < len(s)
+                                and s[i] == "{"
+                            ):
+                                i = _find_matching_brace(s, i)
+                            continue
                     flush()
                     cmd_full = m_unk.group(0)
                     after = i + len(cmd_full)
@@ -700,6 +721,7 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = re.sub(r"\\vdet\b", lambda _: "V_{\\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: "\\eta^{2}", s)
     s = s.replace("\\%", "%")
+    s = s.replace("\\#", "#")
     s = s.replace("\\{", "{")
     s = s.replace("\\}", "}")
     s = s.replace("\\ ", " ")
