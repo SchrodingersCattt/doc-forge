@@ -25,6 +25,20 @@ PT_BODY=Pt(10)
 PT_CAPTION=Pt(9)
 PT_REF=Pt(10)
 PT_HALF_LINE=Pt(5)
+
+
+def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> None:
+    """Set body and caption sizes, including defaults bound when functions were defined."""
+    global PT_BODY, PT_CAPTION
+    import types
+    swaps: dict[int, object] = {}
+    if body_pt is not None:
+        swaps[id(PT_BODY)] = PT_BODY = Pt(body_pt)
+    if caption_pt is not None:
+        swaps[id(PT_CAPTION)] = PT_CAPTION = Pt(caption_pt)
+    for function in [v for v in globals().values() if isinstance(v, types.FunctionType)]:
+        if function.__defaults__:
+            function.__defaults__ = tuple(swaps.get(id(d), d) for d in function.__defaults__)
 DOCX_NBSP="\u00A0"
 
 def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
