@@ -6,7 +6,7 @@ from pathlib import Path
 
 from docx.oxml.ns import qn
 
-from docforge.markdown.citations import CitationStyle, materialize_citations, replace_block_citations
+from docforge.markdown.citations import CitationStyle, materialize_citations, replace_block_citations, replace_citations
 from docforge.markdown.launcher import parse_markdown, render_blocks_to_doc
 
 
@@ -31,6 +31,12 @@ def _render(tmp_path: Path, style: CitationStyle):
     document = render_blocks_to_doc(blocks)
     materialize_citations(document, style)
     return _aligned_runs(document)
+
+
+def test_adjacent_citations_collapse_to_an_en_dash_range() -> None:
+    text = "See \\citep{a} \\citep{b} \\citep{c} and \\citep{e}."
+    rendered = replace_citations(text, {"a": 4, "b": 5, "c": 6, "e": 8}, CitationStyle.SUPERSCRIPT)
+    assert rendered == "See\ue0004–6\ue001 and\ue0008\ue001."
 
 
 def test_unknown_citation_style_is_rejected() -> None:

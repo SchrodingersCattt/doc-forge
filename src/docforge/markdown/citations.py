@@ -96,17 +96,36 @@ def format_citation_labels(labels: Iterable[str | int]) -> str:
     return ",".join(ranges)
 
 
+def _citation_keys(cluster: str) -> list[str]:
+    keys: list[str] = []
+    for group in CITATION_RE.findall(cluster):
+        keys.extend(key.strip() for key in group.split(",") if key.strip())
+    return keys
+
+
 def replace_citations(text: str, mapping: Mapping[str, str | int], style: CitationStyle) -> str:
+    """Replace one citation or a run of adjacent citations.
+
+    Adjacent ``\\cite`` commands are one cluster. Their numbers are sorted
+    and consecutive values become an en-dash range, including when the
+    Markdown wrote each key as its own command.
+    """
+
+    cluster = (
+        r"(?:\s*\\citep?\{[^{}]+\})+"
+        if style.superscript
+        else r"\\citep?\{[^{}]+\}(?:\s*\\citep?\{[^{}]+\})*"
+    )
+
     def replace(match: re.Match[str]) -> str:
-        keys = [key.strip() for key in match.group(1).split(",") if key.strip()]
+        keys = _citation_keys(match.group(0))
         missing = [key for key in keys if key not in mapping]
         if missing:
             raise ValueError(f"Unknown citation key(s): {', '.join(missing)}")
         label = format_citation_labels(mapping[key] for key in keys)
         return style.embed(label)
 
-    pattern = r"\s*" + CITATION_RE.pattern if style.superscript else CITATION_RE.pattern
-    return re.sub(pattern, replace, text)
+    return re.sub(cluster, replace, text)
 
 
 def replace_block_citations(
