@@ -714,6 +714,47 @@ def unpaired_quote_errors(text: str) -> list[str]:
     return errors
 
 
+def _collapse_consecutive_number_lists(text: str) -> str:
+    """Collapse ``S9, S10, S11 and S12`` to ``S9–S12`` after references resolve.
+
+    A run needs three or more integers that share a prefix and increase by one.
+    Decimal values, sample identifiers such as ``S1-2``, and panel letters stay
+    as written.
+    """
+    item = re.compile(r"(?<![\w.\-])([A-Za-z]*)(\d+)(?![\w.\-])")
+    separator = re.compile(r"(?:\s*,\s*|\s+and\s+)", re.IGNORECASE)
+    matches = list(item.finditer(text))
+    if len(matches) < 3:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(matches):
+        run = [matches[index]]
+        probe = index
+        while probe + 1 < len(matches):
+            gap = text[run[-1].end():matches[probe + 1].start()]
+            if separator.fullmatch(gap) is None:
+                break
+            previous, current = run[-1], matches[probe + 1]
+            same_prefix = previous.group(1) == current.group(1)
+            consecutive = int(current.group(2)) == int(previous.group(2)) + 1
+            if not (same_prefix and consecutive):
+                break
+            run.append(current)
+            probe += 1
+        if len(run) >= 3:
+            pieces.append(text[cursor:run[0].start()])
+            prefix = run[0].group(1)
+            pieces.append(f"{prefix}{run[0].group(2)}–{prefix}{run[-1].group(2)}")
+            cursor = run[-1].end()
+            index = probe + 1
+            continue
+        index += 1
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = s.replace("~", "\u00A0")
     s = re.sub(r"\\bar\{\\mathbf\s+([A-Za-z])\}", lambda m: r"\mathbf{" + m.group(1) + "\u0305}", s)
@@ -745,6 +786,7 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
 
     s = re.sub(r"\\ref\*?\{([^}]*)\}", _resolve_ref, s)
     s = re.sub(r"\\eqref\*?\{([^}]*)\}", _resolve_ref, s)
+    s = _collapse_consecutive_number_lists(s)
     s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\url\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\\\\s*(?:\[[\d.]+em\])?", " ", s)

@@ -142,6 +142,22 @@ class TokenizeTests(unittest.TestCase):
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
 
+    def test_consecutive_refs_collapse_to_en_dash_range(self) -> None:
+        labels = {f"S-fig:S{n}": f"S{n}" for n in range(9, 18)}
+        labels.update({"S-tab:a": "S10", "S-tab:b": "S11", "S-tab:c": "S12"})
+        source = (
+            r"comparisons (Supplementary Figures~\ref{S-fig:S9}, \ref{S-fig:S10}, "
+            r"\ref{S-fig:S11}, \ref{S-fig:S12}, \ref{S-fig:S13}, \ref{S-fig:S14}, "
+            r"\ref{S-fig:S15}, \ref{S-fig:S16} and~\ref{S-fig:S17} and "
+            r"Supplementary Tables~\ref{S-tab:a}, \ref{S-tab:b} and~\ref{S-tab:c}). "
+            r"Values were $3.1$, $3.9$ and $3.4$, and samples S1-2, S3-1 and S4-4 remained."
+        )
+        plain = spans_to_plain(tokenize_tex(source, resolve_ref=labels.get))
+        self.assertIn("Supplementary Figures\u00A0S9–S17", plain)
+        self.assertIn("Supplementary Tables\u00A0S10–S12", plain)
+        self.assertIn("3.1", plain)
+        self.assertIn("S1-2, S3-1 and S4-4", plain)
+
     def test_single_quotes_pair_and_math_primes_stay(self) -> None:
         quoted = spans_to_plain(tokenize_tex(r"Both `1/80' and ``SY''."))
         self.assertIn("\u20181/80\u2019", quoted)
