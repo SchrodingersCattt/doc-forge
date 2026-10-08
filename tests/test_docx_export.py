@@ -21,8 +21,10 @@ from docforge.markdown import (
     normalize_inline_html,
     normalize_script_boundaries,
     render_blocks_to_doc,
+    reuse_unchanged_roundtrip_source,
     split_markdown_sections,
 )
+from docforge.cli import main as cli_main
 from docforge.tex import docx_to_tex
 
 
@@ -89,6 +91,44 @@ def test_docx_to_markdown_and_split(tmp_path: Path) -> None:
     metadata = (split_dir / "00_metadata.md").read_text(encoding="utf-8")
     assert "# TITLE" in metadata and "# AUTHOR" in metadata
     assert "C:\\" not in "\n".join(path.read_text(encoding="utf-8") for path in split_dir.glob("*.md"))
+
+
+@pytest.mark.skipif(not PANDOC_AVAILABLE, reason="Pandoc is required for integration tests")
+def test_unchanged_roundtrip_reuses_exact_source_package(tmp_path: Path) -> None:
+    image = tmp_path / "source.png"
+    Image.new("RGB", (16, 8), "white").save(image)
+    source = tmp_path / "source.docx"
+    _sample_docx(source, image)
+    split_dir = tmp_path / "sections"
+    section_map = tmp_path / "section-map.json"
+    section_map.write_text(
+        json.dumps(
+            {
+                "sections": [
+                    {"file": "00_metadata.md", "kind": "metadata", "end": "Abstract"},
+                    {"file": "01_abstract.md", "start": "Abstract", "end": "Main"},
+                    {"file": "02_main.md", "start": "Main", "end": {"heading": "References", "occurrence": 1}},
+                    {"file": "03_refs.md", "start": {"heading": "References", "occurrence": 1}, "end": "Methods"},
+                    {"file": "04_methods.md", "start": "Methods", "end": {"heading": "References", "occurrence": 2}},
+                    {"file": "05_method_refs.md", "start": {"heading": "References", "occurrence": 2}, "end": "Data availability"},
+                    {"file": "06_endmatter.md", "start": "Data availability"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    docx_to_markdown(source, split_dir=split_dir, section_map_path=section_map, force=True)
+    manifest = split_dir / "manifest.json"
+    assert (split_dir / "roundtrip" / "source.docx").read_bytes() == source.read_bytes()
+
+    output = tmp_path / "exact.docx"
+    assert cli_main(["md2docx", "--roundtrip-manifest", str(manifest), "-o", str(output), "--force"]) == 0
+    assert output.read_bytes() == source.read_bytes()
+
+    section = split_dir / "02_main.md"
+    section.write_text(section.read_text(encoding="utf-8") + "\nEdited.", encoding="utf-8")
+    changed = tmp_path / "changed.docx"
+    assert not reuse_unchanged_roundtrip_source(manifest, changed, force=True)
 
 
 @pytest.mark.skipif(not PANDOC_AVAILABLE, reason="Pandoc is required for integration tests")
