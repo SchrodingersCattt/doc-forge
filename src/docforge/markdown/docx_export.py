@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,6 +405,59 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _roundtrip_source_path(split_dir: Path) -> Path:
+    """Return the portable source snapshot path used by a Markdown bundle."""
+
+    return split_dir / "roundtrip" / "source.docx"
+
+
+def reuse_unchanged_roundtrip_source(
+    manifest_path: Path,
+    output: Path,
+    *,
+    force: bool = False,
+) -> bool:
+    """Reuse the source DOCX when a Markdown bundle is byte-for-byte unchanged.
+
+    A Markdown renderer cannot encode every OOXML detail (for example custom
+    run properties, theme colors, relationship ids, or section controls).  A
+    conversion manifest therefore carries a portable source snapshot and the
+    SHA-256 values of every editable source.  When all values still match, the
+    exact source package is copied to the requested output.  If anything
+    changed, ``False`` is returned and the caller can continue through the
+    normal Markdown renderer.
+    """
+
+    manifest_path = manifest_path.resolve()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "docforge.docx2md.v1":
+        raise ValueError("roundtrip manifest must use schema docforge.docx2md.v1")
+    root = manifest_path.parent
+    source_name = payload.get("source_copy")
+    source_sha = payload.get("source_copy_sha256")
+    if not isinstance(source_name, str) or not isinstance(source_sha, str):
+        raise ValueError("roundtrip manifest does not contain a source DOCX snapshot")
+    source = (root / source_name).resolve()
+    if not source.is_file() or _sha256(source) != source_sha:
+        raise ValueError("roundtrip source snapshot is missing or its SHA-256 does not match")
+
+    for name, expected in dict(payload.get("section_sha256", {})).items():
+        path = (root / str(name)).resolve()
+        if not path.is_file() or _sha256(path) != expected:
+            return False
+    for name, expected in dict(payload.get("media_sha256", {})).items():
+        path = (root / str(name)).resolve()
+        if not path.is_file() or _sha256(path) != expected:
+            return False
+
+    validate_output_path(output)
+    if output.exists() and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, output)
+    return True
+
+
 def docx_to_markdown(
     input_path: Path,
     *,
@@ -459,6 +513,11 @@ def docx_to_markdown(
             output.write_text(markdown, encoding="utf-8")
         sections: list[Path] = []
         if split_dir is not None:
+            source_copy = _roundtrip_source_path(split_dir)
+            source_copy.parent.mkdir(parents=True, exist_ok=True)
+            if source_copy.exists() and not force:
+                raise FileExistsError(f"Output exists; pass --force to overwrite: {source_copy}")
+            shutil.copyfile(input_path, source_copy)
             section_map = load_section_map(section_map_path)  # type: ignore[arg-type]
             for filename, content in split_markdown_sections(markdown, section_map):
                 path = split_dir / filename
@@ -471,6 +530,8 @@ def docx_to_markdown(
                 "schema": "docforge.docx2md.v1",
                 "source": str(input_path),
                 "source_sha256": _sha256(input_path),
+                "source_copy": os.path.relpath(source_copy, split_dir).replace(os.sep, "/"),
+                "source_copy_sha256": _sha256(source_copy),
                 "track_changes": track_changes,
                 "command": list(command),
                 "sections": [str(path.name) for path in sections],
@@ -504,4 +565,5 @@ __all__ = [
     "normalize_inline_html",
     "split_markdown_sections",
     "write_conversion_manifest",
+    "reuse_unchanged_roundtrip_source",
 ]

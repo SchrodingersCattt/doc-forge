@@ -71,6 +71,17 @@ docforge docx2tex reviewed.docx -o reviewed.tex --track-changes accept
 docforge docx2md reviewed.docx --split-dir sections \
   --section-map section-map.json --force
 
+# Exact no-op roundtrip from an audited Markdown bundle
+docforge md2docx --roundtrip-manifest sections/manifest.json \
+  -o reviewed-roundtrip.docx --force
+
+When `docx2md` writes a split bundle, the manifest includes a portable source
+DOCX snapshot and SHA-256 values for the snapshot, sections, and media. The
+`md2docx --roundtrip-manifest` command verifies every value and reuses the
+source package byte-for-byte when no Markdown or media file changed. If a file
+changed, it requires explicit Markdown inputs and continues through the normal
+renderer, so the resulting DOCX can be reviewed with `redline`.
+
 # Generate figures from front-matter Markdown prompts (auditable sidecars)
 docforge aigc figures/_prompts --backend litellm --all
 docforge aigc figures/_prompts --dry-run

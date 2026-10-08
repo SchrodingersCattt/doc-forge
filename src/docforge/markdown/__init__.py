@@ -50,6 +50,7 @@ from .docx_export import (
     normalize_inline_html,
     split_markdown_sections,
     write_conversion_manifest,
+    reuse_unchanged_roundtrip_source,
 )
 
 __all__ = [
@@ -98,4 +99,5 @@ __all__ = [
     "normalize_inline_html",
     "split_markdown_sections",
     "write_conversion_manifest",
+    "reuse_unchanged_roundtrip_source",
 ]

@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     md = sub.add_parser("md2docx", help="Markdown -> DOCX (block parser + renderer)")
-    md.add_argument("inputs", nargs="+", type=Path, help="Markdown files to merge in order")
+    md.add_argument("inputs", nargs="*", type=Path, help="Markdown files to merge in order")
     md.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
     md.add_argument("--keep-comments", action="store_true", help="Keep Markdown HTML comments as red TODO notes")
     md.add_argument("--title", help="Optional title for a standalone document")
@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--no-title", action="store_true", help="Remove level-one Markdown headings; retain the metadata title block")
     md.add_argument("--skip-images", action="store_true", help="Skip Markdown body images")
     md.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+    md.add_argument(
+        "--roundtrip-manifest",
+        type=Path,
+        help="Manifest from docx2md; reuse its exact source DOCX when all sections and media are unchanged",
+    )
 
     docx_md = sub.add_parser("docx2md", help="DOCX -> GitHub-Flavored Markdown via Pandoc")
     docx_md.add_argument("input", type=Path, help="Input DOCX path")
@@ -161,11 +166,20 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
     from ..markdown import parse_markdown, render_blocks_to_doc, convert_unicode_scripts_in_docx
+    from ..markdown import reuse_unchanged_roundtrip_source
     from ..output import validate_output_path
 
     validate_output_path(args.output)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
+    if args.roundtrip_manifest is not None:
+        if reuse_unchanged_roundtrip_source(args.roundtrip_manifest, args.output, force=args.force):
+            print(f"roundtrip exact source reused: {args.output}")
+            return 0
+        if not args.inputs:
+            raise ValueError("Markdown inputs are required when the roundtrip bundle has changed")
+    if not args.inputs and args.roundtrip_manifest is None:
+        raise ValueError("md2docx requires Markdown inputs or --roundtrip-manifest")
     if args.template is not None:
         from ..markdown import assemble_markdown_template, write_assembly_sidecars
 
