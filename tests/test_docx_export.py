@@ -576,3 +576,22 @@ def test_deleted_hyperlink_field_does_not_keep_field_codes(tmp_path: Path) -> No
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     assert root.xpath(".//w:del//w:fldChar", namespaces=ns) == []
     assert "Andreas Marek" in visible_text(root, "original")
+
+
+def test_internal_hyperlink_field_does_not_force_whole_paragraph_replacement():
+    from lxml import etree
+    from docforge.docxdiff.redline import W, _needs_passthrough
+
+    def paragraph(instruction: str):
+        xml = (
+            f'<w:p xmlns:w="{W}"><w:r><w:t>See </w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            f'<w:r><w:instrText xml:space="preserve"> {instruction} </w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            '<w:r><w:t>34</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+        )
+        return etree.fromstring(xml)
+
+    assert not _needs_passthrough(paragraph(r'HYPERLINK \l "ref_34"'))
+    assert _needs_passthrough(paragraph("PAGE"))

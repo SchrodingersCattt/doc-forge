@@ -340,7 +340,7 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     # word-merging it is unreadable. Short strings stay on the 0.22 bar so
     # small edits such as "before"/"after" remain in-paragraph revisions.
     heading = "heading" in left.style.lower() or "heading" in right.style.lower()
-    cutoff = 0.22 if heading or min(len(a), len(b)) < 80 else 0.55
+    cutoff = 0.22 if heading or min(len(a), len(b)) < 80 else 0.45
     return -8.0 if ratio < cutoff else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
 
 
@@ -560,10 +560,30 @@ def _events(paragraph: etree._Element) -> list[Event]:
     return events
 
 
+_FIELD_LOCAL_NAMES = frozenset({"fldChar", "instrText"})
+
+
+def _only_internal_hyperlink_fields(paragraph: etree._Element) -> bool:
+    """True when every field in the paragraph is an internal ``HYPERLINK \\l`` link.
+
+    Word saves a reviewed document's citation links as field codes, while the
+    generated document uses ``w:hyperlink`` wrappers. Such a field carries no
+    layout of its own, so it must not force a whole-paragraph replacement.
+    """
+    instructions = [node.text or "" for node in paragraph.iter(f"{{{W}}}instrText")]
+    if not instructions:
+        return False
+    return all(re.match(r"\s*HYPERLINK\s+\\l\s", text) for text in instructions)
+
+
 def _needs_passthrough(paragraph: etree._Element) -> bool:
     """Identify paragraphs whose layout-bearing XML must remain intact."""
+    fields_are_links = _only_internal_hyperlink_fields(paragraph)
     return any(
-        etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES
+        (
+            etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES
+            and not (fields_are_links and etree.QName(node).localname in _FIELD_LOCAL_NAMES)
+        )
         or (node.tag == f"{{{W}}}br" and node.get(f"{{{W}}}type") in ("page", "column"))
         for node in paragraph.iter()
     )
