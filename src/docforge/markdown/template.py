@@ -511,8 +511,11 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
         for slot in ("ascii", "hAnsi", "cs"):
             if latin:
                 fonts.set(qn(f"w:{slot}"), latin)
-        if east_asia:
+        # A Latin face in w:eastAsia makes Word draw spaces as interpuncts.
+        if east_asia and east_asia.casefold() != (latin or "").casefold():
             fonts.set(qn("w:eastAsia"), east_asia)
+        elif fonts.get(qn("w:eastAsia"), "").casefold() == (latin or "").casefold():
+            fonts.attrib.pop(qn("w:eastAsia"), None)
         for slot in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
             fonts.attrib.pop(qn(f"w:{slot}"), None)
 
@@ -2177,7 +2180,6 @@ def assemble_markdown_template(
         style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
         if style_id == styles["title"]:
             _center_paragraph(node)
-            _override_run_size(node, 18)
     body_element = template._element.body
     for child in list(body_element):
         body_element.remove(child)

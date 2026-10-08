@@ -126,6 +126,12 @@ def test_correspondence_stars_render_literally(tmp_path: Path) -> None:
     assert "*one@example.com" in text and "*two@example.com" in text
     author = next(p for p in document.paragraphs if "A. One" in p.text)
     assert all(run.font.italic is not True for run in author.runs)
+    # Title and authors share BB_Author_Name. The title's direct size must not
+    # be copied onto the author line.
+    for run in author.runs:
+        size = run._r.find(qn("w:rPr"))
+        size = size.find(qn("w:sz")) if size is not None else None
+        assert size is None or size.get(qn("w:val")) != "36"
 
 
 def test_template_assembly_keeps_inline_code_in_consolas(tmp_path: Path) -> None:
