@@ -4,7 +4,7 @@ from types import MappingProxyType
 
 import pytest
 
-from docforge.bibliography import CitationResolver, format_entry, load_bib, load_json
+from docforge.bibliography import BibliographyEntry, CitationResolver, format_entry, load_bib, load_json
 
 
 def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> None:
@@ -46,3 +46,26 @@ def test_formatter_does_not_double_terminal_period(profile: str) -> None:
     assert "Roe, Alex B. C. " in text
     assert ".." not in text
 
+
+
+def test_bib_loader_balances_nested_braces_and_non_journal_venues(tmp_path: Path) -> None:
+    path = tmp_path / "nested.bib"
+    path.write_text(
+        """@inproceedings{nested-key,
+ author={Doe, Jane},
+ title={A {Nested} title, with commas},
+ booktitle={Proceedings of the {ACM} Symposium},
+ year={2024}
+}
+""",
+        encoding="utf-8",
+    )
+    entry = load_bib(path)["nested-key"]
+    assert entry.get("title") == "A {Nested} title, with commas"
+    assert entry.get("booktitle") == "Proceedings of the {ACM} Symposium"
+    assert "Proceedings" in format_entry(entry, profile="plain")
+
+
+def test_markdown_formatter_accepts_publisher_venue() -> None:
+    entry = {"authors": ["Doe, Jane"], "title": "A book", "year": 2024, "publisher": "Press"}
+    assert "*Press*" in format_entry(BibliographyEntry.from_mapping("book", entry), profile="markdown")

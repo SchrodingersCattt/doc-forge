@@ -25,6 +25,22 @@ class BlockTests(unittest.TestCase):
         self.assertEqual(block.rows, ())
         self.assertEqual(block.path, "")
 
+    def test_table_rows_keep_pipes_inside_math_code_and_escapes(self) -> None:
+        from docforge.markdown.launcher import split_table_row
+
+        row = r"| label | `$x|y$` | $x|y$ | escaped \| pipe |"
+        assert split_table_row(row) == (
+            "label",
+            "`$x|y$`",
+            "$x|y$",
+            r"escaped \| pipe",
+        )
+
+        # Backtick spans may use more than one delimiter character.
+        assert split_table_row("| one | ``a|b`` | three |") == (
+            "one", "``a|b``", "three"
+        )
+
     def test_bang_comments_are_ignored_and_image_options_are_parsed(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "source.md"

@@ -102,8 +102,69 @@ def clean_markdown(text: str, strip_comments: bool) -> str:
 
 
 def split_table_row(line: str) -> tuple[str, ...]:
-    stripped = line.strip().strip("|")
-    return tuple(cell.strip() for cell in stripped.split("|"))
+    """Split one pipe-table row while respecting inline code and math.
+
+    A plain ``str.split("|")`` changes the table shape when a cell contains a
+    literal pipe in a code span (``| `` `a|b` `` |``) or an inline formula
+    (``| $p(x|y)$ `` |).  Markdown also permits an escaped ``\|`` outside
+    those spans.  Scan the row once and only treat an unescaped pipe outside
+    a delimited span as a column separator.
+    """
+    value = line.strip()
+    # A leading/trailing pipe is table framing, rather than an empty cell.
+    start = 1 if value.startswith("|") else 0
+    end = len(value) - 1 if value.endswith("|") and len(value) > start else len(value)
+
+    cells: list[str] = []
+    current: list[str] = []
+    code_delimiter: str | None = None
+    math_delimiter: str | None = None
+    index = start
+    while index < end:
+        character = value[index]
+        # A pipe/backtick/dollar preceded by an odd number of backslashes
+        # is literal.  Keep the source spelling for the renderer.
+        backslashes = 0
+        probe = index - 1
+        while probe >= start and value[probe] == "\\":
+            backslashes += 1
+            probe -= 1
+        escaped = backslashes % 2 == 1
+
+        if character == "`" and not escaped and math_delimiter is None:
+            run_end = index + 1
+            while run_end < end and value[run_end] == "`":
+                run_end += 1
+            delimiter = value[index:run_end]
+            if code_delimiter is None:
+                code_delimiter = delimiter
+            elif delimiter == code_delimiter:
+                code_delimiter = None
+            current.append(delimiter)
+            index = run_end
+            continue
+
+        if character == "$" and not escaped and code_delimiter is None:
+            run_end = index + 1
+            while run_end < end and value[run_end] == "$":
+                run_end += 1
+            delimiter = value[index:run_end]
+            if math_delimiter is None:
+                math_delimiter = delimiter
+            elif delimiter == math_delimiter:
+                math_delimiter = None
+            current.append(delimiter)
+            index = run_end
+            continue
+
+        if character == "|" and not escaped and code_delimiter is None and math_delimiter is None:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+        index += 1
+    cells.append("".join(current).strip())
+    return tuple(cells)
 
 
 def is_table_start(lines: list[str], index: int) -> bool:

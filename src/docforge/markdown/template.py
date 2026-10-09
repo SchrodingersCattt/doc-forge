@@ -12,6 +12,7 @@ import json
 import re
 import sys
 import zipfile
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -1418,7 +1419,10 @@ def _clone_rendered_block(
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
         role = f"heading_{level}"
-        return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False, uppercase=level == 1)]
+        # Markdown heading text is authored content.  Preserve its case even
+        # when a template uses an uppercase Heading 1 style; style formatting
+        # must not rewrite the source text.
+        return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False)]
     if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet", "code", "equation", "table", "separator"}:
         generated = render_blocks_to_doc([block], equation_start=equation_number or 1, number_prefix=number_prefix)
         result: list = []
@@ -1440,8 +1444,11 @@ def _clone_rendered_block(
                 old_properties = properties
                 source_properties = _clean_paragraph_prototype(p.get("body")) if p.get("body") is not None else None
                 # Keep list indentation and quote offsets from the generated
-                # paragraph while importing the template's font/spacing.
-                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs"), qn("w:jc")}
+                # paragraph while importing the template's font, spacing, and
+                # justification.  A template's alignment is part of its
+                # semantic body style and must not be replaced by the
+                # temporary renderer's default justification.
+                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs")}
                 for child_prop in list(old_properties):
                     if child_prop.tag not in keep and child_prop.tag != qn("w:pStyle"):
                         old_properties.remove(child_prop)
@@ -1510,8 +1517,8 @@ def _clone_figure(
                 if section_width_twips is not None
                 else int(source_extent.get("cx", "1"))
             )
-            with Image.open(image_path) as image_file:
-                ratio = image_file.height / max(1, image_file.width)
+            image_width, image_height = _image_dimensions(image_path, image_bytes)
+            ratio = image_height / max(1, image_width)
             height = max(1, round(width * ratio))
             extent.set("cx", str(width))
             extent.set("cy", str(height))
@@ -1532,10 +1539,9 @@ def _clone_figure(
         # drawing, constrained to the current section column.
         temporary = Document()
         picture = temporary.add_paragraph()
-        with Image.open(image_path) as image_file:
-            available = section_width_twips * 635 if section_width_twips is not None else _body_column_width_twips(target) * 635
-            width = max(914400, available)
-            picture.add_run().add_picture(str(image_path), width=width)
+        available = section_width_twips * 635 if section_width_twips is not None else _body_column_width_twips(target) * 635
+        width = min(914400 * 6.5, max(914400, available))
+        picture.add_run().add_picture(BytesIO(image_bytes), width=width)
         paragraph = copy.deepcopy(picture._p)
         _set_paragraph_flag(paragraph, "w:keepNext")
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
@@ -1553,13 +1559,41 @@ def _clone_figure(
     return [paragraph, cap]
 
 
+def _rasterize_figure(path: Path):
+    """Load a figure into a Pillow image, rasterizing the first PDF page."""
+    if path.suffix.lower() != ".pdf":
+        return Image.open(path)
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ValueError("PDF figures require the optional PyMuPDF dependency") from exc
+    document = fitz.open(path)
+    try:
+        if document.page_count < 1:
+            raise ValueError(f"PDF figure has no pages: {path}")
+        page = document.load_page(0)
+        pixmap = page.get_pixmap(alpha=False)
+        return Image.open(BytesIO(pixmap.tobytes("png")))
+    finally:
+        document.close()
+
+
+def _image_dimensions(path: Path, payload: bytes | None = None) -> tuple[int, int]:
+    if payload is not None:
+        with Image.open(BytesIO(payload)) as image:
+            return image.size
+    with _rasterize_figure(path) as image:
+        return image.size
+
+
 def _word_compatible_image_bytes(image_path: Path, *, max_dimension: int = 4096) -> bytes:
-    """Return a conservative RGB PNG payload for reliable Word rendering."""
-    with Image.open(image_path) as source:
-        if source.mode in {"RGBA", "LA"} or (source.mode == "P" and "transparency" in source.info):
+    """Return a white-flattened RGB PNG payload for reliable Word rendering."""
+    with _rasterize_figure(image_path) as source:
+        if source.mode in {"RGBA", "LA"} or "transparency" in source.info:
             rgba = source.convert("RGBA")
-            image = Image.new("RGB", rgba.size, (255, 255, 255))
-            image.paste(rgba, mask=rgba.getchannel("A"))
+            background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            background.alpha_composite(rgba)
+            image = background.convert("RGB")
         else:
             image = source.convert("RGB")
         if max(image.size) > max_dimension:
@@ -1613,6 +1647,37 @@ def _insert_before(body, anchor, nodes: Iterable) -> None:
     for node in nodes:
         body.insert(index, node)
         index += 1
+
+
+def _open_template_document(path: Path) -> DocumentType:
+    """Open DOCX and DOTX packages through python-docx.
+
+    python-docx intentionally rejects the template main-part content type even
+    though DOTX uses the same OOXML document structure.  Normalize that one
+    content-type override in a temporary package, leaving the caller's
+    template untouched and ensuring the assembled output is a regular DOCX.
+    """
+    try:
+        return Document(path)
+    except ValueError as error:
+        try:
+            with zipfile.ZipFile(path) as source:
+                content_types = source.read("[Content_Types].xml")
+                template_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+                document_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+                if template_type not in content_types:
+                    raise error
+                with tempfile.TemporaryDirectory(prefix="docforge-dotx-") as directory:
+                    normalized = Path(directory) / "template.docx"
+                    with zipfile.ZipFile(normalized, "w", zipfile.ZIP_DEFLATED) as target:
+                        for info in source.infolist():
+                            payload = source.read(info.filename)
+                            if info.filename == "[Content_Types].xml":
+                                payload = payload.replace(template_type, document_type)
+                            target.writestr(info, payload)
+                    return Document(normalized)
+        except (KeyError, OSError, zipfile.BadZipFile):
+            raise error
 
 
 def _geometry(document: DocumentType) -> tuple[tuple[int, int, int, int, int, int], ...]:
@@ -1884,7 +1949,7 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
-    template = Document(template_path)
+    template = _open_template_document(template_path)
     if citation_format == "template":
         citation_style = (
             CitationStyle.SUPERSCRIPT
