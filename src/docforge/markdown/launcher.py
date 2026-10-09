@@ -66,7 +66,7 @@ INLINE_TOKEN_RE = re.compile(
     # authored spaces.  Guard both sides so only a real, single-dollar pair
     # is tokenized here; standalone ``$$`` lines are parsed as block equations
     # by :func:`parse_markdown`.
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$))"
+    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\\\$|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$))"
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -126,6 +126,36 @@ def is_table_start(lines: list[str], index: int) -> bool:
 def _looks_like_table_row(line: str) -> bool:
     stripped = line.strip()
     return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _has_unescaped_display_delimiter(line: str) -> bool:
+    """Return whether ``line`` contains ``$$`` outside code or escapes."""
+    index = 0
+    code_fence: str | None = None
+    while index < len(line):
+        if code_fence is not None:
+            if line.startswith(code_fence, index):
+                index += len(code_fence)
+                code_fence = None
+            else:
+                index += 1
+            continue
+        char = line[index]
+        if char == "\\":
+            # Backslash protects the next dollar (and any other literal).
+            index += 2
+            continue
+        if char == "`":
+            end = index
+            while end < len(line) and line[end] == "`":
+                end += 1
+            code_fence = line[index:end]
+            index = end
+            continue
+        if line.startswith("$$", index):
+            return True
+        index += 1
+    return False
 
 
 def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
@@ -262,7 +292,7 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             blocks.append(Block("table_caption", table_caption.group(1).strip()))
             i += 1
             continue
-        if "$$" in line:
+        if _has_unescaped_display_delimiter(line):
             # Display delimiters are structural blocks in this parser.  A
             # doubled delimiter embedded in prose is almost always a damaged
             # display equation; treating its second ``$`` as an inline opener
@@ -495,6 +525,10 @@ def add_inline(
         elif token.startswith("`"):
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
+        elif token == r"\$":
+            run = paragraph.add_run("$")
+            run.bold = bold_default
+            set_run_font(run, size=size)
         elif token.startswith("$"):
             before = paragraph.runs[-1] if paragraph.runs else None
             first_math_run = len(paragraph.runs)

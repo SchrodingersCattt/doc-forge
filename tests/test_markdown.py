@@ -191,6 +191,14 @@ class OmmlTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"Display equation delimiter.*source\.md:1"):
                 parse_markdown(path)
 
+    def test_doubled_dollar_in_code_span_or_escape_stays_literal(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("Use `price$$value` or `\\$\\$` or \\$\\$ as literal text.\n", encoding="utf-8")
+            blocks = parse_markdown(path)
+        document = render_blocks_to_doc(blocks)
+        self.assertEqual(document.paragraphs[0].text, "Use price$$value or \\$\\$ or $$ as literal text.")
+
     def test_standalone_font_override_preserves_inline_formatting(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", "C<sub>36</sub>Fe *d* **bold**")],

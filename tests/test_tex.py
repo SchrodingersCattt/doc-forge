@@ -12,7 +12,7 @@ from docx.oxml.ns import qn
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
-from docforge.tex.converter import add_rich_text
+from docforge.tex.converter import _scan_labels, add_rich_text
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -142,6 +142,10 @@ class TokenizeTests(unittest.TestCase):
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
 
+    def test_autoref_restores_prefixed_float_kind(self) -> None:
+        spans = tokenize_tex(r"See \autoref{fig:one} and \cref{tab:one}.", resolve_ref=lambda key: "1")
+        self.assertEqual(spans_to_plain(spans), "See Figure 1 and Table 1.")
+
     def test_consecutive_refs_collapse_to_en_dash_range(self) -> None:
         labels = {f"S-fig:S{n}": f"S{n}" for n in range(9, 18)}
         labels.update({"S-tab:a": "S10", "S-tab:b": "S11", "S-tab:c": "S12"})
@@ -236,6 +240,41 @@ class LabelMapTests(unittest.TestCase):
         self.assertEqual(labels["S-tab:one"], "S1")
         self.assertEqual(labels["S-fig:S1"], "S1")
         self.assertEqual(labels["S-sn:model"], "1")
+
+    def test_prefix_free_labels_are_scoped_and_keep_autoref_kind(self) -> None:
+        source = r"""
+        \begin{figure}\label{overview}\end{figure}
+        \section{Methods}\label{methods}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["overview"], "1")
+        self.assertEqual(labels["methods"], "1")
+        self.assertEqual(
+            spans_to_plain(
+                tokenize_tex(
+                    r"\autoref{overview} and \autoref{methods}",
+                    resolve_ref=lambda key: labels[key],
+                    resolve_ref_kind=lambda key: {
+                        "overview": "figure",
+                        "methods": "section",
+                    }.get(key),
+                )
+            ),
+            "Figure 1 and Section 1",
+        )
+
+    def test_starred_equation_does_not_consume_number(self) -> None:
+        source = r"\begin{equation*}x\end{equation*}\begin{equation}\label{next}x\end{equation}"
+        self.assertEqual(_scan_labels(source)["next"], "1")
+
+    def test_labels_after_closed_table_and_equation_do_not_inherit_float(self) -> None:
+        source = r"""
+        \begin{table}\label{table-one}\end{table}\label{after-table}
+        \begin{equation}\label{equation-one}x\end{equation}\label{after-equation}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["after-table"], "after-table")
+        self.assertEqual(labels["after-equation"], "after-equation")
 
 
 if __name__ == "__main__":

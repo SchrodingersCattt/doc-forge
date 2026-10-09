@@ -41,12 +41,27 @@ def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> 
             function.__defaults__ = tuple(swaps.get(id(d), d) for d in function.__defaults__)
 DOCX_NBSP="\u00A0"
 
-def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
-                  prefix: str = "") -> dict[str, str]:
-    """Scan text for labels and return a key->display map."""
+@dataclass(frozen=True)
+class _LabelRef:
+    """The value and TeX counter kind captured by a label."""
+
+    value: str
+    kind: str | None = None
+
+
+def _scan_label_refs(text: str, fig_offset: int = 0, tbl_offset: int = 0,
+                     prefix: str = "") -> dict[str, _LabelRef]:
+    """Scan labels while retaining the counter kind used by ``autoref``.
+
+    A label has a scope: an unprefixed label inside a numbered environment
+    refers to that environment's counter.  The scope ends at the matching
+    ``\\end``.  Section and subsection headings establish their own last
+    ref-stepped counter; ending a float clears it so prose cannot accidentally
+    inherit a stale figure/table/equation number.
+    """
     body_m = re.search(r"\\begin\{document\}", text)
     body = text[body_m.end():] if body_m else text
-    result: dict[str, str] = {}
+    result: dict[str, _LabelRef] = {}
     fig_n = fig_offset
     tbl_n = tbl_offset
     alg_n = 0
@@ -58,19 +73,29 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
     suppnote_n = 0
     supprecord_n = 0
     in_extended_data = False
-    current_float: str | None = None
+    active_ref: _LabelRef | None = None
+    env_stack: list[tuple[str, _LabelRef | None]] = []
+    last_ref: _LabelRef | None = None
     for m in re.finditer(
-        r"\\refstepcounter\{(suppnote|supprecord)\}|\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm|equation)\b|\\label\{([^}]*)\}",
+        r"\\refstepcounter\{(?P<refstep>suppnote|supprecord)\}"
+        r"|\\section(?P<section_star>\*)?\{(?P<section>[^}]*)\}"
+        r"|\\subsection(?P<subsection_star>\*)?\{(?P<subsection>[^}]*)\}"
+        r"|\\begin\{(?P<begin>figure|table|longtable|algorithm|equation)(?P<begin_star>\*)?\}"
+        r"|\\end\{(?P<end>figure|table|longtable|algorithm|equation)(?:\*)?\}"
+        r"|\\label\{(?P<label>[^}]*)\}",
         body
     ):
-        if m.group(1):
-            if m.group(1) == "suppnote":
+        if m.group("refstep"):
+            if m.group("refstep") == "suppnote":
                 suppnote_n += 1
+                last_ref = _LabelRef(str(suppnote_n), "suppnote")
             else:
                 supprecord_n += 1
+                last_ref = _LabelRef(str(supprecord_n), "supprecord")
             continue
-        if m.group(2):  # section
-            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group(2)).strip()
+        if m.group("section") is not None:  # section
+            active_ref = None
+            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group("section")).strip()
             note_match = re.match(r"Supplementary Note\s+(\d+)", heading)
             record_match = re.match(r"Supplementary Record\s+(\d+)", heading)
             if note_match:
@@ -79,87 +104,128 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
                 supprecord_n = int(record_match.group(1))
             if heading == "Extended Data":
                 in_extended_data = True
-            else:
+                last_ref = None
+            elif not m.group("section_star"):
                 sec_n += 1
                 subsec_n = 0
+                last_ref = _LabelRef(f"{prefix}{sec_n}", "section")
+            else:
+                last_ref = None
             continue
-        if m.group(3):  # subsection
-            subsec_n += 1
+        if m.group("subsection") is not None:  # subsection
+            active_ref = None
+            if not m.group("subsection_star"):
+                subsec_n += 1
+                last_ref = _LabelRef(f"{prefix}{sec_n}.{subsec_n}", "subsection")
+            else:
+                last_ref = None
             continue
-        env = m.group(4)
-        if env == "figure":
-            current_float = "figure"
-            if in_extended_data:
-                ed_fig_n += 1
-            else:
-                fig_n += 1
-        elif env in ("table", "longtable"):
-            current_float = "table"
-            if in_extended_data:
-                ed_tbl_n += 1
-            else:
-                tbl_n += 1
-        elif env == "algorithm":
-            alg_n += 1
-        elif env == "equation":
-            current_float = "equation"
-            eq_n += 1
-        elif m.group(5):
-            key = m.group(5)
-            # Keep the established short prefixes, while accepting the long
-            # forms used by ``cleveref``/``autoref`` and arbitrary labels
-            # attached to a float.  The environment counter at this point is
-            # authoritative, so a prose ``\\ref{overview}`` can resolve even
-            # when the source does not encode the kind in the id.
-            if key.startswith(("fig:", "figure:")):
-                result[key] = f"{ed_fig_n}" if key.startswith(("fig:ed_", "figure:ed_")) else f"{prefix}{fig_n}"
-            elif key.startswith(("tab:", "table:")):
-                result[key] = f"{ed_tbl_n}" if key.startswith(("tab:ed_", "table:ed_")) else f"{prefix}{tbl_n}"
-            elif key.startswith("alg:"):
-                result[key] = f"{prefix}{alg_n}"
-            elif key.startswith(("eq:", "equation:")):
-                result[key] = f"{prefix}{eq_n}"
-            elif key.startswith("si:"):
-                # SI labels: use section/subsection numbering
-                if subsec_n > 0:
-                    result[key] = f"{prefix}{sec_n}.{subsec_n}"
+        env = m.group("begin")
+        if env is not None:
+            env_stack.append((env, None))
+            if env == "figure":
+                if in_extended_data:
+                    ed_fig_n += 1
+                    value = str(ed_fig_n)
                 else:
-                    result[key] = f"{prefix}{sec_n}"
-            elif key.startswith("sn:"):
-                if supprecord_n:
-                    result[key] = f"{supprecord_n}"
-                elif suppnote_n:
-                    result[key] = f"{suppnote_n}"
+                    fig_n += 1
+                    value = f"{prefix}{fig_n}"
+                active_ref = _LabelRef(value, "extended_figure" if in_extended_data else "figure")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            elif env in ("table", "longtable"):
+                if in_extended_data:
+                    ed_tbl_n += 1
+                    value = str(ed_tbl_n)
                 else:
-                    result[key] = f"{sec_n}"
-            elif key.startswith("sec:"):
-                result[key] = f"{prefix}{sec_n}"
-            else:
-                # Labels without a semantic prefix inherit the most recent
-                # float counter.  This mirrors TeX's ``\\label`` semantics,
-                # where a label records the current counter independently of
-                # its spelling.  A bare label outside a numbered structure
-                # remains available as its id for backwards compatibility.
-                if current_float == "figure":
-                    result[key] = f"{prefix}{fig_n}"
-                elif current_float == "table":
-                    result[key] = f"{prefix}{tbl_n}"
-                elif current_float == "equation":
-                    result[key] = f"{prefix}{eq_n}"
+                    tbl_n += 1
+                    value = f"{prefix}{tbl_n}"
+                active_ref = _LabelRef(value, "extended_table" if in_extended_data else "table")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            elif env == "algorithm":
+                alg_n += 1
+                active_ref = _LabelRef(f"{prefix}{alg_n}", "algorithm")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            elif env == "equation":
+                if m.group("begin_star"):
+                    # equation* is deliberately unnumbered and cannot supply
+                    # a target for a cross-reference.
+                    active_ref = None
                 else:
-                    result[key] = key
+                    eq_n += 1
+                    active_ref = _LabelRef(f"{prefix}{eq_n}", "equation")
+                    env_stack[-1] = (env, active_ref)
+                    last_ref = active_ref
+            continue
+        if m.group("end") is not None:
+            ending = m.group("end")
+            if env_stack and env_stack[-1][0] == ending:
+                _, ended_ref = env_stack.pop()
+                active_ref = env_stack[-1][1] if env_stack else None
+                if ended_ref is not None and ended_ref.kind in {
+                    "figure", "extended_figure", "table", "extended_table",
+                    "algorithm", "equation",
+                }:
+                    last_ref = None
+            continue
+        key = m.group("label")
+        if key is None:
+            continue
+        normalized = key[2:] if key.lower().startswith("s-") else key
+        prefix_kind = None
+        if normalized.startswith(("fig:", "figure:")):
+            prefix_kind = "extended_figure" if normalized.startswith(("fig:ed_", "figure:ed_")) else "figure"
+            value = str(ed_fig_n) if normalized.startswith(("fig:ed_", "figure:ed_")) else f"{prefix}{fig_n}"
+        elif normalized.startswith(("tab:", "table:")):
+            prefix_kind = "extended_table" if normalized.startswith(("tab:ed_", "table:ed_")) else "table"
+            value = str(ed_tbl_n) if normalized.startswith(("tab:ed_", "table:ed_")) else f"{prefix}{tbl_n}"
+        elif normalized.startswith("alg:"):
+            prefix_kind, value = "algorithm", f"{prefix}{alg_n}"
+        elif normalized.startswith(("eq:", "equation:")):
+            prefix_kind, value = "equation", f"{prefix}{eq_n}"
+        elif normalized.startswith("si:"):
+            prefix_kind = "subsection" if subsec_n > 0 else "section"
+            value = f"{prefix}{sec_n}.{subsec_n}" if subsec_n > 0 else f"{prefix}{sec_n}"
+        elif normalized.startswith("sn:"):
+            prefix_kind = "supprecord" if supprecord_n else "suppnote"
+            value = str(supprecord_n or suppnote_n or sec_n)
+        elif normalized.startswith("sec:"):
+            prefix_kind, value = "section", f"{prefix}{sec_n}"
+        elif active_ref is not None:
+            prefix_kind, value = active_ref.kind, active_ref.value
+        elif last_ref is not None and last_ref.kind in {"section", "subsection", "suppnote", "supprecord"}:
+            prefix_kind, value = last_ref.kind, last_ref.value
+        else:
+            # Preserve the historical public map behavior for labels outside
+            # any ref-stepped scope; they remain resolvable by their own text.
+            value = key
+        result[key] = _LabelRef(value, prefix_kind)
     return result
+
+
+def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
+                 prefix: str = "") -> dict[str, str]:
+    """Compatibility wrapper returning only label display values."""
+    return {key: ref.value for key, ref in _scan_label_refs(text, fig_offset, tbl_offset, prefix).items()}
+
+
+def _build_label_index(full_text: str, aux_text: str | None = None,
+                       current_prefix: str = "", aux_prefix: str = "") -> tuple[dict[str, str], dict[str, str]]:
+    labels = _scan_label_refs(full_text, prefix=current_prefix)
+    if aux_text:
+        for key, ref in _scan_label_refs(aux_text, prefix=aux_prefix).items():
+            labels.setdefault(key, ref)
+            labels.setdefault(f"S-{key}", ref)
+    return ({key: ref.value for key, ref in labels.items()},
+            {key: ref.kind for key, ref in labels.items() if ref.kind})
 
 
 def _build_label_map(full_text: str, aux_text: str | None = None,
                      current_prefix: str = "", aux_prefix: str = "S") -> dict[str,str]:
-    labels=_scan_labels(full_text, prefix=current_prefix)
-    if aux_text:
-        for key, value in _scan_labels(aux_text, prefix=aux_prefix).items():
-            labels.setdefault(key, value)
-            # xr-hyper \externaldocument[S-]{si} cites the other file as S-<label>.
-            labels.setdefault(f"S-{key}", value)
-    return labels
+    values, _ = _build_label_index(full_text, aux_text, current_prefix, aux_prefix)
+    return values
 
 
 def _normalize_docx_whitespace(text: str) -> str:
@@ -364,8 +430,15 @@ def add_rich_text(paragraph, tex: str, resolver: CitationResolver | None = None,
             raise ValueError(f"Unresolved reference label: {key}")
         return value
 
+    def resolve_label_kind(key: str) -> str | None:
+        return _context().label_kinds.get(key)
+
     def append_tex(chunk: str):
-        spans = tokenize_tex(chunk, resolve_ref=resolve_label)
+        spans = tokenize_tex(
+            chunk,
+            resolve_ref=resolve_label,
+            resolve_ref_kind=resolve_label_kind,
+        )
         for sp in spans:
             run = paragraph.add_run()
             _apply_span(run, sp, font_size=font_size, font_name=font_name)
@@ -472,6 +545,7 @@ class ConversionContext:
     figure_dir: Path
     project_root: Path
     label_map: dict[str,str] = field(default_factory=dict)
+    label_kinds: dict[str,str] = field(default_factory=dict)
     fig_counter: int=0
     tbl_counter: int=0
     ed_fig_counter: int=0
@@ -1730,10 +1804,14 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
         )
         if aux_path and aux_path.exists() else None
     )
-    _context().label_map=_build_label_map(
-        full_text,aux_text,current_prefix=float_prefix,
+    label_map, label_kinds = _build_label_index(
+        full_text,
+        aux_text,
+        current_prefix=float_prefix,
         aux_prefix="" if float_prefix else "S",
     )
+    _context().label_map = label_map
+    _context().label_kinds = label_kinds
     preamble = _extract_preamble(full_text)
     body = _body_from_text(full_text)
 

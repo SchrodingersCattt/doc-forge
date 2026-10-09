@@ -147,13 +147,17 @@ def _find_matching_brace(s: str, start: int) -> int:
     return pos
 
 
-def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> list[Span]:
+def tokenize_tex(
+    raw: str,
+    resolve_ref: Callable[[str], str] | None = None,
+    resolve_ref_kind: Callable[[str], str | None] | None = None,
+) -> list[Span]:
     """Parse LaTeX-ish text into a flat list of Span objects.
 
     *resolve_ref* maps ``\\ref{key}``/``\\eqref{key}`` labels to display
     strings; when omitted the label text is kept as-is.
     """
-    s = _preprocess(raw, resolve_ref)
+    s = _preprocess(raw, resolve_ref, resolve_ref_kind)
     spans: list[Span] = []
 
     def _emit(text: str, **kw) -> None:
@@ -755,7 +759,11 @@ def _collapse_consecutive_number_lists(text: str) -> str:
     return "".join(pieces)
 
 
-def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
+def _preprocess(
+    s: str,
+    resolve_ref: Callable[[str], str] | None = None,
+    resolve_ref_kind: Callable[[str], str | None] | None = None,
+) -> str:
     s = s.replace("~", "\u00A0")
     s = re.sub(r"\\bar\{\\mathbf\s+([A-Za-z])\}", lambda m: r"\mathbf{" + m.group(1) + "\u0305}", s)
     s = re.sub(r"\\bar\{([^{}]*)\}", lambda m: "".join(ch + "\u0305" for ch in m.group(1)), s)
@@ -780,12 +788,52 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = re.sub(r"\\protect\s*", "", s)
     s = re.sub(r"\\label\{[^}]*\}", "", s)
 
-    def _resolve_ref(m: re.Match) -> str:
-        key = m.group(1)
-        return resolve_ref(key) if resolve_ref else key
+    def _reference_kind(key: str) -> str | None:
+        normalized = key.strip().lower()
+        if normalized.startswith("s-"):
+            normalized = normalized[2:]
+        prefix, _, suffix = normalized.partition(":")
+        extended = suffix.startswith("ed_")
+        return {
+            "fig": "Extended Data Fig." if extended else "Figure",
+            "figure": "Extended Data Fig." if extended else "Figure",
+            "tab": "Extended Data Table" if extended else "Table",
+            "table": "Extended Data Table" if extended else "Table",
+            "alg": "Algorithm",
+            "algorithm": "Algorithm",
+            "eq": "Equation",
+            "equation": "Equation",
+        }.get(prefix)
 
-    s = re.sub(r"\\ref\*?\{([^}]*)\}", _resolve_ref, s)
-    s = re.sub(r"\\eqref\*?\{([^}]*)\}", _resolve_ref, s)
+    def _resolve_reference(m: re.Match) -> str:
+        command = m.group(1).lower()
+        raw_keys = m.group(2)
+        keys = [part.strip() for part in raw_keys.split(",") if part.strip()]
+        values = [resolve_ref(key) if resolve_ref else key for key in keys]
+        if command in {"ref", "eqref"}:
+            return ",".join(values)
+        rendered = []
+        for key, value in zip(keys, values):
+            kind = resolve_ref_kind(key) if resolve_ref_kind else None
+            kind = kind or _reference_kind(key)
+            kind = {
+                "figure": "Figure",
+                "extended_figure": "Extended Data Fig.",
+                "table": "Table",
+                "extended_table": "Extended Data Table",
+                "algorithm": "Algorithm",
+                "equation": "Equation",
+                "section": "Section",
+                "subsection": "Section",
+            }.get(kind, kind)
+            rendered.append(f"{kind} {value}" if kind else value)
+        return ", ".join(rendered)
+
+    s = re.sub(
+        r"\\(autoref|Autoref|cref|Cref|ref|eqref)\*?\{([^}]*)\}",
+        _resolve_reference,
+        s,
+    )
     s = _collapse_consecutive_number_lists(s)
     s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\url\{([^}]*)\}", r"\1", s)
