@@ -41,6 +41,11 @@ from .template import (
 )
 from .docx_export import (
     MarkdownExportResult,
+    ReviewApplyResult,
+    apply_review_docx,
+    apply_reviewed_docx,
+    apply_reviewed_docx_to_markdown,
+    apply_reviewed_docx_to_sources,
     docx_to_markdown,
     load_section_map,
     metadata_markdown,
@@ -90,6 +95,11 @@ __all__ = [
     "verify_template_output",
     "write_assembly_sidecars",
     "MarkdownExportResult",
+    "ReviewApplyResult",
+    "apply_review_docx",
+    "apply_reviewed_docx",
+    "apply_reviewed_docx_to_markdown",
+    "apply_reviewed_docx_to_sources",
     "docx_to_markdown",
     "load_section_map",
     "metadata_markdown",
