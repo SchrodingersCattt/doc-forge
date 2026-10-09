@@ -108,7 +108,7 @@ def _resolve_inputs(value: Any, base: Path, *, label: str) -> list[Path]:
 
 
 def _output_name(entry: Mapping[str, Any], key: str, profile: Mapping[str, Any]) -> str:
-    names = profile.get("names", {})
+    names = profile.get("names", profile.get("delivery_names", {}))
     named = names.get(key) if isinstance(names, Mapping) else None
     value = entry.get("delivery_name") or entry.get("output_name") or entry.get("output") or named
     if value is None:
@@ -248,11 +248,13 @@ def deliver(
         metadata = _path(metadata_value, base, label=f"{key}.metadata") if metadata_value is not None else None
         bibliography_value = entry.get("bibliography", shared.get("bibliography"))
         bibliography = _path(bibliography_value, base, label=f"{key}.bibliography") if bibliography_value is not None else None
-        citation_base_value = entry.get("citation_base", shared.get("citation_base"))
+        citation_base_value = entry.get("citation_base", shared.get("citation_base", payload.get("citation_base")))
         if key == "supplement" and citation_base_value is None and article_manifest is not None:
             citation_base_value = article_manifest
         citation_base = _path(citation_base_value, base, label=f"{key}.citation_base") if citation_base_value is not None else None
         options: dict[str, Any] = dict(shared.get("options", {})) if isinstance(shared.get("options", {}), Mapping) else {}
+        if isinstance(payload.get("options"), Mapping):
+            options.update(payload["options"])
         if isinstance(entry.get("options"), Mapping):
             options.update(entry["options"])
         # Profile keys are also accepted as direct assemble options.
