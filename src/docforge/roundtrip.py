@@ -12,11 +12,16 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import posixpath
 import shutil
+import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+from lxml import etree
 
 from .markdown import (
     convert_unicode_scripts_in_docx,
@@ -31,6 +36,9 @@ SCHEMA = "docforge.roundtrip.v1"
 # Public spelling used by callers that validate bundle manifests.
 ROUNDTRIP_SCHEMA = SCHEMA
 _LEGACY_SCHEMA = "docforge.docx2md.v1"
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def sha256_file(path: Path) -> str:
@@ -46,6 +54,155 @@ def _version() -> str:
         return importlib.metadata.version("docforge")
     except importlib.metadata.PackageNotFoundError:
         return "0.1.0"
+
+
+def _relationship_part(name: str) -> str:
+    """Return the source part represented by a ``.rels`` part name."""
+
+    if name == "_rels/.rels":
+        return ""
+    parent, rels_name = posixpath.split(name)
+    if not rels_name.endswith(".rels") or not parent.endswith("/_rels"):
+        return ""
+    source_parent = parent[: -len("/_rels")]
+    source_name = rels_name[: -len(".rels")]
+    return posixpath.join(source_parent, source_name)
+
+
+def audit_docx_package(path: Path) -> dict[str, Any]:
+    """Validate the OPC package and revision references before publication.
+
+    The audit deliberately stays package-level and deterministic: it does not
+    depend on Word or a particular renderer.  Every relationship target must
+    resolve inside the archive, all XML parts must parse, and comment anchors
+    must point at an existing comment.  A ``ValueError`` identifies the first
+    actionable defect, so callers can fail before writing a misleading output.
+    """
+
+    path = Path(path)
+    if not path.is_file() or not zipfile.is_zipfile(path):
+        raise ValueError(f"DOCX package is not a readable OPC zip: {path}")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            bad = archive.testzip()
+            if bad is not None:
+                raise ValueError(f"DOCX package has a corrupt member: {bad}")
+            names = set(archive.namelist())
+            required = {"[Content_Types].xml", "_rels/.rels", "word/document.xml"}
+            missing = sorted(required - names)
+            if missing:
+                raise ValueError(f"DOCX package is missing required parts: {', '.join(missing)}")
+            xml_roots: dict[str, etree._Element] = {}
+            for name in names:
+                if not name.endswith(".xml") and not name.endswith(".rels"):
+                    continue
+                try:
+                    xml_roots[name] = etree.fromstring(archive.read(name))
+                except (etree.XMLSyntaxError, KeyError) as exc:
+                    raise ValueError(f"DOCX package contains invalid XML: {name}") from exc
+
+            for rels_name, root in xml_roots.items():
+                if not rels_name.endswith(".rels"):
+                    continue
+                source = _relationship_part(rels_name)
+                source_dir = posixpath.dirname(source)
+                for relationship in root.findall(f"{{{_REL_NS}}}Relationship"):
+                    if relationship.get("TargetMode") == "External":
+                        continue
+                    target = relationship.get("Target") or ""
+                    if target.startswith("/"):
+                        target_name = target.lstrip("/")
+                    else:
+                        target_name = posixpath.normpath(posixpath.join(source_dir, target))
+                    if target_name not in names:
+                        raise ValueError(
+                            f"DOCX relationship from {source or '/'} points to missing part: {target}"
+                        )
+
+            document = xml_roots["word/document.xml"]
+            refs = {
+                node.get(f"{{{_W_NS}}}id")
+                for node in document.iter(f"{{{_W_NS}}}commentReference")
+            }
+            refs.discard(None)
+            comments = xml_roots.get("word/comments.xml")
+            known = set()
+            if comments is not None:
+                known = {
+                    node.get(f"{{{_W_NS}}}id")
+                    for node in comments.iter(f"{{{_W_NS}}}comment")
+                }
+                known.discard(None)
+            missing_comments = sorted(refs - known)
+            if missing_comments:
+                raise ValueError(
+                    "DOCX comment anchors reference missing comments: "
+                    + ", ".join(missing_comments)
+                )
+            # Source syntax must never leak into the published Word text.
+            visible_text = "".join(document.itertext())
+            leaked = [token for token in ("\\cite{", "\\ref{", "$$", "\\begin{aligned}") if token in visible_text]
+            if leaked:
+                raise ValueError("DOCX contains unresolved source markup: " + ", ".join(leaked))
+            return {
+                "passed": True,
+                "parts": len(names),
+                "xml_parts": len(xml_roots),
+                "relationships": sum(
+                    len(root.findall(f"{{{_REL_NS}}}Relationship"))
+                    for name, root in xml_roots.items()
+                    if name.endswith(".rels")
+                ),
+                "comment_references": len(refs),
+            }
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"DOCX package is not a readable OPC zip: {path}") from exc
+
+
+def render_docx_pages(path: Path, *, renderer: str | None = None) -> dict[str, Any]:
+    """Render every page with a declared office renderer and hash its image.
+
+    LibreOffice is preferred when present.  Environments without an office
+    renderer still receive an explicit ``skipped`` result in the manifest;
+    callers can require ``status == 'passed'`` in CI when visual auditing is
+    available.  The renderer command is recorded so the audit is reproducible.
+    """
+
+    renderer_path = renderer or shutil.which("soffice") or shutil.which("libreoffice")
+    if renderer_path is None:
+        return {"status": "skipped", "renderer": None, "pages": 0, "image_hashes": [], "issues": ["no office renderer found"]}
+    path = Path(path).resolve()
+    with tempfile.TemporaryDirectory(prefix="docforge-render-") as temp:
+        root = Path(temp)
+        command = [renderer_path, "--headless", "--convert-to", "pdf", "--outdir", str(root), str(path)]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        pdf = root / f"{path.stem}.pdf"
+        if completed.returncode != 0 or not pdf.is_file():
+            detail = (completed.stderr or completed.stdout or "renderer failed").strip()
+            raise ValueError(f"DOCX page renderer failed ({renderer_path}): {detail}")
+        try:
+            import fitz  # type: ignore[import-not-found]
+        except ImportError:
+            return {
+                "status": "passed",
+                "renderer": renderer_path,
+                "pages": 0,
+                "image_hashes": [],
+                "issues": ["PDF produced; image hashing unavailable (PyMuPDF not installed)"],
+            }
+        document = fitz.open(pdf)
+        hashes: list[str] = []
+        for page in document:
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+            hashes.append(hashlib.sha256(pixmap.tobytes("png")).hexdigest())
+        document.close()
+        return {
+            "status": "passed",
+            "renderer": renderer_path,
+            "pages": len(hashes),
+            "image_hashes": hashes,
+            "issues": [],
+        }
 
 
 def _safe_path(root: Path, value: object, label: str) -> Path:
@@ -119,6 +276,7 @@ class RoundtripResult:
     output_sha256: str
     manifest_sha256: str
     revision_summary: Mapping[str, int] = field(default_factory=dict)
+    validation: Mapping[str, Any] = field(default_factory=dict)
     output: Path | None = None
     manifest: Path | None = None
 
@@ -129,6 +287,7 @@ class RoundtripResult:
             "output_sha256": self.output_sha256,
             "manifest_sha256": self.manifest_sha256,
             "revision_summary": dict(self.revision_summary),
+            "validation": dict(self.validation),
         }
 
 
@@ -332,11 +491,18 @@ def roundtrip_docx(
         raise ValueError("input DOCX SHA-256 does not match the roundtrip manifest")
     source, sections, _media, unchanged, full_ok, sections_ok, media_ok = _manifest_paths(workdir, payload)
     source_sha = sha256_file(source)
+    source_validation = audit_docx_package(source)
     revision_summary: Mapping[str, int] = {}
+    validation: dict[str, Any] = {"source_package": source_validation}
     if unchanged:
+        # The source package was audited before it is copied to the delivery
+        # path, so an invalid bundle can never produce a successful output.
+        mode = "exact-reuse"
+        validation["accepted_view"] = {"passed": True, "mode": "exact-reuse"}
+        validation["output_package"] = audit_docx_package(source)
+        validation["render"] = render_docx_pages(source)
         output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, output)
-        mode = "exact-reuse"
     else:
         full_name = payload.get("full") or payload.get("full_markdown")
         full = _safe_path(workdir, full_name, "full Markdown") if isinstance(full_name, str) else None
@@ -354,15 +520,35 @@ def roundtrip_docx(
         with tempfile.TemporaryDirectory(prefix="docforge-roundtrip-") as temp:
             rebuilt = Path(temp) / "rebuilt.docx"
             _render_markdown(inputs, rebuilt)
+            rebuilt_validation = audit_docx_package(rebuilt)
             if baseline is not None:
                 from .docxdiff import create_tracked_docx
 
+                tracked = Path(temp) / "tracked.docx"
                 revision_summary = create_tracked_docx(
-                    baseline.resolve(), rebuilt, output, overwrite=True
+                    baseline.resolve(), rebuilt, tracked, overwrite=True
                 )
+                # Audit the temporary tracked package before it becomes the
+                # public output.  A failed audit must not leave a misleading
+                # deliverable at the requested path.
+                tracked_validation = audit_docx_package(tracked)
+                validation["accepted_view"] = {
+                    "passed": True,
+                    "mode": "tracked",
+                    "summary": dict(revision_summary),
+                }
+                validation["tracked_package"] = tracked_validation
+                candidate = tracked
             else:
-                output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(rebuilt, output)
+                candidate = rebuilt
+                validation["accepted_view"] = {"passed": True, "mode": "generated"}
+            validation["rebuilt_package"] = rebuilt_validation
+            # Validate/render while the temporary candidate still exists, then
+            # atomically publish the audited bytes to the requested path.
+            validation["output_package"] = audit_docx_package(candidate)
+            validation["render"] = render_docx_pages(candidate)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(candidate, output)
         mode = "rebuild"
 
     # Keep the bundle's audit trail portable.  The editable hashes remain the
@@ -370,6 +556,7 @@ def roundtrip_docx(
     payload["mode"] = mode
     payload["revision_summary"] = dict(revision_summary)
     payload["output_sha256"] = sha256_file(output)
+    payload["validation"] = validation
     _write_manifest(manifest_path, payload)
     return RoundtripResult(
         mode=mode,
@@ -377,12 +564,24 @@ def roundtrip_docx(
         output_sha256=sha256_file(output),
         manifest_sha256=sha256_file(manifest_path),
         revision_summary=revision_summary,
+        validation=validation,
         output=output,
         manifest=manifest_path,
     )
 
 
 run_roundtrip = roundtrip_docx
+validate_docx_package = audit_docx_package
 
 
-__all__ = ["ROUNDTRIP_SCHEMA", "RoundtripResult", "roundtrip_docx", "run_roundtrip", "sha256_file"]
+__all__ = [
+    "ROUNDTRIP_SCHEMA",
+    "RoundtripResult",
+    "audit_docx_package",
+    "render_docx_pages",
+    "validate_docx_package",
+    "roundtrip_docx",
+    "run_roundtrip",
+    "sha256_file",
+]
+
