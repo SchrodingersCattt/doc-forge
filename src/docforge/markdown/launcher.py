@@ -269,13 +269,26 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             continue
         if is_table_start(lines, i):
             flush_paragraph()
-            rows = [split_table_row(lines[i])]
+            header = split_table_row(lines[i])
+            separator = split_table_row(lines[i + 1])
+            if len(separator) != len(header):
+                raise ValueError(
+                    f"Malformed Markdown table in {path}:{i + 2}; "
+                    f"separator has {len(separator)} cells, expected {len(header)}"
+                )
+            rows = [header]
             i += 2
             while i < len(lines):
                 row = lines[i].strip()
                 if not (row.startswith("|") and row.endswith("|")):
                     break
-                rows.append(split_table_row(row))
+                parsed = split_table_row(row)
+                if len(parsed) != len(header):
+                    raise ValueError(
+                        f"Malformed Markdown table in {path}:{i + 1}; "
+                        f"row has {len(parsed)} cells, expected {len(header)}"
+                    )
+                rows.append(parsed)
                 i += 1
             blocks.append(Block("table", rows=tuple(rows)))
             continue

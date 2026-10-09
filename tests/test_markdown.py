@@ -25,6 +25,13 @@ class BlockTests(unittest.TestCase):
         self.assertEqual(block.rows, ())
         self.assertEqual(block.path, "")
 
+    def test_table_row_width_mismatch_fails_with_source_location(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("| A | B |\n|---|---|\n| one |\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"Malformed Markdown table.*:3; row has 1 cells, expected 2"):
+                parse_markdown(path)
+
     def test_table_rows_keep_pipes_inside_math_code_and_escapes(self) -> None:
         from docforge.markdown.launcher import split_table_row
 
