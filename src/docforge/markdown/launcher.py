@@ -157,9 +157,17 @@ def split_table_row(line: str) -> tuple[str, ...]:
             index = run_end
             continue
 
-        if character == "|" and not escaped and code_delimiter is None and math_delimiter is None:
-            cells.append("".join(current).strip())
-            current = []
+        if character == "|" and code_delimiter is None and math_delimiter is None:
+            if escaped:
+                # The backslash protects a literal pipe from changing the
+                # table shape.  It is Markdown syntax, not cell content, so
+                # remove it before the cell reaches the DOCX renderer.
+                if current and current[-1] == "\\":
+                    current.pop()
+                current.append("|")
+            else:
+                cells.append("".join(current).strip())
+                current = []
         else:
             current.append(character)
         index += 1

@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import re
+import shutil
 import sys
 import zipfile
 import tempfile
@@ -1655,25 +1656,29 @@ def _insert_before(body, anchor, nodes: Iterable) -> None:
         index += 1
 
 
-def _open_template_document(path: Path) -> DocumentType:
-    """Open DOCX and DOTX packages through python-docx.
+def _load_template_document(path: Path) -> DocumentType:
+    """Load a clean view of a DOCX or DOTX template.
 
-    python-docx intentionally rejects the template main-part content type even
-    though DOTX uses the same OOXML document structure.  Normalize that one
-    content-type override in a temporary package, leaving the caller's
-    template untouched and ensuring the assembled output is a regular DOCX.
+    Reviewed templates may hide the role prototypes in ``w:ins`` nodes, which
+    python-docx does not expose.  Work on a temporary copy, accept revisions,
+    and then normalize DOTX's main-part content type before opening it.  The
+    caller's source package is never modified and the returned document is an
+    ordinary in-memory python-docx document.
     """
-    try:
-        return Document(path)
-    except ValueError as error:
+    with tempfile.TemporaryDirectory(prefix="docforge-template-") as directory:
+        accepted = Path(directory) / path.name
+        shutil.copyfile(path, accepted)
+        accept_docx_revisions(accepted)
         try:
-            with zipfile.ZipFile(path) as source:
-                content_types = source.read("[Content_Types].xml")
-                template_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
-                document_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
-                if template_type not in content_types:
-                    raise error
-                with tempfile.TemporaryDirectory(prefix="docforge-dotx-") as directory:
+            return Document(accepted)
+        except ValueError as error:
+            template_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+            document_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+            try:
+                with zipfile.ZipFile(accepted) as source:
+                    content_types = source.read("[Content_Types].xml")
+                    if template_type not in content_types:
+                        raise error
                     normalized = Path(directory) / "template.docx"
                     with zipfile.ZipFile(normalized, "w", zipfile.ZIP_DEFLATED) as target:
                         for info in source.infolist():
@@ -1682,8 +1687,8 @@ def _open_template_document(path: Path) -> DocumentType:
                                 payload = payload.replace(template_type, document_type)
                             target.writestr(info, payload)
                     return Document(normalized)
-        except (KeyError, OSError, zipfile.BadZipFile):
-            raise error
+            except (KeyError, OSError, zipfile.BadZipFile):
+                raise error
 
 
 def _geometry(document: DocumentType) -> tuple[tuple[int, int, int, int, int, int], ...]:
@@ -1955,7 +1960,7 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
-    template = _open_template_document(template_path)
+    template = _load_template_document(template_path)
     if citation_format == "template":
         citation_style = (
             CitationStyle.SUPERSCRIPT

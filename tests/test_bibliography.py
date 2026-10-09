@@ -18,7 +18,18 @@ def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> 
     assert entries["raw"].get("raw") == "A raw record"
     bib_path = tmp_path / "refs.bib"
     bib_path.write_text("@article{paper,\n author={A},\n year={2024}\n}\n", encoding="utf-8")
-    assert load_bib(bib_path)["paper"].entry_type == "article"
+    bib_entry = load_bib(bib_path)["paper"]
+    assert bib_entry.entry_type == "article"
+    assert bib_entry.get("year") == 2024
+
+
+def test_bibtex_year_is_accepted_by_markdown_formatter(tmp_path: Path) -> None:
+    bib_path = tmp_path / "refs.bib"
+    bib_path.write_text(
+        "@article{paper, author={A}, title={A title}, journal={J}, year={2024}}\n",
+        encoding="utf-8",
+    )
+    assert "**2024**" in format_entry(load_bib(bib_path)["paper"], profile="markdown")
 
 
 def test_resolver_supports_inherited_and_source_order_numbering() -> None:

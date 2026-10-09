@@ -40,7 +40,7 @@ class BlockTests(unittest.TestCase):
             "label",
             "`$x|y$`",
             "$x|y$",
-            r"escaped \| pipe",
+            "escaped | pipe",
         )
 
         # Backtick spans may use more than one delimiter character.
@@ -230,6 +230,14 @@ class OmmlTests(unittest.TestCase):
         for cell in document.tables[0].rows[1].cells:
             self.assertEqual(next(run for run in cell.paragraphs[0].runs if run.text).font.name, "Consolas")
         self.assertEqual(document.paragraphs[0].runs[0].font.name, "Arial")
+
+    def test_escaped_table_pipe_is_plain_cell_text_in_docx(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("| Header | Value |\n| --- | --- |\n| left \\| right | ok |\n", encoding="utf-8")
+            blocks = parse_markdown(path)
+        document = render_blocks_to_doc(blocks)
+        assert document.tables[0].cell(1, 0).text == "left | right"
 
     def test_nested_scripts_inside_bold_or_italic_markup_are_preserved(self) -> None:
         document = render_blocks_to_doc(
