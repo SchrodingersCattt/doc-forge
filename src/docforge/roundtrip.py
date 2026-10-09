@@ -182,7 +182,15 @@ def _export_bundle(
             name = entry.get("file")
             if not isinstance(name, str):
                 raise ValueError("section map file names must be strings")
-            _safe_path(workdir, name, "section map output")
+            candidate = _safe_path(workdir, name, "section map output")
+            reserved = {
+                full.resolve(),
+                (workdir / "manifest.json").resolve(),
+                (workdir / "roundtrip").resolve(),
+                (workdir / "media").resolve(),
+            }
+            if candidate in reserved or any(parent in candidate.parents for parent in reserved):
+                raise ValueError(f"section map output uses a reserved bundle path: {name}")
     export = docx_to_markdown(
         input_path,
         output=full,
