@@ -2126,7 +2126,15 @@ def assemble_markdown_template(
             candidates = landscape_regions if requested_orientation == "landscape" else portrait_regions
             figure_region = candidates[min(figure_index, len(candidates) - 1)] if candidates else prototypes.figure_regions[0]
 
-        if resolved_span == "page":
+        # A portrait page-span figure is already full-width when the active
+        # body section has one column.  In that case section breaks only add
+        # empty continuous sections around the figure and can change page
+        # balancing in Word, so keep the existing body section in place.
+        page_span_requires_breaks = not (
+            requested_orientation == "portrait"
+            and _section_column_count(section) == 1
+        )
+        if resolved_span == "page" and page_span_requires_breaks:
             base_figure_section = (
                 figure_region.section
                 if requested_orientation == "landscape" and figure_region is not None
@@ -2160,7 +2168,7 @@ def assemble_markdown_template(
                 caption_font_size=caption_font_size,
             )
         )
-        if resolved_span == "page":
+        if resolved_span == "page" and page_span_requires_breaks:
             output_nodes.append(_section_break_node(figure_section))
             section_sources.append(
                 figure_region.index

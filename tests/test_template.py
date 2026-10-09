@@ -545,6 +545,31 @@ def test_portrait_page_span_uses_continuous_two_one_two_sections(tmp_path: Path)
     assert result.figures[0]["columns"] == 1
 
 
+def test_portrait_page_span_in_one_column_keeps_existing_section(tmp_path: Path) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (160, 80), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Body before.\n\n![Figure 1|span=page](source.png)\n\n"
+        "Figure 1. Full-width figure.\n\nBody after.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        line_numbers="on", figure_span="column",
+    )
+    rendered = Document(output)
+    assert len(rendered.sections) == 2
+    assert result.section_sources == (0, 1)
+    assert result.figures[0]["span"] == "page"
+    assert result.figures[0]["columns"] == 1
+
+
 def test_invalid_and_conflicting_image_span_markers_fail(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     Image.new("RGB", (80, 40), "white").save(source_image)

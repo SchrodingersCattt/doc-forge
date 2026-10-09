@@ -26,6 +26,14 @@ PT_CAPTION=Pt(9)
 PT_REF=Pt(10)
 PT_HALF_LINE=Pt(5)
 
+# Display environments are collected as one block before their rows are
+# converted to an OMML equation array.  ``aligned`` is usually nested inside
+# ``equation``, but accepting it (and the top-level ``align`` family) keeps
+# valid TeX input from falling through to ordinary paragraph parsing.
+_DISPLAY_ENV_RE = re.compile(
+    r"^\\begin\{(?P<environment>equation|align|aligned|gather|gathered|multline)(?P<star>\*)?\}"
+)
+
 
 def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> None:
     """Set body and caption sizes, including defaults bound when functions were defined."""
@@ -743,8 +751,16 @@ def _normalize_display_math_source(s: str) -> str:
         s = s[:-2]
     s = re.sub(r"\\begin\{equation\*?\}", "", s)
     s = re.sub(r"\\end\{equation\*?\}", "", s)
-    s = re.sub(r"\\begin\{(?:array|aligned|align)\}(?:\{[^}]*\})?", "", s)
-    s = re.sub(r"\\end\{(?:array|aligned|align)\}", "", s)
+    s = re.sub(
+        r"\\begin\{(?:array|aligned|alignedat|align|alignat|gather|gathered|multline|split|cases)\*?\}(?:\{[^}]*\})?",
+        "",
+        s,
+    )
+    s = re.sub(
+        r"\\end\{(?:array|aligned|alignedat|align|alignat|gather|gathered|multline|split|cases)\*?\}",
+        "",
+        s,
+    )
     s = re.sub(r"\\left\s*([(\[|.])", r"\1", s)
     s = re.sub(r"\\right\s*([)\]|.])", r"\1", s)
     s = re.sub(r"\\vdet\b", lambda _: r"V_{\mathrm{det}}", s)
@@ -1749,13 +1765,20 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             continue
 
         # --- display math: \[ ... \] or \begin{equation} ... \end{equation} ---
-        if line.startswith(r"\[") or re.match(r"\\begin\{equation\*?\}", line):
+        display_match = _DISPLAY_ENV_RE.match(line)
+        if line.startswith(r"\[") or display_match:
             math_block = line
             j = i + 1
-            end_marker = r"\]" if line.startswith(r"\[") else r"\end{equation"
-            while end_marker not in math_block and j < len(lines):
+            if line.startswith(r"\["):
+                end_pattern = re.compile(r"\\\]")
+            else:
+                environment = display_match.group("environment")
+                end_pattern = re.compile(rf"\\end\{{{re.escape(environment)}\*?\}}")
+            while not end_pattern.search(math_block) and j < len(lines):
                 math_block += "\n" + lines[j].strip()
                 j += 1
+            if not end_pattern.search(math_block):
+                raise ValueError(f"Unclosed display equation environment in {tex_path}:{i + 1}")
             add_display_math(doc, math_block, resolver, equation_prefix=float_prefix)
             i = j
             continue
@@ -1999,7 +2022,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             if nl.startswith("%") or _is_invisible_tex_line(nl):
                 j += 1
                 continue
-            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
+            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or _DISPLAY_ENV_RE.match(nl) or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|bibliography\{|end\{)", nl):
                 break
             para_lines.append(nl)
             j += 1

@@ -12,7 +12,7 @@ from docx.oxml.ns import qn
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
-from docforge.tex.converter import add_rich_text
+from docforge.tex.converter import add_rich_text, _display_math_rows
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -69,6 +69,15 @@ BIB_TEXT = r"""
 
 
 class TokenizeTests(unittest.TestCase):
+    def test_aligned_display_rows_are_preserved(self) -> None:
+        rows = _display_math_rows(
+            r"""\begin{align*}
+            M_i &= a_i + b_i,\\
+            N_i &= c_i.
+            \end{align*}"""
+        )
+        self.assertEqual(rows, ["M_i = a_i + b_i", "N_i = c_i."])
+
     def test_tokenize_tex_plain(self) -> None:
         spans = tokenize_tex(r"Hello \alpha and $x_i$.")
         text = spans_to_plain(spans)
