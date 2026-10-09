@@ -437,16 +437,34 @@ def reuse_unchanged_roundtrip_source(
     source_sha = payload.get("source_copy_sha256")
     if not isinstance(source_name, str) or not isinstance(source_sha, str):
         raise ValueError("roundtrip manifest does not contain a source DOCX snapshot")
+    if Path(source_name).is_absolute():
+        raise ValueError("roundtrip source snapshot must use a bundle-relative path")
     source = (root / source_name).resolve()
+    try:
+        source.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError("roundtrip source snapshot escapes the bundle") from exc
     if not source.is_file() or _sha256(source) != source_sha:
         raise ValueError("roundtrip source snapshot is missing or its SHA-256 does not match")
 
     for name, expected in dict(payload.get("section_sha256", {})).items():
+        if Path(str(name)).is_absolute():
+            raise ValueError("roundtrip section path must be bundle-relative")
         path = (root / str(name)).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError as exc:
+            raise ValueError("roundtrip section path escapes the bundle") from exc
         if not path.is_file() or _sha256(path) != expected:
             return False
     for name, expected in dict(payload.get("media_sha256", {})).items():
+        if Path(str(name)).is_absolute():
+            raise ValueError("roundtrip media path must be bundle-relative")
         path = (root / str(name)).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError as exc:
+            raise ValueError("roundtrip media path escapes the bundle") from exc
         if not path.is_file() or _sha256(path) != expected:
             return False
 
@@ -520,7 +538,11 @@ def docx_to_markdown(
             shutil.copyfile(input_path, source_copy)
             section_map = load_section_map(section_map_path)  # type: ignore[arg-type]
             for filename, content in split_markdown_sections(markdown, section_map):
-                path = split_dir / filename
+                path = (split_dir / filename).resolve()
+                try:
+                    path.relative_to(split_dir.resolve())
+                except ValueError as exc:
+                    raise ValueError(f"section path escapes split directory: {filename}") from exc
                 if path.exists() and not force:
                     raise FileExistsError(f"Output exists; pass --force to overwrite: {path}")
                 path.parent.mkdir(parents=True, exist_ok=True)

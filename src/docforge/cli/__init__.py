@@ -67,6 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
     docx_md.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
     docx_md.add_argument("--force", action="store_true", help="Overwrite existing output files")
 
+    roundtrip = sub.add_parser("roundtrip", help="Auditable DOCX -> Markdown -> DOCX roundtrip")
+    roundtrip.add_argument("input", type=Path, help="Input DOCX path")
+    roundtrip.add_argument("--workdir", type=Path, required=True, help="Portable roundtrip bundle directory")
+    roundtrip.add_argument("--output", type=Path, required=True, help="Output DOCX path")
+    roundtrip.add_argument("--section-map", type=Path, help="JSON section map copied into the bundle")
+    roundtrip.add_argument(
+        "--track-changes",
+        nargs="?",
+        const="all",
+        choices=("accept", "reject", "all"),
+        default="accept",
+        help="Pandoc tracked-change policy during export (default: accept)",
+    )
+    roundtrip.add_argument("--baseline", type=Path, help="DOCX baseline for an optional native tracked diff")
+    roundtrip.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
     md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
     md2.add_argument("current", type=Path, help="Freshly generated DOCX")
@@ -143,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_md2docx(args)
         if args.command == "docx2md":
             return _cmd_docx2md(args)
+        if args.command == "roundtrip":
+            return _cmd_roundtrip(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "tex2docx":
@@ -317,6 +335,27 @@ def _cmd_docx2md(args: argparse.Namespace) -> int:
         for path in result.sections:
             print(path)
         print(result.split_dir / "manifest.json")
+    return 0
+
+
+def _cmd_roundtrip(args: argparse.Namespace) -> int:
+    from ..roundtrip import roundtrip_docx
+
+    result = roundtrip_docx(
+        args.input,
+        workdir=args.workdir,
+        output=args.output,
+        section_map_path=args.section_map,
+        track_changes=args.track_changes,
+        baseline=args.baseline,
+        force=args.force,
+        command=args._command_argv,
+    )
+    # Keep CLI output machine-readable so callers can audit an invocation
+    # without parsing human status messages.
+    import json
+
+    print(json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True))
     return 0
 
 
