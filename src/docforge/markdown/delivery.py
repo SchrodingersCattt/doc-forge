@@ -198,6 +198,7 @@ def deliver(
     cannot be published.
     """
     payload, base, source = _load_profile(profile)
+    accept_revisions = accept_revisions or bool(payload.get("accept_revisions", False))
     delivery_dir = _path(payload.get("delivery_dir", payload.get("output_dir", "delivery")), base, label="delivery_dir")
     delivery_dir.mkdir(parents=True, exist_ok=True)
     shared = payload.get("shared", {})
