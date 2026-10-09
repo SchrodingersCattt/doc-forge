@@ -1295,6 +1295,15 @@ def _section_column_count(section) -> int:
     return max(1, int(columns.get(qn("w:num"), "1")))
 
 
+def _section_orientation(section) -> str:
+    page = section.find(qn("w:pgSz"))
+    if page is None:
+        return "portrait"
+    width = int(page.get(qn("w:w"), "12240"))
+    height = int(page.get(qn("w:h"), "15840"))
+    return "landscape" if width > height else "portrait"
+
+
 def _section_width_twips(section) -> int:
     page = section.find(qn("w:pgSz"))
     margins = section.find(qn("w:pgMar"))
@@ -2126,13 +2135,13 @@ def assemble_markdown_template(
             candidates = landscape_regions if requested_orientation == "landscape" else portrait_regions
             figure_region = candidates[min(figure_index, len(candidates) - 1)] if candidates else prototypes.figure_regions[0]
 
-        # A portrait page-span figure is already full-width when the active
-        # body section has one column.  In that case section breaks only add
-        # empty continuous sections around the figure and can change page
-        # balancing in Word, so keep the existing body section in place.
-        page_span_requires_breaks = not (
-            requested_orientation == "portrait"
-            and _section_column_count(section) == 1
+        # A page-span figure can stay in the active section when that section
+        # already has one column and the requested page orientation.  Extra
+        # section breaks in that case only add empty continuous sections and
+        # can change page balancing in Word.
+        page_span_requires_breaks = (
+            _section_column_count(section) != 1
+            or _section_orientation(section) != requested_orientation
         )
         if resolved_span == "page" and page_span_requires_breaks:
             base_figure_section = (
