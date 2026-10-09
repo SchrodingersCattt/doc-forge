@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -12,6 +13,7 @@ from docx.oxml.ns import qn
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
+from docforge.math.pandoc import latex_to_omml
 from docforge.tex.converter import add_rich_text, _display_math_rows
 
 TEX_DOC = r"""
@@ -69,6 +71,14 @@ BIB_TEXT = r"""
 
 
 class TokenizeTests(unittest.TestCase):
+    def test_bare_aligned_rows_are_wrapped_for_omml(self) -> None:
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml(r"a &= b \\ c &= d")
+        self.assertEqual(
+            "".join(equation.xpath(".//m:t/text()", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"})),
+            "a=bc=d",
+        )
+
     def test_aligned_display_rows_are_preserved(self) -> None:
         rows = _display_math_rows(
             r"""\begin{align*}

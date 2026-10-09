@@ -22,6 +22,9 @@ NAMESPACES = {"m": MATH_NAMESPACE, "w": WORD_NAMESPACE}
 PANDOC_VERSION = "2.9.2.1"
 SUPPORTED_PANDOC_VERSIONS = {"2.9.2.1", "3.9.0.1"}
 _NAMED_OPERATORS = ("clip", "tanh")
+_ALIGNMENT_ENV_RE = re.compile(
+    r"\\begin\{(?:aligned|alignedat|align|alignat|gather|gathered|multline|split|cases|array|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\*?\}"
+)
 
 
 class MathConversionError(RuntimeError):
@@ -69,6 +72,14 @@ def _source_excerpt(source: str, limit: int = 100) -> str:
 
 def _normalize_backend_source(source: str) -> str:
     """Express named functions portably without changing their semantics."""
+    # Markdown users often write aligned rows directly inside a ``$$`` fence,
+    # e.g. ``a &= b \\ c &= d``, without carrying over the surrounding
+    # ``aligned`` environment from the TeX source.  Pandoc treats ``&`` as an
+    # error in a bare display, so give those rows the standard wrapper before
+    # handing the expression to the math backend.  An existing alignment
+    # environment is left untouched.
+    if re.search(r"(?<!\\)&", source) and not _ALIGNMENT_ENV_RE.search(source):
+        source = f"\\begin{{aligned}}\n{source}\n\\end{{aligned}}"
     for name in _NAMED_OPERATORS:
         source = re.sub(rf"\\{name}(?![A-Za-z])", rf"\\operatorname{{{name}}}", source)
     source = re.sub(
