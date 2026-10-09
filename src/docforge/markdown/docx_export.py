@@ -446,6 +446,9 @@ def reuse_unchanged_roundtrip_source(
         raise ValueError("roundtrip source snapshot escapes the bundle") from exc
     if not source.is_file() or _sha256(source) != source_sha:
         raise ValueError("roundtrip source snapshot is missing or its SHA-256 does not match")
+    original_sha = payload.get("source_sha256")
+    if original_sha is not None and original_sha != source_sha:
+        raise ValueError("roundtrip source SHA-256 does not match the source snapshot")
 
     for name, expected in dict(payload.get("section_sha256", {})).items():
         if Path(str(name)).is_absolute():
