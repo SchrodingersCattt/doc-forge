@@ -106,7 +106,7 @@ def split_table_row(line: str) -> tuple[str, ...]:
 
     A plain ``str.split("|")`` changes the table shape when a cell contains a
     literal pipe in a code span (``| `` `a|b` `` |``) or an inline formula
-    (``| $p(x|y)$ `` |).  Markdown also permits an escaped ``\|`` outside
+    (``| $p(x|y)$ `` |).  Markdown also permits an escaped ``\\|`` outside
     those spans.  Scan the row once and only treat an unescaped pipe outside
     a delimited span as a column separator.
     """
