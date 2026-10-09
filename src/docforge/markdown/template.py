@@ -10,7 +10,9 @@ import copy
 import hashlib
 import json
 import re
+import shutil
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -224,6 +226,22 @@ def parse_metadata(path: Path) -> ManuscriptMetadata:
 def _is_filled_metadata(value: str) -> bool:
     """Treat unresolved optional metadata markers as absent during assembly."""
     return value.strip().upper() not in {"", "TODO", "TBD", "TBA"}
+
+
+def _load_template_document(path: Path) -> DocumentType:
+    """Load a template's accepted view before python-docx inspects it.
+
+    python-docx intentionally exposes only ordinary ``w:p``/``w:r`` nodes;
+    text inside ``w:ins`` is therefore invisible while discovering template
+    roles and prototypes.  Materialize the reviewed package in a temporary
+    copy first, leaving the caller's template untouched and ensuring the
+    generated clean DOCX has no dependency on a revision-aware reader.
+    """
+    with tempfile.TemporaryDirectory(prefix="docforge-template-") as directory:
+        accepted = Path(directory) / path.name
+        shutil.copyfile(path, accepted)
+        accept_docx_revisions(accepted)
+        return Document(accepted)
 
 
 def _append_metadata_paragraphs(nodes: list, template, style_id: str, text: str, *, prototype=None) -> None:
@@ -1884,7 +1902,7 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
-    template = Document(template_path)
+    template = _load_template_document(template_path)
     if citation_format == "template":
         citation_style = (
             CitationStyle.SUPERSCRIPT

@@ -70,9 +70,11 @@ PASSTHROUGH_LOCAL_NAMES = {
     "softHyphen",
     "ptab",
     "sdt",
-    "oMath",
     "sectPr",
 }
+MATH_ROOT_NAMES = frozenset({"oMath", "oMathPara"})
+MATH_PUA_START = 0xE000
+MATH_PUA_SIZE = 0x1900
 # Internal citation links are ordinary runs plus a w:hyperlink wrapper.
 # Treating every hyperlink as opaque layout XML forces a whole-paragraph
 # replacement, so Word shows the old paragraph as live text and the new one
@@ -174,6 +176,40 @@ def _inside(node: etree._Element, local_name: str) -> bool:
             return True
         parent = parent.getparent()
     return False
+
+
+def _math_roots(paragraph: etree._Element) -> list[etree._Element]:
+    """Return top-level OMML objects in document order."""
+    roots: list[etree._Element] = []
+    for node in paragraph.iter():
+        qname = etree.QName(node)
+        if qname.namespace != M or qname.localname not in MATH_ROOT_NAMES:
+            continue
+        ancestor = node.getparent()
+        nested = False
+        while ancestor is not None and ancestor is not paragraph:
+            ancestor_qname = etree.QName(ancestor)
+            if ancestor_qname.namespace == M and ancestor_qname.localname in MATH_ROOT_NAMES:
+                nested = True
+                break
+            ancestor = ancestor.getparent()
+        if not nested:
+            roots.append(node)
+    return roots
+
+
+def _math_token(root: etree._Element, occupied: dict[str, etree._Element] | None = None) -> str:
+    """Return a stable one-character token for one OMML object."""
+    digest = hashlib.sha1(etree.tostring(root, method="c14n")).digest()
+    offset = int.from_bytes(digest[:2], "big") % MATH_PUA_SIZE
+    while occupied is not None:
+        token = chr(MATH_PUA_START + offset)
+        prior = occupied.get(token)
+        if prior is None or etree.tostring(prior, method="c14n") == etree.tostring(root, method="c14n"):
+            occupied[token] = root
+            return token
+        offset = (offset + 1) % MATH_PUA_SIZE
+    return chr(MATH_PUA_START + offset)
 
 
 def visible_text(element: etree._Element, view: str = "final") -> str:
@@ -333,6 +369,38 @@ def _float_label(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _stable_block_label(block: Block) -> str | None:
+    """Return a label that identifies a block across wording changes.
+
+    TeX bibliography entries carry ``ref_<label>`` bookmarks.  Markdown
+    reference paragraphs generally expose the same identity as a leading
+    ``[label]`` or ``label.`` marker.  Comparing those labels before a text
+    similarity score prevents a changed bibliography entry from being paired
+    with its neighbour merely because both entries share an author's name.
+    """
+    for marker in block.element.findall(".//w:bookmarkStart", NS):
+        if _inside(marker, "del") or _inside(marker, "moveFrom"):
+            continue
+        name = marker.get(f"{{{W}}}name", "")
+        if name.startswith("ref_"):
+            return name
+    if block.kind != "p":
+        return None
+    style = block.style.casefold()
+    if "reference" not in style and "bibliograph" not in style:
+        return None
+    # Bibliographies emitted by Pandoc commonly use ``[1]`` while hand-written
+    # lists use ``1.`` or ``1)``.  Keep the bracketed marker as its own form;
+    # requiring punctuation after the closing bracket would miss ``[1] Doe``.
+    match = re.match(
+        r"\s*(?:\[([^\]]+)\](?:\s|\t|$)|([A-Za-z]?\d+)[.)](?:\s|\t|$))",
+        block.text,
+    )
+    if match is None:
+        return None
+    return match.group(1) or match.group(2)
+
+
 def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> float:
     if left.kind != right.kind:
         return -10.0
@@ -345,6 +413,13 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     label_a, label_b = _float_label(a), _float_label(b)
     if label_a and label_b and label_a != label_b:
         return -8.0
+    stable_a, stable_b = _stable_block_label(left), _stable_block_label(right)
+    if stable_a and stable_b:
+        if stable_a != stable_b:
+            return -8.0
+        # A stable key is stronger evidence than a wording ratio.  Keep the
+        # entry in place even when an author list or title was rewritten.
+        return 7.0
     if left.kind != "p":
         if a == b:
             return 5.0
@@ -424,7 +499,87 @@ def _align_scored(
         else:
             edits.append(("insert", None, j - 1))
             j -= 1
-    return list(reversed(edits))
+    return _pair_in_place_rewrites(base, current, list(reversed(edits)))
+
+
+def _same_slot(left: Block, right: Block) -> bool:
+    """Whether two blocks can represent an in-place rewrite.
+
+    Keep paragraph styles and drawing/table geometry stable.  This lets a
+    manuscript rewrite become a character diff while preserving true block
+    insertions, deletions, and moved figures as structural revisions.
+    """
+    left_label, right_label = _stable_block_label(left), _stable_block_label(right)
+    if left_label and right_label and left_label != right_label:
+        return False
+    return (
+        left.kind == right.kind
+        and left.drawing == right.drawing
+        and (left.kind != "p" or left.style == right.style)
+    )
+
+
+def _same_block_shape(base: list[Block], current: list[Block]) -> bool:
+    """Return whether every document slot has the same layout role."""
+    return len(base) == len(current) and all(
+        _same_slot(left, right) for left, right in zip(base, current)
+    )
+
+
+def _pair_in_place_rewrites(
+    base: list[Block],
+    current: list[Block],
+    edits: list[tuple[str, int | None, int | None]],
+) -> list[tuple[str, int | None, int | None]]:
+    """Pair adjacent delete/insert slots with the same layout role.
+
+    The paragraph aligner intentionally rejects weak textual matches so it
+    does not splice unrelated sentences.  A weak match is still an in-place
+    rewrite when the two sides occupy the same run of paragraph slots and
+    carry the same style.  Pair only such slots; leftover actions retain their
+    structural insertion/deletion semantics.
+    """
+    result: list[tuple[str, int | None, int | None]] = []
+    cursor = 0
+    while cursor < len(edits):
+        if edits[cursor][0] == "match":
+            result.append(edits[cursor])
+            cursor += 1
+            continue
+        end = cursor
+        while end < len(edits) and edits[end][0] != "match":
+            end += 1
+        run = edits[cursor:end]
+        deletes = [item for item in run if item[0] == "delete"]
+        inserts = [item for item in run if item[0] == "insert"]
+        paired_base: dict[int, int] = {}
+        paired_current: set[int] = set()
+        # Pair in source order.  More elaborate matching would risk turning a
+        # genuine paragraph move into a rewrite; the stable style/geometry
+        # check is deliberately conservative.
+        for deleted, inserted in zip(deletes, inserts):
+            base_index, current_index = deleted[1], inserted[2]
+            if base_index is None or current_index is None:
+                continue
+            if _same_slot(base[base_index], current[current_index]):
+                paired_base[base_index] = current_index
+                paired_current.add(current_index)
+        # Re-emit unpaired actions in their original order.  A paired deletion
+        # emits the in-place match at its baseline position; its insertion is
+        # then omitted, preserving the surrounding paragraph order.
+        for item in run:
+            if item[0] == "delete":
+                base_index = item[1]
+                if base_index in paired_base:
+                    result.append(("match", base_index, paired_base[base_index]))
+                    continue
+            elif item[0] == "insert":
+                current_index = item[2]
+                if current_index in paired_current:
+                    continue
+            result.append(item)
+        cursor = end
+    return result
 
 
 def _revision_shell(node: etree._Element) -> etree._Element | None:
@@ -468,11 +623,44 @@ def _hidden_revision_nodes(paragraph: etree._Element) -> list[tuple[int, etree._
     return result
 
 
-def _segments(paragraph: etree._Element, view: str) -> tuple[str, list[tuple[int, int, Style]]]:
+def _segments(
+    paragraph: etree._Element,
+    view: str,
+    *,
+    atomic_math: bool = False,
+) -> tuple[str, list[tuple[int, int, Style]]]:
     pieces: list[str] = []
     spans: list[tuple[int, int, Style]] = []
     offset = 0
+    roots = _math_roots(paragraph) if atomic_math else []
+    root_set = set(roots)
+    occupied: dict[str, etree._Element] = {}
     for node in paragraph.iter():
+        if atomic_math and node is not paragraph and node not in root_set:
+            ancestor = node.getparent()
+            inside_math = False
+            while ancestor is not None and ancestor is not paragraph:
+                if ancestor in root_set:
+                    inside_math = True
+                    break
+                ancestor = ancestor.getparent()
+            if inside_math:
+                continue
+        if atomic_math and node in root_set:
+            if view == "final" and (_inside(node, "del") or _inside(node, "moveFrom")):
+                continue
+            value = _math_token(node, occupied)
+            style = Style(None)
+            run = node
+            while run is not None and run.tag != f"{{{W}}}r":
+                run = run.getparent()
+            if run is not None:
+                rpr = run.find("./w:rPr", NS)
+                style = Style(copy.deepcopy(rpr) if rpr is not None else None, revision=_revision_shell(node), link=_hyperlink_attrs(node))
+            pieces.append(value)
+            spans.append((offset, offset + 1, style))
+            offset += 1
+            continue
         if node.tag in (f"{{{W}}}tab", f"{{{W}}}br", f"{{{W}}}cr"):
             value = "\t" if node.tag == f"{{{W}}}tab" else "\n"
         elif node.tag in (f"{{{W}}}t", f"{{{W}}}delText"):
@@ -612,7 +800,7 @@ def _tokenize(
     return result
 
 
-def _events(paragraph: etree._Element) -> list[Event]:
+def _events(paragraph: etree._Element, *, atomic_math: bool = False) -> list[Event]:
     tags = {
         f"{{{W}}}commentRangeStart": "start",
         f"{{{W}}}commentRangeEnd": "end",
@@ -622,11 +810,22 @@ def _events(paragraph: etree._Element) -> list[Event]:
     }
     events: list[Event] = []
     offset = 0
+    roots = _math_roots(paragraph) if atomic_math else []
+    root_set = set(roots)
 
     def walk(node: etree._Element) -> None:
         nonlocal offset
         if node.tag in (f"{{{W}}}del", f"{{{W}}}moveFrom"):
             return
+        if atomic_math and node in root_set:
+            offset += 1
+            return
+        if atomic_math:
+            ancestor = node.getparent()
+            while ancestor is not None and ancestor is not paragraph:
+                if ancestor in root_set:
+                    return
+                ancestor = ancestor.getparent()
         if node.tag in tags:
             owner = node.getparent() if tags[node.tag] == "reference" else node
             events.append(Event(tags[node.tag], offset, len(events), copy.deepcopy(owner)))
@@ -750,23 +949,95 @@ def _append_tracked(
         if index0 is not None:
             for offset in range(index, end):
                 boundary.setdefault(index0 + offset, len(nodes))
-        payload = (
-            [_run(token) for token in group]
-            if kind is None
-            else [_revision(kind, group, context)]
-        )
         if link is None:
-            nodes.extend(payload)
+            nodes.extend(
+                [_run(token) for token in group]
+                if kind is None
+                else [_revision(kind, group, context)]
+            )
         else:
             hyperlink = etree.Element(f"{{{W}}}hyperlink")
             for key, value in link:
                 hyperlink.set(key, value)
-            for node in payload:
-                hyperlink.append(node)
-            nodes.append(hyperlink)
+            if kind is None:
+                # An ordinary hyperlink remains a direct paragraph child.
+                # Tracked hyperlinks are handled below so Word/WPS sees the
+                # revision as the outer wrapper.
+                for token in group:
+                    hyperlink.append(_run(token))
+                nodes.append(hyperlink)
+            else:
+                # Word accepts a revision around a hyperlink, while several
+                # readers (notably WPS) hide a link when the ``w:ins``/``w:del``
+                # marker is nested inside ``w:hyperlink``.  Keep one native
+                # revision wrapper and put the relationship-bearing hyperlink
+                # inside it.
+                revision = etree.Element(f"{{{W}}}{kind}", attrib=context.attrs())
+                for token in group:
+                    # The outer marker is the only revision shell allowed in
+                    # this branch; an accepted current package has no stale
+                    # insertion wrappers to preserve here.
+                    hyperlink.append(_run(token, deleted=kind == "del"))
+                revision.append(hyperlink)
+                nodes.append(revision)
         if index0 is not None:
             boundary[index0 + end] = len(nodes)
         index = end
+
+
+def _math_token_map(paragraph: etree._Element) -> dict[str, etree._Element]:
+    occupied: dict[str, etree._Element] = {}
+    return {
+        _math_token(root, occupied): root
+        for root in _math_roots(paragraph)
+    }
+
+
+def _replace_math_tokens(
+    nodes: list[etree._Element],
+    base_math: dict[str, etree._Element],
+    current_math: dict[str, etree._Element],
+    context: Context,
+) -> None:
+    """Replace private math tokens with their original OMML objects."""
+    for parent in list(nodes):
+        for child in list(parent.iter()):
+            if child.tag not in (f"{{{W}}}t", f"{{{W}}}delText"):
+                continue
+            token = child.text or ""
+            root = current_math.get(token)
+            if root is None:
+                root = base_math.get(token)
+            if root is None:
+                continue
+            run = child.getparent()
+            if run is None or run.tag != f"{{{W}}}r":
+                continue
+            revision = run.getparent()
+            kind: str | None = None
+            while revision is not None:
+                local = etree.QName(revision).localname
+                if local in ("del", "moveFrom"):
+                    kind = "del"
+                    break
+                if local in ("ins", "moveTo"):
+                    kind = "ins"
+                    break
+                revision = revision.getparent()
+            replacement = copy.deepcopy(root)
+            if kind == "del":
+                _mark_math_structures(replacement, "del", context)
+            owner = run.getparent()
+            if owner is None:
+                try:
+                    position = nodes.index(parent)
+                except ValueError:
+                    continue
+                nodes[position] = replacement
+            else:
+                position = owner.index(run)
+                owner.remove(run)
+                owner.insert(position, replacement)
 
 
 def _merge_paragraph(
@@ -776,9 +1047,12 @@ def _merge_paragraph(
     *,
     preserve_base_revisions: bool = False,
 ) -> etree._Element:
-    base_text, base_spans = _segments(base, "final")
-    current_text, current_spans = _segments(current, "final")
-    events = _events(base)
+    atomic_math = bool(_math_roots(base) or _math_roots(current))
+    base_math = _math_token_map(base) if atomic_math else {}
+    current_math = _math_token_map(current) if atomic_math else {}
+    base_text, base_spans = _segments(base, "final", atomic_math=atomic_math)
+    current_text, current_spans = _segments(current, "final", atomic_math=atomic_math)
+    events = _events(base, atomic_math=atomic_math)
     base_has_revisions = preserve_base_revisions and _has_revisions(base)
     # Unchanged final text keeps the reviewed w:ins/w:del author, date, and
     # boundaries. Rebuilding the paragraph would drop metadata deletions such
@@ -854,6 +1128,8 @@ def _merge_paragraph(
             placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(
                 Event("baseline-revision", offset, -1, revision)
             )
+    if atomic_math:
+        _replace_math_tokens(nodes, base_math, current_math, context)
     result = etree.Element(f"{{{W}}}p", nsmap=current.nsmap)
     ppr = current.find("./w:pPr", NS)
     ppr_from_current = ppr is not None
@@ -910,6 +1186,21 @@ def _mark_deleted_runs(element: etree._Element, context: Context) -> None:
             parent = child.getparent()
             if parent is None:
                 continue
+            index = parent.index(child)
+            parent.remove(child)
+            wrapper = etree.Element(f"{{{W}}}del", attrib=context.attrs())
+            wrapper.append(child)
+            parent.insert(index, wrapper)
+            continue
+        if local == "hyperlink":
+            # A revision marker nested inside ``w:hyperlink`` is ignored by
+            # WPS (and can make Word repair the package).  Move the marker
+            # around the complete relationship-bearing hyperlink instead.
+            parent = child.getparent()
+            if parent is None:
+                continue
+            for text in child.iter(f"{{{W}}}t"):
+                text.tag = f"{{{W}}}delText"
             index = parent.index(child)
             parent.remove(child)
             wrapper = etree.Element(f"{{{W}}}del", attrib=context.attrs())
@@ -1541,14 +1832,18 @@ def create_tracked_docx(
     preserve_base_revisions: bool = True,
     ratio_cache: Path | None = None,
     workers: int | None = None,
+    report_path: Path | None = None,
 ) -> dict[str, int]:
     """Write ``output_path`` as ``current_path`` tracked against ``base_path``.
 
     ``ratio_cache`` persists paragraph similarity ratios between runs, and
     ``workers`` sets the process count for ratios not yet cached (``1`` keeps
-    the computation in this process). Neither changes the result.
+    the computation in this process). Neither changes the result. When
+    ``report_path`` is provided, write a JSON alignment report without
+    changing the historical count-only return value.
     """
     validate_output_path(output_path)
+    validate_output_path(report_path, label="report")
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
@@ -1570,16 +1865,64 @@ def create_tracked_docx(
     ]
     context = Context(author, _next_id(raw_base_root))
     carry_base, save_base_relationships = _base_relationships(base_package, current_package)
-    summary = {"matched": 0, "changed": 0, "inserted": 0, "deleted": 0, "tables_replaced": 0}
+    summary: dict[str, int] = {
+        "matched": 0,
+        "changed": 0,
+        "inserted": 0,
+        "deleted": 0,
+        "tables_replaced": 0,
+    }
     children: list[etree._Element] = []
     aligned = _align(
         base_blocks, current_blocks, cache_path=ratio_cache, workers=workers
     )
+    alignment_report: list[dict[str, object]] = []
+    for action, base_index, current_index in aligned:
+        old_block = base_blocks[base_index] if base_index is not None else None
+        new_block = current_blocks[current_index] if current_index is not None else None
+        ratio = (
+            _pair_ratio((_normalize(old_block.text), _normalize(new_block.text)))
+            if old_block is not None and new_block is not None
+            and old_block.kind == new_block.kind == "p"
+            else None
+        )
+        if action == "match":
+            if old_block is not None and new_block is not None and _normalize(old_block.text) == _normalize(new_block.text):
+                reason = "unchanged"
+            elif old_block is not None and new_block is not None and (_needs_passthrough(old_block.element) or _needs_passthrough(new_block.element)):
+                reason = "layout-passthrough"
+            elif old_block is not None and new_block is not None and base_index == current_index and ratio is not None and ratio < 0.55:
+                reason = "low-ratio-same-slot-word-diff"
+            else:
+                reason = "word-diff"
+        elif action == "insert":
+            reason = "new-block"
+        else:
+            reason = "removed-block"
+        alignment_report.append(
+            {
+                "action": action,
+                "reason": reason,
+                "ratio": ratio,
+                "baseline_index": base_index,
+                "current_index": current_index,
+                "baseline_text": old_block.text if old_block is not None else None,
+                "current_text": new_block.text if new_block is not None else None,
+            }
+        )
     matched = sum(action == "match" for action, _, _ in aligned)
     # A rewritten document has too few shared paragraphs to interleave. Word
     # then drops old sentences into the new cover and headings. Keep the new
     # pages intact and put the old document after them as deletions.
-    block_replace = matched < 0.25 * max(len(aligned), 1)
+    # A document whose slots are unchanged in kind/style is an in-place edit,
+    # even when every sentence was rewritten and textual similarity is near
+    # zero.  Keep those slots paired so ``_merge_paragraph`` can emit word-
+    # level revisions.  Full block replacement remains appropriate for a
+    # structural rewrite (different geometry, figures, or paragraph roles).
+    block_replace = (
+        not _same_block_shape(base_blocks, current_blocks)
+        and matched < 0.25 * max(len(aligned), 1)
+    )
     if block_replace:
         aligned = [("insert", None, index) for index in range(len(current_blocks))]
         aligned += [("delete", index, None) for index in range(len(base_blocks))]
@@ -1707,6 +2050,24 @@ def create_tracked_docx(
     if _final_special_structure(current_root) != _final_special_structure(original_current_root):
         raise AssertionError("Tracked final view changed non-text layout controls from the generated DOCX")
     current_package.write(output_path, overwrite=overwrite)
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "schema": "docforge.redline.v1",
+                    "baseline": str(base_path),
+                    "current": str(current_path),
+                    "output": str(output_path),
+                    "actions": alignment_report,
+                    "summary": summary,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     return summary
 
 
