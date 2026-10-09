@@ -59,7 +59,14 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 INLINE_TOKEN_RE = re.compile(
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
+    # A doubled dollar delimiter belongs to a display-math block.  When it
+    # occurs inside prose (for example an unmatched ``$$``), it must remain
+    # literal text: allowing the single-dollar alternative to start at the
+    # second character turns the remainder into inline math and strips the
+    # authored spaces.  Guard both sides so only a real, single-dollar pair
+    # is tokenized here; standalone ``$$`` lines are parsed as block equations
+    # by :func:`parse_markdown`.
+    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$))"
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -255,6 +262,14 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             blocks.append(Block("table_caption", table_caption.group(1).strip()))
             i += 1
             continue
+        if "$$" in line:
+            # Display delimiters are structural blocks in this parser.  A
+            # doubled delimiter embedded in prose is almost always a damaged
+            # display equation; treating its second ``$`` as an inline opener
+            # silently eats spaces and produces misleading DOCX text.
+            raise ValueError(
+                f"Display equation delimiter must occupy its own line in {path}:{i + 1}"
+            )
         paragraph_lines.append(line)
         i += 1
     flush_paragraph()

@@ -52,13 +52,15 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
     alg_n = 0
     ed_fig_n = 0
     ed_tbl_n = 0
+    eq_n = 0
     sec_n = 0
     subsec_n = 0
     suppnote_n = 0
     supprecord_n = 0
     in_extended_data = False
+    current_float: str | None = None
     for m in re.finditer(
-        r"\\refstepcounter\{(suppnote|supprecord)\}|\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm)\b|\\label\{([^}]*)\}",
+        r"\\refstepcounter\{(suppnote|supprecord)\}|\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm|equation)\b|\\label\{([^}]*)\}",
         body
     ):
         if m.group(1):
@@ -86,25 +88,37 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
             continue
         env = m.group(4)
         if env == "figure":
+            current_float = "figure"
             if in_extended_data:
                 ed_fig_n += 1
             else:
                 fig_n += 1
         elif env in ("table", "longtable"):
+            current_float = "table"
             if in_extended_data:
                 ed_tbl_n += 1
             else:
                 tbl_n += 1
         elif env == "algorithm":
             alg_n += 1
+        elif env == "equation":
+            current_float = "equation"
+            eq_n += 1
         elif m.group(5):
             key = m.group(5)
-            if key.startswith("fig:"):
-                result[key] = f"{ed_fig_n}" if key.startswith("fig:ed_") else f"{prefix}{fig_n}"
-            elif key.startswith("tab:"):
-                result[key] = f"{ed_tbl_n}" if key.startswith("tab:ed_") else f"{prefix}{tbl_n}"
+            # Keep the established short prefixes, while accepting the long
+            # forms used by ``cleveref``/``autoref`` and arbitrary labels
+            # attached to a float.  The environment counter at this point is
+            # authoritative, so a prose ``\\ref{overview}`` can resolve even
+            # when the source does not encode the kind in the id.
+            if key.startswith(("fig:", "figure:")):
+                result[key] = f"{ed_fig_n}" if key.startswith(("fig:ed_", "figure:ed_")) else f"{prefix}{fig_n}"
+            elif key.startswith(("tab:", "table:")):
+                result[key] = f"{ed_tbl_n}" if key.startswith(("tab:ed_", "table:ed_")) else f"{prefix}{tbl_n}"
             elif key.startswith("alg:"):
                 result[key] = f"{prefix}{alg_n}"
+            elif key.startswith(("eq:", "equation:")):
+                result[key] = f"{prefix}{eq_n}"
             elif key.startswith("si:"):
                 # SI labels: use section/subsection numbering
                 if subsec_n > 0:
@@ -121,7 +135,19 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
             elif key.startswith("sec:"):
                 result[key] = f"{prefix}{sec_n}"
             else:
-                result[key] = key
+                # Labels without a semantic prefix inherit the most recent
+                # float counter.  This mirrors TeX's ``\\label`` semantics,
+                # where a label records the current counter independently of
+                # its spelling.  A bare label outside a numbered structure
+                # remains available as its id for backwards compatibility.
+                if current_float == "figure":
+                    result[key] = f"{prefix}{fig_n}"
+                elif current_float == "table":
+                    result[key] = f"{prefix}{tbl_n}"
+                elif current_float == "equation":
+                    result[key] = f"{prefix}{eq_n}"
+                else:
+                    result[key] = key
     return result
 
 
@@ -328,8 +354,18 @@ def add_rich_text(paragraph, tex: str, resolver: CitationResolver | None = None,
                   font_size=PT_BODY, font_name=FONT_BODY,
                   citations_superscript: bool = True):
     """Tokenize *tex* and append formatted runs to *paragraph*."""
+    def resolve_label(key: str) -> str:
+        context = _context()
+        value = context.label_map.get(key)
+        if value is None:
+            # A placeholder such as ``??`` can make a generated document look
+            # valid while silently severing a cross-reference.  Fail at the
+            # source label so callers can fix the exact id in their TeX.
+            raise ValueError(f"Unresolved reference label: {key}")
+        return value
+
     def append_tex(chunk: str):
-        spans = tokenize_tex(chunk, resolve_ref=lambda key:_context().label_map.get(key,"??"))
+        spans = tokenize_tex(chunk, resolve_ref=resolve_label)
         for sp in spans:
             run = paragraph.add_run()
             _apply_span(run, sp, font_size=font_size, font_name=font_name)
@@ -840,7 +876,8 @@ def _find_figure(name: str) -> Path | None:
 
 def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
                resolver: CitationResolver, width_inches: float = 6.0,
-               extended: bool = False, float_prefix: str = ""):
+               extended: bool = False, float_prefix: str = "",
+               labels: list[str] | None = None):
     context=_context()
     if extended:
         context.ed_fig_counter+=1
@@ -876,6 +913,12 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
         caption_tex = re.sub(r"\n\s*", " ", caption_tex)
         caption_tex = re.sub(r"  +", " ", caption_tex).strip()
         add_rich_text(cp, caption_tex, resolver, font_size=PT_CAPTION)
+    # A float's label is its stable identity.  Keep it on the caption so
+    # references and review tools can target the same object that receives the
+    # generated number.  Multiple labels on one float are legal TeX and all
+    # resolve to this single caption.
+    for label in labels or []:
+        add_bookmark(cp, _reference_bookmark_name(label))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1393,7 +1436,7 @@ def _set_table_column_widths(tbl, ncols: int, rows: list[list[TableCell]]):
 
 def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | None,
               resolver: CitationResolver, extended: bool = False,
-              float_prefix: str = ""):
+              float_prefix: str = "", labels: list[str] | None = None):
     context=_context()
     if extended:
         context.ed_tbl_counter+=1
@@ -1414,6 +1457,8 @@ def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | Non
         caption_tex = re.sub(r"\n\s*", " ", caption_tex)
         caption_tex = re.sub(r"  +", " ", caption_tex).strip()
         add_rich_text(cp, caption_tex, resolver, font_size=PT_CAPTION)
+    for label in labels or []:
+        add_bookmark(cp, _reference_bookmark_name(label))
 
     if not rows:
         return
@@ -1895,6 +1940,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             fig_names = re.findall(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", fig_block)
             fig_name = fig_names if len(fig_names) > 1 else (fig_names[0] if fig_names else "")
             caption_raw = _extract_braced_arg(fig_block, r"\caption")
+            figure_labels = re.findall(r"\\label\{([^}]+)\}", fig_block)
             add_figure(
                 doc,
                 fig_name,
@@ -1902,6 +1948,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 resolver,
                 extended=in_extended_data,
                 float_prefix=float_prefix,
+                labels=figure_labels,
             )
             i = j
             continue
@@ -1917,6 +1964,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 j += 1
             caption_raw = _extract_braced_arg(blk, r"\caption")
             rows = _parse_longtable_rows(blk) if is_lt else _parse_tabular_rows(blk)
+            table_labels = re.findall(r"\\label\{([^}]+)\}", blk)
             add_table(
                 doc,
                 rows,
@@ -1924,6 +1972,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 resolver,
                 extended=in_extended_data,
                 float_prefix=float_prefix,
+                labels=table_labels,
             )
             i = j
             continue

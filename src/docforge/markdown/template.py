@@ -1208,12 +1208,33 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
 
 
 def _template_uses_superscript_citations(document: DocumentType) -> bool:
+    """Detect an explicit standalone superscript citation sample.
+
+    A template often contains superscript numerals for formulae, units, or
+    author affiliations.  Treating every numeric ``w:vertAlign`` run as a
+    citation style marker changes those documents to superscript references
+    accidentally.  Keep the legacy convenience for a deliberately isolated
+    numeric sample (the common ``1–3`` citation marker), while requiring that
+    the run be standalone in its paragraph so formula-context digits are
+    never used to infer citation formatting.
+    """
     for paragraph in document.paragraphs:
-        for run in paragraph.runs:
+        runs = paragraph.runs
+        for index, run in enumerate(runs):
             value = run.text.strip()
             marker = run._r.find(".//" + qn("w:vertAlign"))
-            if marker is not None and marker.get(qn("w:val")) == "superscript" and re.fullmatch(r"[0-9]+(?:[,–-][0-9]+)*", value):
-                return True
+            if marker is None or marker.get(qn("w:val")) != "superscript":
+                continue
+            if not re.fullmatch(r"[0-9]+(?:[,–-][0-9]+)*", value):
+                continue
+            # Adjacent baseline runs are prose/formula context rather than a
+            # standalone citation specimen.  Empty runs are ignored because
+            # Word may emit them for formatting boundaries.
+            previous = next((item.text.strip() for item in reversed(runs[:index]) if item.text.strip()), "")
+            following = next((item.text.strip() for item in runs[index + 1 :] if item.text.strip()), "")
+            if previous or following:
+                continue
+            return True
     return False
 
 
