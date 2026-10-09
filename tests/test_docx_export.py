@@ -367,6 +367,33 @@ def test_redline_keeps_small_citation_edits_inside_one_paragraph(tmp_path: Path)
     assert _final_blocks(_accepted_revision_view(root)) == _final_blocks(current_root)
 
 
+
+def test_redline_ignores_equivalent_run_splits_inside_unchanged_words(tmp_path: Path) -> None:
+    """Equivalent Word runs must not become a spurious delete/insert pair."""
+
+    base = Document()
+    paragraph = base.add_paragraph()
+    paragraph.add_run("Dynamic vapor sorpti")
+    paragraph.add_run("on shows old.")
+    base.save(tmp_path / "base.docx")
+
+    current = Document()
+    current.add_paragraph("Dynamic vapor sorption shows new.")
+    current.save(tmp_path / "current.docx")
+
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(tmp_path / "base.docx", tmp_path / "current.docx", tracked)
+    from lxml import etree
+
+    root = etree.fromstring(zipfile.ZipFile(tracked).read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    deleted = "".join(root.xpath(".//w:delText/text()", namespaces=ns))
+    inserted = "".join(root.xpath(".//w:ins//w:t/text()", namespaces=ns))
+    assert "sorption" not in deleted
+    assert "sorption" not in inserted
+    assert "old" in deleted
+    assert "new" in inserted
+
 def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:
     from lxml import etree
 
