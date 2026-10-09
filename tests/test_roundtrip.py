@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
 from docx import Document
 
-from docforge.roundtrip import roundtrip_docx
+from docforge.roundtrip import audit_docx_package, roundtrip_docx
 
 
 PANDOC_AVAILABLE = shutil.which("pandoc") is not None
@@ -26,6 +27,8 @@ def test_roundtrip_reuses_exact_source_then_rebuilds_changed_markdown(tmp_path: 
     exact = roundtrip_docx(source, workdir=bundle, output=tmp_path / "exact.docx", force=True)
     assert exact.mode == "exact-reuse"
     assert exact.output_sha256 == exact.source_sha256
+    assert exact.validation["output_package"]["passed"] is True
+    assert exact.validation["render"]["status"] in {"passed", "skipped"}
     assert (tmp_path / "exact.docx").read_bytes() == source.read_bytes()
 
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
@@ -60,3 +63,22 @@ def test_roundtrip_rejects_snapshot_path_outside_bundle(tmp_path: Path) -> None:
     (bundle / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="escapes"):
         roundtrip_docx(source, workdir=bundle, output=tmp_path / "output.docx", force=True)
+
+
+def test_roundtrip_audits_relationships_before_publishing(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Body")
+    document.save(source)
+    assert audit_docx_package(source)["passed"] is True
+
+    broken = tmp_path / "broken.docx"
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(broken, "w") as target:
+        for info in archive.infolist():
+            payload = archive.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                payload = payload.replace(b"Target=\"styles.xml\"", b"Target=\"missing-styles.xml\"")
+            target.writestr(info, payload)
+    with pytest.raises(ValueError, match="missing part"):
+        audit_docx_package(broken)
+
