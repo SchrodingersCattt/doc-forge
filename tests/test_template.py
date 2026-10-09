@@ -11,6 +11,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from PIL import Image
 from docforge.cli import build_parser
 
@@ -70,6 +71,65 @@ def _figure_template(path: Path, image: Path) -> None:
     document.add_paragraph().add_run().add_picture(str(image), width=1000000)
     document.add_paragraph("[FIGURE CAPTION] [placeholder text]").style = document.styles["Caption"]
     document.save(path)
+
+
+def test_angewandte_communication_styles_are_not_collapsed_to_normal(tmp_path: Path) -> None:
+    document = Document()
+    created: dict[str, str] = {}
+    for name, size in (
+        ("Title1", 16),
+        ("Authors", 11),
+        ("Adress", 9),
+        ("Abstract", 10),
+        ("P1", 10),
+        ("H1", 11),
+        ("FigureCaption", 8),
+        ("References", 7),
+    ):
+        style = document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+        style.font.size = Pt(size)
+        created[name] = style.style_id
+    document.add_paragraph("Title").style = document.styles["Title1"]
+    document.add_paragraph("Authors").style = document.styles["Authors"]
+    document.add_paragraph("Address").style = document.styles["Adress"]
+    document.add_paragraph("Abstract: sample").style = document.styles["Abstract"]
+    document.add_paragraph("Main text paragraph.").style = document.styles["P1"]
+    document.add_paragraph("Heading").style = document.styles["H1"]
+    document.add_paragraph("Figure 1. Caption.").style = document.styles["FigureCaption"]
+    document.add_paragraph("[1] Reference.").style = document.styles["References"]
+    styles = discover_template_styles(document)
+    assert styles["title"] == created["Title1"]
+    assert styles["authors"] == created["Authors"]
+    assert styles["affiliations"] == created["Adress"]
+    assert styles["abstract"] == created["Abstract"]
+    assert styles["body"] == created["P1"]
+    assert styles["heading_1"] != "Normal"
+    assert styles["caption"] == created["FigureCaption"]
+    assert styles["reference"] == created["References"]
+
+    template = tmp_path / "angew.docx"
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# TITLE\n\nA title\n# AUTHOR\n\nA. Author\n# AFFILIATION:\n\nA Lab\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.md"
+    source.write_text("# Introduction\n\nBody text stays in the template measure.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    rendered = Document(output)
+    body = next(p for p in rendered.paragraphs if p.text.startswith("Body text"))
+    assert body.style.style_id == created["P1"]
+    alignment = body._p.find(".//" + qn("w:jc"))
+    assert alignment is None or alignment.get(qn("w:val")) != "center"
+    assert all(run._r.rPr.sz.get(qn("w:val")) == "22" for run in body.runs if run.text)
+    title = next(p for p in rendered.paragraphs if p.text == "A title")
+    assert title.style.style_id == created["Title1"]
+    for run in title.runs:
+        if not run.text or run._r.rPr is None or run._r.rPr.sz is None:
+            continue
+        assert run._r.rPr.sz.get(qn("w:val")) != "36"
 
 
 def test_metadata_and_style_discovery(tmp_path: Path) -> None:
@@ -397,6 +457,15 @@ def test_replacement_figure_drops_template_crop_and_fills_section_width(tmp_path
     assert abs((shape.width / shape.height) - (4 / 3)) < 1e-6
     source_rects = shape._inline.findall(".//" + qn("a:srcRect"))
     assert all(not node.attrib for node in source_rects)
+
+
+def test_word_compatible_image_bytes_composites_transparency_on_white(tmp_path: Path) -> None:
+    source = tmp_path / "alpha.png"
+    Image.new("RGBA", (4, 4), (0, 0, 0, 0)).save(source)
+    payload = _word_compatible_image_bytes(source)
+    with Image.open(BytesIO(payload)) as image:
+        assert image.mode == "RGB"
+        assert image.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_word_compatible_image_bytes_normalizes_large_rgba_png(tmp_path: Path) -> None:

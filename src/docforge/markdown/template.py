@@ -335,29 +335,41 @@ def _find_style(document: DocumentType, candidates: Sequence[str]) -> str:
 
 def discover_template_styles(document: DocumentType) -> dict[str, str]:
     candidates = {
-        "title": ("BBAuthorName", "BB_Author_Name", "BATitle", "BA_Title", "Title"),
-        "authors": ("BBAuthorName", "BB_Author_Name", "Author", "Normal"),
+        "title": ("BBAuthorName", "BB_Author_Name", "BATitle", "BA_Title", "Title1", "Title"),
+        "authors": ("BBAuthorName", "BB_Author_Name", "Authors", "Author", "Normal"),
         "affiliations": (
             "FACorrespondingAuthorFootnote",
             "FA_Corresponding_Author_Footnote",
+            "Adress",
+            "Address",
             "BCAuthorAddress",
             "BC_Author_Address",
             "Normal",
         ),
-        "abstract_title": ("BDAbstractTitle", "BD_Abstract_Title", "Heading 1", "1"),
-        "abstract": ("BDAbstract", "BD_Abstract", "Normal"),
-        "body": ("TAMainText1", "TAMainText", "TA_Main_Text", "Normal"),
-        "heading_1": ("Heading 1", "1"),
-        "heading_2": ("Heading 2", "2"),
-        "heading_3": ("Heading 3", "3"),
-        "caption": ("a4", "Caption", "VA_Figure_Caption"),
+        "abstract_title": ("BDAbstractTitle", "BD_Abstract_Title", "Heading 1", "H1", "1"),
+        "abstract": ("BDAbstract", "BD_Abstract", "Abstract", "Normal"),
+        "body": (
+            "TAMainText1",
+            "TAMainText",
+            "TA_Main_Text",
+            "P1",
+            "MainText",
+            "Main Text",
+            "P1_without_Indendation",
+            "Normal",
+        ),
+        "heading_1": ("Heading 1", "H1", "1"),
+        "heading_2": ("Heading 2", "H2", "2", "H1"),
+        "heading_3": ("Heading 3", "H3", "3", "H1"),
+        "caption": ("a4", "FigureCaption", "Caption", "VA_Figure_Caption", "SchemeCaption"),
         "references_heading": (
             "TFReferencesSection",
             "TF_References_Section",
             "EndNoteBibliographyTitle",
             "Heading 1",
+            "H1",
         ),
-        "reference": ("EndNoteBibliography", "EndNote Bibliography", "Normal"),
+        "reference": ("EndNoteBibliography", "EndNote Bibliography", "References", "Normal"),
     }
     return {role: _find_style(document, options) for role, options in candidates.items()}
 
@@ -534,6 +546,27 @@ def _force_run_black(element) -> None:
         color.set(qn("w:val"), "000000")
         for attribute in ("themeColor", "themeShade", "themeTint"):
             color.attrib.pop(qn(f"w:{attribute}"), None)
+
+
+def _set_paragraph_flag(element, tag: str) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    if properties.find(qn(tag)) is None:
+        properties.append(OxmlElement(tag))
+
+
+def _justify_paragraph(element) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    align = properties.find(qn("w:jc"))
+    if align is None:
+        align = OxmlElement("w:jc")
+        properties.append(align)
+    align.set(qn("w:val"), "both")
 
 
 def _center_paragraph(element) -> None:
@@ -1184,19 +1217,23 @@ def _template_uses_superscript_citations(document: DocumentType) -> bool:
     return False
 
 
-FIGURE_CAPTION_RE = re.compile(r"\s*(?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:|]?", re.IGNORECASE)
+FIGURE_CAPTION_RE = re.compile(
+    r"\s*(?:Supplementary\s+Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:|]?",
+    re.IGNORECASE,
+)
 FIGURE_CAPTION_SLOT_RE = re.compile(
     r"\s*\[(?:Figure|Scheme|Chart)\s+Caption\]", re.IGNORECASE
 )
 CAPTION_LABEL_RE = re.compile(
-    r"^\s*(Figure|Scheme|Chart)\s+[A-Za-z]*\d+\s*[.:]?\s*",
+    r"^\s*(Supplementary\s+Fig\.|Figure|Scheme|Chart)\s+[A-Za-z]*\d+\s*[.:]?\s*",
     re.IGNORECASE,
 )
 
 
 def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
     match = CAPTION_LABEL_RE.match(caption)
-    kind = match.group(1).capitalize() if match else "Figure"
+    raw_kind = match.group(1) if match else "Figure"
+    kind = "Supplementary Fig." if raw_kind.lower().startswith("supplementary") else raw_kind.capitalize()
     body = caption[match.end():].strip() if match else caption.strip()
     label = f"{kind} {prefix}{number}"
     return label, f"{label}. {body}".rstrip()
@@ -1355,11 +1392,20 @@ def _clone_rendered_block(
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
     if block.kind == "table_caption":
-        label = f"Table {number_prefix}{table_number}. " if table_number is not None else "Table. "
+        supplementary = re.match(r"(?i)supplementary\s+table\b", block.text or "")
+        if table_number is None:
+            label = "Supplementary Table." if supplementary else "Table."
+        elif supplementary:
+            label = f"Supplementary Table {number_prefix}{table_number}."
+        else:
+            label = f"Table {number_prefix}{table_number}."
+        body = block.text or ""
+        if supplementary:
+            body = re.sub(r"(?i)^supplementary\s+table\s*\d*\s*[.:]?\s*", "", body).strip()
         paragraph = _new_paragraph(
             target,
             styles["caption"],
-            f"**{label.strip()}** {block.text}",
+            f"**{label}** {body}".strip(),
             prototype=p.get("caption"),
         )
         _format_caption_runs(paragraph, caption_font_size or 10)
@@ -1480,6 +1526,7 @@ def _clone_figure(
             doc_pr.set("descr", caption[:255])
         run.append(drawing)
         paragraph.append(run)
+        _set_paragraph_flag(paragraph, "w:keepNext")
     else:
         # Templates without explicit figure slots still receive a real inline
         # drawing, constrained to the current section column.
@@ -1487,15 +1534,21 @@ def _clone_figure(
         picture = temporary.add_paragraph()
         with Image.open(image_path) as image_file:
             available = section_width_twips * 635 if section_width_twips is not None else _body_column_width_twips(target) * 635
-            width = min(914400 * 6.5, max(914400, available))
+            width = max(914400, available)
             picture.add_run().add_picture(str(image_path), width=width)
         paragraph = copy.deepcopy(picture._p)
+        _set_paragraph_flag(paragraph, "w:keepNext")
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
-    caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption_text)
+    caption_text = re.sub(
+        r"^((?:Supplementary Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])",
+        r"**\1**",
+        caption_text,
+    )
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
+    _set_paragraph_flag(cap, "w:keepLines")
     _format_caption_runs(cap, caption_font_size or 10)
     return [paragraph, cap]
 
@@ -1503,7 +1556,12 @@ def _clone_figure(
 def _word_compatible_image_bytes(image_path: Path, *, max_dimension: int = 4096) -> bytes:
     """Return a conservative RGB PNG payload for reliable Word rendering."""
     with Image.open(image_path) as source:
-        image = source.convert("RGB")
+        if source.mode in {"RGBA", "LA"} or (source.mode == "P" and "transparency" in source.info):
+            rgba = source.convert("RGBA")
+            image = Image.new("RGB", rgba.size, (255, 255, 255))
+            image.paste(rgba, mask=rgba.getchannel("A"))
+        else:
+            image = source.convert("RGB")
         if max(image.size) > max_dimension:
             scale = max_dimension / max(image.size)
             image = image.resize(
@@ -2171,6 +2229,7 @@ def assemble_markdown_template(
         styles["heading_3"],
         styles["references_heading"],
     }
+    name_by_id = {style.style_id: style.name for style in template.styles}
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
@@ -2178,8 +2237,37 @@ def assemble_markdown_template(
         style_node = node.find(qn("w:pPr"))
         style_ref = style_node.find(qn("w:pStyle")) if style_node is not None else None
         style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
-        if style_id == styles["title"]:
-            _center_paragraph(node)
+        # Some house styles want an unsized title centered at 18 pt. A named
+        # template title already carries its own size, and a style shared with
+        # the body (the Normal fallback) must not be restyled on every paragraph.
+        shared_roles = {
+            styles["body"],
+            styles["authors"],
+            styles["affiliations"],
+            styles["abstract"],
+            styles["heading_1"],
+            styles["heading_2"],
+            styles["heading_3"],
+            styles["caption"],
+            styles["reference"],
+        }
+        justify_names = {
+            "P1",
+            "Abstract",
+            "FigureCaption",
+            "SchemeCaption",
+            "TableCaption",
+            "References",
+            "P1_without_Indendation",
+            "Acknowledgements",
+        }
+        if name_by_id.get(style_id) in justify_names:
+            _justify_paragraph(node)
+        if style_id == styles["title"] and style_id not in shared_roles:
+            title_style = _style(template, style_id)
+            if title_style.font.size is None:
+                _center_paragraph(node)
+                _override_run_size(node, 18)
     body_element = template._element.body
     for child in list(body_element):
         body_element.remove(child)

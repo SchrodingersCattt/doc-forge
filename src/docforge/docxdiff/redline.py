@@ -43,6 +43,12 @@ CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
 NS = {"w": W}
 TOKEN_RE = re.compile(r"\s+|[^\W_]+(?:[’'][^\W_]+)*|_|[^\w\s]", re.UNICODE)
 CLOSING_PUNCTUATION = frozenset("，。；：！？、）】》〉」』〕〗〙〛”’)]}")
+# Markdown round-trips and Word's Unicode-script normalizer can represent the
+# same visible character in several ways.  Redline alignment must compare the
+# semantic text, not those transport details.  In particular, Pandoc emits
+# escaped punctuation (``\<``/``\[``) and the template converter turns
+# ``N₅⁻`` into an ASCII ``N5–`` run with true script formatting.
+_ESCAPED_PUNCTUATION = re.compile(r"\\([\\`*{}\[\]()#+\-.!_>~|<%$&=:?@])")
 REVISION_NAMES = ("ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "sectPrChange")
 COMMENT_NAMES = (
     "comments.xml",
@@ -125,6 +131,22 @@ class Context:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
+
+
+def _semantic_text(text: str) -> str:
+    """Canonicalize text for alignment while preserving source XML on output.
+
+    This is deliberately used only for comparison.  The emitted runs still
+    come from the current DOCX, so punctuation, Unicode scripts, and
+    formatting are not silently rewritten in the deliverable.
+    """
+    value = unicodedata.normalize("NFKC", text)
+    value = _ESCAPED_PUNCTUATION.sub(r"\1", value)
+    # NFKC produces U+2212 for superscript minus, while the DOCX converter
+    # uses an en dash in superscript chemical charges.  Dash typography is not
+    # a semantic manuscript edit for redline purposes.
+    value = value.replace("−", "-").replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", " ", value).strip()
 
 
 _NOISE_PARAGRAPH = re.compile(
@@ -319,7 +341,7 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     # word-merged onto the wrong figure.
     if left.drawing != right.drawing:
         return -8.0
-    a, b = _normalize(left.text), _normalize(right.text)
+    a, b = _semantic_text(left.text), _semantic_text(right.text)
     label_a, label_b = _float_label(a), _float_label(b)
     if label_a and label_b and label_a != label_b:
         return -8.0
@@ -352,8 +374,8 @@ def _align(
     workers: int | None = None,
 ) -> list[tuple[str, int | None, int | None]]:
     ratios = _RatioTable(cache_path)
-    base_text = [_normalize(block.text) if block.kind == "p" else "" for block in base]
-    current_text = [_normalize(block.text) if block.kind == "p" else "" for block in current]
+    base_text = [_semantic_text(block.text) if block.kind == "p" else "" for block in base]
+    current_text = [_semantic_text(block.text) if block.kind == "p" else "" for block in current]
     ratios.fill(
         {
             (a, b)
@@ -492,15 +514,77 @@ def _style_at(spans: list[tuple[int, int, Style]], offset: int) -> Style:
     return spans[-1][2] if spans else Style(None)
 
 
+def _style_signature(style: Style) -> tuple[bytes | None, tuple[tuple[str, str], ...] | None, bytes | None]:
+    """Return the formatting identity that matters when tokenizing text.
+
+    Word commonly splits one visible word across several runs while keeping
+    the same formatting.  Run-level revision IDs and rsid attributes are
+    transport metadata, so treating those boundaries as semantic formatting
+    changes creates false delete/insert pairs.  Keep boundaries only when the
+    effective run properties, hyperlink, or enclosing revision actually
+    differs.
+    """
+
+    # These properties change the character's visible script or emphasis.  The
+    # remaining run properties in this workflow (font hints, language, size,
+    # theme color, and rsids) are routinely rewritten by Pandoc/Word and must
+    # not turn an unchanged word into a textual replacement.
+    semantic_rpr = {
+        "b",
+        "i",
+        "u",
+        "strike",
+        "dstrike",
+        "vertAlign",
+        "outline",
+        "shadow",
+        "emboss",
+        "imprint",
+        "caps",
+        "smallCaps",
+        "vanish",
+        "rtl",
+        "oMath",
+    }
+
+    def canonical(node: etree._Element | None, *, strip_rsid: bool = False) -> bytes | None:
+        if node is None:
+            return None
+        if node.tag == f"{{{W}}}rPr":
+            clone = etree.Element(node.tag, nsmap=node.nsmap)
+            for child in node:
+                if etree.QName(child).localname in semantic_rpr:
+                    clone.append(copy.deepcopy(child))
+        else:
+            clone = copy.deepcopy(node)
+        if strip_rsid:
+            for element in clone.iter():
+                for key in list(element.attrib):
+                    if etree.QName(key).localname.startswith("rsid"):
+                        del element.attrib[key]
+        return etree.tostring(clone, method="c14n")
+
+    return (
+        canonical(style.rpr, strip_rsid=True),
+        style.link,
+        canonical(style.revision),
+    )
+
+
 def _tokenize(
     text: str, spans: list[tuple[int, int, Style]], split_offsets: set[int] | None = None
 ) -> list[Token]:
     split_offsets = set(split_offsets or ())
     # Preserve character-level formatting boundaries (e.g. true Word
     # subscript/superscript inside chemical formulae) even when the tokenizer
-    # would otherwise treat the whole alphanumeric formula as one token.
-    split_offsets.update(start for start, _, _ in spans)
-    split_offsets.update(end for _, end, _ in spans)
+    # would otherwise treat the whole alphanumeric formula as one token.  Do
+    # not preserve arbitrary run boundaries when the effective formatting is
+    # identical: Word and Markdown round-trips frequently split one word into
+    # several equivalent runs, and diffing those fragments produces false
+    # replacements such as ``sorptionsorption``.
+    for previous, current in zip(spans, spans[1:]):
+        if _style_signature(previous[2]) != _style_signature(current[2]):
+            split_offsets.add(previous[1])
     result: list[Token] = []
     for match in TOKEN_RE.finditer(text):
         points = [
@@ -560,10 +644,30 @@ def _events(paragraph: etree._Element) -> list[Event]:
     return events
 
 
+_FIELD_LOCAL_NAMES = frozenset({"fldChar", "instrText"})
+
+
+def _only_internal_hyperlink_fields(paragraph: etree._Element) -> bool:
+    """True when every field in the paragraph is an internal ``HYPERLINK \\l`` link.
+
+    Word saves a reviewed document's citation links as field codes, while the
+    generated document uses ``w:hyperlink`` wrappers. Such a field carries no
+    layout of its own, so it must not force a whole-paragraph replacement.
+    """
+    instructions = [node.text or "" for node in paragraph.iter(f"{{{W}}}instrText")]
+    if not instructions:
+        return False
+    return all(re.match(r"\s*HYPERLINK\s+\\l\s", text) for text in instructions)
+
+
 def _needs_passthrough(paragraph: etree._Element) -> bool:
     """Identify paragraphs whose layout-bearing XML must remain intact."""
+    fields_are_links = _only_internal_hyperlink_fields(paragraph)
     return any(
-        etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES
+        (
+            etree.QName(node).localname in PASSTHROUGH_LOCAL_NAMES
+            and not (fields_are_links and etree.QName(node).localname in _FIELD_LOCAL_NAMES)
+        )
         or (node.tag == f"{{{W}}}br" and node.get(f"{{{W}}}type") in ("page", "column"))
         for node in paragraph.iter()
     )
@@ -699,12 +803,15 @@ def _merge_paragraph(
     # their anchors onto the preserved paragraph.
     if _needs_passthrough(base) or _needs_passthrough(current):
         return _carry_comment_markers(base, current) if events else copy.deepcopy(current)
-    # Identical, uncommented paragraphs already have the desired final XML in
-    # the freshly generated document. Copying them intact preserves page
-    # breaks, tabs, fields and other run-level controls that carry no text and
-    # therefore do not participate in the token diff below.
-    if base_text == current_text and not events:
-        return copy.deepcopy(current)
+    # Identical final text is not a content edit. Re-rendered Markdown often
+    # splits the same words into different runs (for example around bold
+    # figure references, bookmarks, or subscript spans); diffing those runs
+    # creates false deletions/insertions such as ``multi-ionicmulti-ionic`` in
+    # Word's All Markup view. Keep the reviewed baseline paragraph intact so
+    # only semantic text changes become revisions. Layout-bearing paragraphs
+    # are handled by the passthrough branch above.
+    if base_text == current_text:
+        return copy.deepcopy(base)
     base_tokens = _tokenize(base_text, base_spans, {event.offset for event in events})
     current_tokens = _tokenize(current_text, current_spans)
     matcher = difflib.SequenceMatcher(
@@ -914,6 +1021,51 @@ def _base_relationships(base_package: Package, current_package: Package):
     rel_name = "word/_rels/document.xml.rels"
     original = base_package.xml(rel_name)
     current = current_package.xml(rel_name)
+    # Deleted baseline drawings may reference media formats that are absent
+    # from the freshly rendered package (for example TIFF images).  When the
+    # media part is carried into the redline package, carry its content-type
+    # declaration as well so the resulting DOCX remains a valid OPC package.
+    base_content_types = base_package.xml("[Content_Types].xml")
+    current_content_types = current_package.xml("[Content_Types].xml")
+    content_type_defaults = {
+        node.get("Extension", "").lower(): node.get("ContentType", "")
+        for node in current_content_types.findall(f"{{{CONTENT_TYPES}}}Default")
+    }
+    content_type_overrides = {
+        node.get("PartName", ""): node.get("ContentType", "")
+        for node in current_content_types.findall(f"{{{CONTENT_TYPES}}}Override")
+    }
+
+    def ensure_media_content_type(target: str) -> None:
+        part_name = "/" + target.replace("\\", "/")
+        suffix = posixpath.splitext(part_name)[1].lstrip(".").lower()
+        if suffix in content_type_defaults or part_name in content_type_overrides:
+            return
+        base_part_name = part_name.replace("/redline_base_", "/image", 1)
+        base_override = next(
+            (
+                node
+                for node in base_content_types.findall(f"{{{CONTENT_TYPES}}}Override")
+                if node.get("PartName", "").lower() == base_part_name.lower()
+            ),
+            None,
+        )
+        if base_override is not None:
+            current_content_types.append(copy.deepcopy(base_override))
+            current_content_types[-1].set("PartName", part_name)
+            content_type_overrides[part_name] = base_override.get("ContentType", "")
+            return
+        base_default = next(
+            (
+                node
+                for node in base_content_types.findall(f"{{{CONTENT_TYPES}}}Default")
+                if node.get("Extension", "").lower() == suffix
+            ),
+            None,
+        )
+        if base_default is not None:
+            current_content_types.append(copy.deepcopy(base_default))
+            content_type_defaults[suffix] = base_default.get("ContentType", "")
     sources = {rel.get("Id"): rel for rel in original}
     used = {rel.get("Id") for rel in current}
     copied: dict[str, str] = {}
@@ -942,6 +1094,7 @@ def _base_relationships(base_package: Package, current_package: Package):
                         suffix = posixpath.splitext(target)[1]
                         new_target = f"media/redline_base_{number}{suffix}"
                         current_package.parts[f"word/{new_target}"] = base_package.parts[target]
+                        ensure_media_content_type(f"word/{new_target}")
                         rel.set("Target", new_target)
                     current.append(rel)
                     copied[old_id] = new_id
@@ -950,6 +1103,7 @@ def _base_relationships(base_package: Package, current_package: Package):
 
     def save() -> None:
         current_package.set_xml(rel_name, current)
+        current_package.set_xml("[Content_Types].xml", current_content_types)
 
     return carry, save
 
