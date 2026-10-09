@@ -79,13 +79,14 @@ def _entries(profile: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
             result.append((key, value))
         return result
     result = []
-    for key in ("article", "supplement"):
+    for key in ("article", "supplement", "si", "supporting_information"):
         value = profile.get(key)
         if value is None:
             continue
         if not isinstance(value, Mapping):
             raise ValueError(f"delivery profile '{key}' must be an object")
-        result.append((key, dict(value)))
+        canonical = "supplement" if key in {"si", "supporting_information"} else key
+        result.append((canonical, dict(value)))
     if not result:
         raise ValueError("delivery profile requires article/supplement or artifacts")
     return result
