@@ -151,6 +151,92 @@ def test_metadata_and_style_discovery(tmp_path: Path) -> None:
     assert styles["reference"] == "EndNoteBibliography"
 
 
+def test_style_discovery_rejects_missing_semantic_role() -> None:
+    document = Document()
+    for name in (
+        "BBAuthorName",
+        "FA_Corresponding_Author_Footnote",
+        "BD_Abstract",
+        "EndNote Bibliography",
+    ):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    with pytest.raises(ValueError, match="TA_MainText|TA_Main_Text|TAMainText"):
+        discover_template_styles(document)
+
+
+def _style_complete_template(
+    path: Path, *, normal_body_sample: bool = False, centered_body_sample: bool = False
+) -> None:
+    document = Document()
+    for name in (
+        "BBAuthorName",
+        "FA_Corresponding_Author_Footnote",
+        "BD_Abstract",
+        "TA_Main_Text",
+        "EndNote Bibliography",
+        "Metadata Title",
+    ):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Template title").style = document.styles["BBAuthorName"]
+    body = document.add_paragraph("Body prototype", style="Normal" if normal_body_sample else "TA_Main_Text")
+    if centered_body_sample:
+        body.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    document.add_paragraph("Heading prototype", style="Heading 1")
+    document.save(path)
+
+
+def test_metadata_follows_requested_style_instead_of_prototype(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _style_complete_template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Generated body.\n", encoding="utf-8")
+    profile = tmp_path / "styles.json"
+    profile.write_text(json.dumps({"title": "Metadata Title"}), encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        style_profile=str(profile),
+    )
+    rendered = Document(output)
+    title = next(paragraph for paragraph in rendered.paragraphs if paragraph.text == "A title")
+    assert title.style.style_id == result.style_map["title"] == "MetadataTitle"
+
+
+def test_body_follows_role_style_instead_of_sample_paragraph(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _style_complete_template(template, normal_body_sample=True)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Generated body.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    body = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "Generated body.")
+    assert body.style.style_id == result.style_map["body"] == "TA_Main_Text"
+
+
+def test_generated_body_ignores_sample_alignment(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _style_complete_template(template, centered_body_sample=True)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Generated body.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    body = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "Generated body.")
+    assert body.alignment != WD_ALIGN_PARAGRAPH.CENTER
+
+
 def test_metadata_keeps_blank_lines_as_paragraph_breaks(tmp_path: Path) -> None:
     metadata = tmp_path / "metadata.md"
     metadata.write_text(

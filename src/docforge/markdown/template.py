@@ -317,7 +317,20 @@ def _norm_style(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
-def _find_style(document: DocumentType, candidates: Sequence[str]) -> str:
+def _find_style(
+    document: DocumentType,
+    candidates: Sequence[str],
+    *,
+    role: str | None = None,
+    fallback: str | None = None,
+) -> str:
+    """Resolve a style name or ID from a template.
+
+    Semantic roles must be explicit.  Falling back to ``Normal`` makes a
+    malformed template look valid while silently applying body formatting to
+    metadata, captions, or references.  Callers that genuinely need a
+    fallback (for example the optional TOC heading) can opt into one.
+    """
     styles = list(document.styles)
     by_id = {style.style_id: style for style in styles}
     by_name = {style.name: style for style in styles}
@@ -330,48 +343,73 @@ def _find_style(document: DocumentType, candidates: Sequence[str]) -> str:
         style = by_norm.get(_norm_style(candidate))
         if style is not None:
             return style.style_id
-    return by_name["Normal"].style_id
+    if fallback is not None:
+        if fallback in by_id:
+            return by_id[fallback].style_id
+        if fallback in by_name:
+            return by_name[fallback].style_id
+        style = by_norm.get(_norm_style(fallback))
+        if style is not None:
+            return style.style_id
+    tried = ", ".join(candidates)
+    label = f" for role '{role}'" if role else ""
+    raise ValueError(f"Template is missing a semantic style{label}; tried style IDs/names: {tried}")
 
 
-def discover_template_styles(document: DocumentType) -> dict[str, str]:
+def discover_template_styles(
+    document: DocumentType,
+    *,
+    strict: bool = True,
+) -> dict[str, str]:
+    """Discover the template's semantic paragraph styles.
+
+    The aliases cover the legacy house style names as well as descriptive
+    names used by newer templates.  Body, caption, and bibliography roles
+    must be present explicitly; silently mapping those roles to ``Normal``
+    makes a malformed template appear valid.  Front-matter roles retain the
+    historical ``Normal`` fallback for minimal templates.
+    """
     candidates = {
-        "title": ("BBAuthorName", "BB_Author_Name", "BATitle", "BA_Title", "Title1", "Title"),
-        "authors": ("BBAuthorName", "BB_Author_Name", "Authors", "Author", "Normal"),
+        "title": (
+            "BBAuthorName", "BB_Author_Name", "BATitle", "BA_Title",
+            "Title1", "Title",
+        ),
+        "authors": ("BBAuthorName", "BB_Author_Name", "Authors", "Author"),
         "affiliations": (
             "FACorrespondingAuthorFootnote",
             "FA_Corresponding_Author_Footnote",
-            "Adress",
-            "Address",
-            "BCAuthorAddress",
-            "BC_Author_Address",
-            "Normal",
+            "Adress", "Address", "BCAuthorAddress", "BC_Author_Address",
         ),
         "abstract_title": ("BDAbstractTitle", "BD_Abstract_Title", "Heading 1", "H1", "1"),
-        "abstract": ("BDAbstract", "BD_Abstract", "Abstract", "Normal"),
+        "abstract": ("BDAbstract", "BD_Abstract", "Abstract"),
         "body": (
-            "TAMainText1",
-            "TAMainText",
-            "TA_Main_Text",
-            "P1",
-            "MainText",
-            "Main Text",
-            "P1_without_Indendation",
-            "Normal",
+            "TAMainText1", "TAMainText", "TA_Main_Text", "P1",
+            "MainText", "Main Text", "P1_without_Indendation",
         ),
         "heading_1": ("Heading 1", "H1", "1"),
         "heading_2": ("Heading 2", "H2", "2", "H1"),
         "heading_3": ("Heading 3", "H3", "3", "H1"),
         "caption": ("a4", "FigureCaption", "Caption", "VA_Figure_Caption", "SchemeCaption"),
         "references_heading": (
-            "TFReferencesSection",
-            "TF_References_Section",
-            "EndNoteBibliographyTitle",
-            "Heading 1",
-            "H1",
+            "TFReferencesSection", "TF_References_Section",
+            "EndNoteBibliographyTitle", "Heading 1", "H1",
         ),
-        "reference": ("EndNoteBibliography", "EndNote Bibliography", "References", "Normal"),
+        "reference": (
+            "EndNoteBibliography", "EndNote Bibliography", "References",
+        ),
     }
-    return {role: _find_style(document, options) for role, options in candidates.items()}
+    # Metadata can still use Normal for the intentionally minimal templates
+    # accepted by the public API.  Content roles remain strict in both modes
+    # when a style profile has not supplied an explicit replacement.
+    fallback_roles = {"title", "authors", "affiliations", "abstract_title"}
+    fallback = "Normal"
+    return {
+        role: _find_style(
+            document, options, role=role,
+            fallback=fallback if (not strict or role in fallback_roles) else None,
+        )
+        for role, options in candidates.items()
+    }
 
 
 def _resolve_style_profile(
@@ -448,7 +486,10 @@ def _clean_paragraph_prototype(element):
         if mark is not None:
             properties.remove(mark)
         for child in list(properties):
-            if child.tag == qn("w:sectPr"):
+            # Direct alignment belongs to the sample paragraph, not the
+            # semantic role.  Let the named style define it for generated
+            # paragraphs.
+            if child.tag in {qn("w:sectPr"), qn("w:jc")}:
                 properties.remove(child)
     for child in list(result):
         if child.tag != qn("w:pPr"):
@@ -685,7 +726,14 @@ def _new_paragraph(
             properties.append(outline)
         outline.set(qn("w:val"), str(heading_level - 1))
 
-    base_run = _run_prototype(prototype, prefer_long=True) if prototype is not None else None
+    # A Normal fallback has no role-specific sample metrics.  In particular,
+    # do not leak a direct font size from an unrelated sample paragraph into a
+    # title that is intentionally inherited from Normal.
+    base_run = (
+        _run_prototype(prototype, prefer_long=True)
+        if prototype is not None and style_id != "Normal"
+        else None
+    )
     base_rpr = _sanitize_run_properties(
         base_run.find(qn("w:rPr")) if base_run is not None else None,
         keep_bold=None,
@@ -724,12 +772,18 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
         properties = OxmlElement("w:pPr")
         element.insert(0, properties)
     style = properties.find(qn("w:pStyle"))
-    if prototype is None:
-        if style is None:
-            style = OxmlElement("w:pStyle")
-            properties.insert(0, style)
-        style.set(qn("w:val"), style_id)
-    base_run = _run_prototype(prototype, prefer_long=True) if prototype is not None else None
+    if style is None:
+        style = OxmlElement("w:pStyle")
+        properties.insert(0, style)
+    # The prototype supplies direct paragraph formatting, while the semantic
+    # role decides which named style the generated metadata follows.  Keeping
+    # the prototype's pStyle here makes an explicit style profile ineffective.
+    style.set(qn("w:val"), style_id)
+    base_run = (
+        _run_prototype(prototype, prefer_long=True)
+        if prototype is not None and style_id != "Normal"
+        else None
+    )
     base_rpr = _sanitize_run_properties(base_run.find(qn("w:rPr")) if base_run is not None else None)
     for run in element.findall(".//" + qn("w:r")):
         existing = run.find(qn("w:rPr"))
@@ -742,7 +796,7 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
 
 def _native_toc_nodes(document: DocumentType, heading_style_id: str) -> list:
     """Create a native Word TOC field covering Heading 1 through Heading 3."""
-    toc_style_id = _find_style(document, ("TOC Heading", "TOCHeading"))
+    toc_style_id = _find_style(document, ("TOC Heading", "TOCHeading"), fallback="Normal")
     heading = _new_paragraph(document, toc_style_id or heading_style_id, "CONTENTS", uppercase=False)
     _flush_left_heading(heading)
     paragraph = OxmlElement("w:p")
@@ -1941,19 +1995,25 @@ def assemble_markdown_template(
 
     sections_before = len(template.sections)
     geometry = _geometry(template)
-    styles = _resolve_style_profile(template, discover_template_styles(template), style_profile)
+    # Resolve semantic roles before applying an optional profile.  A profile
+    # can choose an otherwise-unlisted existing style, but it cannot hide a
+    # missing required body-like role behind Normal.
+    discovered = discover_template_styles(template, strict=style_profile == "template")
+    styles = _resolve_style_profile(template, discovered, style_profile)
+    if style_profile != "template":
+        required = ("body", "abstract", "caption", "reference")
+        missing = [
+            role
+            for role in required
+            if discovered[role] == "Normal" and styles[role] == "Normal"
+        ]
+        if missing:
+            raise ValueError(
+                "Template semantic role(s) fall back to Normal: "
+                + ", ".join(missing)
+            )
     regions = _template_regions(template)
     prototypes = _template_prototypes(template, styles, regions)
-    # Use the actual paragraph style carried by the reference body prototype;
-    # A supplied template may carry body paragraphs as ``Normal`` while its
-    # semantic discovery role resolves to a custom style.
-    body_prototype = prototypes.paragraphs.get("body")
-    if body_prototype is not None:
-        body_ppr = body_prototype.find(qn("w:pPr"))
-        body_style = body_ppr.find(qn("w:pStyle")) if body_ppr is not None else None
-        if body_style is not None:
-            styles = dict(styles)
-            styles["body"] = body_style.get(qn("w:val"), styles["body"])
     body_regions = [region for region in regions if not region.figure]
     if len(body_regions) > 1 and body_regions[0].index == 0:
         front_region = body_regions.pop(0)
