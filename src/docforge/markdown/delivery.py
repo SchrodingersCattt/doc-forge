@@ -204,6 +204,9 @@ def deliver(
     if not isinstance(shared, Mapping):
         raise ValueError("delivery profile 'shared' must be an object")
     entries = _entries(payload)
+    # Citation inheritance is deterministic even when a profile uses the
+    # generic ``artifacts`` list and happens to list the supplement first.
+    entries.sort(key=lambda item: (0 if item[0] == "article" else 1))
     if accept_revisions:
         has_review = any(
             isinstance(entry, Mapping)
