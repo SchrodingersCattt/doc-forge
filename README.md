@@ -71,27 +71,21 @@ docforge docx2tex reviewed.docx -o reviewed.tex --track-changes accept
 docforge docx2md reviewed.docx --split-dir sections \
   --section-map section-map.json --force
 
-# Exact no-op roundtrip from an audited Markdown bundle
-docforge md2docx --roundtrip-manifest sections/manifest.json \
-  -o reviewed-roundtrip.docx --force
-
-# Export, audit, and rebuild a DOCX in one command
+# Export, audit, and rebuild a DOCX from one portable bundle
 docforge roundtrip reviewed.docx --workdir reviewed.bundle \
   --output reviewed-roundtrip.docx --force
 
-When `docx2md` writes a split bundle, the manifest includes a portable source
-DOCX snapshot and SHA-256 values for the snapshot, sections, and media. The
-`md2docx --roundtrip-manifest` command verifies every value and reuses the
-source package byte-for-byte when no Markdown or media file changed. If a file
-changed, it requires explicit Markdown inputs and continues through the normal
-renderer, so the resulting DOCX can be reviewed with `redline`.
+# Reuse the exact source package when the audited bundle is unchanged
+docforge md2docx --roundtrip-manifest reviewed.bundle/manifest.json \
+  -o reviewed-roundtrip.docx --force
 
-`roundtrip` writes `full.md`, optional ordered section files, extracted
-`media/`, `roundtrip/source.docx`, and a portable `manifest.json` into the
-workdir. It prints a JSON result containing the mode and SHA-256 values. An
-unchanged bundle reports `exact-reuse`; editing Markdown or media reports
-`rebuild`. Add `--section-map` to preserve section ordering and `--baseline`
-to emit native Word tracked revisions for a rebuilt document.
+# Audit an existing DOCX with the same deterministic package checks
+docforge audit reviewed-roundtrip.docx
+
+# Apply an accepted reviewed DOCX view back to Markdown sources and publish a
+# delivery copy in one operation (sources follow the section-map order)
+docforge apply-review reviewed.docx source_01.md source_02.md \
+  --section-map section-map.json --delivery-name manuscript.md --force
 
 # Generate figures from front-matter Markdown prompts (auditable sidecars)
 docforge aigc figures/_prompts --backend litellm --all
