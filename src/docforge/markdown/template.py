@@ -21,6 +21,7 @@ from typing import Iterable, Mapping, Sequence
 
 from docx import Document
 from docx.document import Document as DocumentType
+from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
@@ -444,6 +445,67 @@ def _style(document: DocumentType, style_id: str):
     raise ValueError(f"Template style is unavailable: {style_id}")
 
 
+def _style_alignment(document: DocumentType, style_id: str) -> str | None:
+    """Return the first explicit alignment in a style's inheritance chain."""
+    style = _style(document, style_id)
+    seen: set[str] = set()
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        properties = style._element.pPr
+        alignment = properties.find(qn("w:jc")) if properties is not None else None
+        if alignment is not None:
+            value = alignment.get(qn("w:val"))
+            if value:
+                return value
+        style = style.base_style
+    return None
+
+
+def _set_paragraph_alignment(element, value: str | None) -> None:
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        if value is None:
+            return
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    alignment = properties.find(qn("w:jc"))
+    if value is None:
+        if alignment is not None:
+            properties.remove(alignment)
+        return
+    if alignment is None:
+        alignment = OxmlElement("w:jc")
+        properties.append(alignment)
+    alignment.set(qn("w:val"), value)
+
+
+def _apply_style_to_paragraph(
+    element,
+    document: DocumentType,
+    style_id: str,
+    *,
+    keep_generated_alignment: bool = True,
+) -> None:
+    """Apply a semantic style while resolving generated alignment consistently."""
+    properties = element.find(qn("w:pPr"))
+    if properties is None:
+        properties = OxmlElement("w:pPr")
+        element.insert(0, properties)
+    style = properties.find(qn("w:pStyle"))
+    if style is None:
+        style = OxmlElement("w:pStyle")
+        properties.insert(0, style)
+    style.set(qn("w:val"), style_id)
+    # Explicit alignment on the named semantic style wins over renderer defaults.
+    # When the style leaves alignment inherited, preserve the renderer's value
+    # for block kinds such as quotes and lists.
+    style_alignment = _style_alignment(document, style_id)
+    if style_alignment is not None:
+        _set_paragraph_alignment(element, style_alignment)
+    elif not keep_generated_alignment:
+        _set_paragraph_alignment(element, None)
+
+
 def _strip_fonts(element) -> None:
     for properties in element.iter(qn("w:rPr")):
         for tag in (qn("w:rFonts"), qn("w:sz"), qn("w:szCs"), qn("w:kern")):
@@ -598,18 +660,6 @@ def _set_paragraph_flag(element, tag: str) -> None:
         properties.append(OxmlElement(tag))
 
 
-def _justify_paragraph(element) -> None:
-    properties = element.find(qn("w:pPr"))
-    if properties is None:
-        properties = OxmlElement("w:pPr")
-        element.insert(0, properties)
-    align = properties.find(qn("w:jc"))
-    if align is None:
-        align = OxmlElement("w:jc")
-        properties.append(align)
-    align.set(qn("w:val"), "both")
-
-
 def _center_paragraph(element) -> None:
     properties = element.find(qn("w:pPr"))
     if properties is None:
@@ -716,6 +766,7 @@ def _new_paragraph(
         style = OxmlElement("w:pStyle")
         properties.insert(0, style)
     style.set(qn("w:val"), style_id)
+    _apply_style_to_paragraph(element, document, style_id)
     # A generated heading must expose the same outline level as its prototype.
     heading_match = re.fullmatch(r"(?:Heading ?)?([1-9])", style_id)
     if heading_match is not None:
@@ -779,6 +830,7 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
     # role decides which named style the generated metadata follows.  Keeping
     # the prototype's pStyle here makes an explicit style profile ineffective.
     style.set(qn("w:val"), style_id)
+    _apply_style_to_paragraph(element, document, style_id)
     base_run = (
         _run_prototype(prototype, prefer_long=True)
         if prototype is not None and style_id != "Normal"
@@ -1187,10 +1239,21 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
     body_candidates = [
         (index, node)
         for index, node in enumerate(paragraphs)
-        if node.style.style_id in {styles["body"], "a", "Normal"}
+        if node.style.style_id in {styles["body"], "a"}
         and _text_of(node._p).strip()
         and "<w:drawing" not in node._p.xml
     ]
+    # A custom semantic role must not borrow direct formatting from an
+    # unrelated Normal sample.  Minimal templates whose body role genuinely
+    # resolves to Normal keep the historical prototype selection.
+    if not body_candidates and styles["body"] == "Normal":
+        body_candidates = [
+            (index, node)
+            for index, node in enumerate(paragraphs)
+            if node.style.style_id == "Normal"
+            and _text_of(node._p).strip()
+            and "<w:drawing" not in node._p.xml
+        ]
     heading_style_ids = {
         styles["heading_1"],
         styles["heading_2"],
@@ -1505,12 +1568,15 @@ def _clone_rendered_block(
                         for child_prop in source_ppr:
                             if child_prop.tag not in {qn("w:pStyle"), qn("w:ind"), qn("w:numPr")} and old_properties.find(child_prop.tag) is None:
                                 old_properties.append(copy.deepcopy(child_prop))
-                style = old_properties.find(qn("w:pStyle"))
-                if style is None:
-                    style = OxmlElement("w:pStyle")
-                    old_properties.insert(0, style)
-                style.set(qn("w:val"), styles["body"])
+                _apply_style_to_paragraph(clone, target, styles["body"])
                 _apply_template_run_formatting(clone, p.get("body"))
+            if block.kind == "table":
+                # Renderer table cells use a fresh paragraph with left
+                # alignment.  Give every cell the semantic body style so an
+                # explicit custom alignment (for example justified P1) wins.
+                for paragraph in clone.iter(qn("w:p")):
+                    _apply_style_to_paragraph(paragraph, target, styles["body"])
+                    _apply_template_run_formatting(paragraph, p.get("body"))
             result.append(clone)
         return result
     return []
@@ -1995,17 +2061,39 @@ def assemble_markdown_template(
 
     sections_before = len(template.sections)
     geometry = _geometry(template)
-    # Resolve semantic roles before applying an optional profile.  A profile
-    # can choose an otherwise-unlisted existing style, but it cannot hide a
-    # missing required body-like role behind Normal.
-    discovered = discover_template_styles(template, strict=style_profile == "template")
+    # Resolve semantic roles before applying an optional profile.  Discovery is
+    # intentionally non-strict here so minimal, built-in Word templates keep
+    # their historical Normal fallback.  A template carrying custom semantic
+    # styles must provide every role that the requested document uses; a JSON
+    # profile may satisfy a missing role explicitly.
+    discovered = discover_template_styles(template, strict=False)
     styles = _resolve_style_profile(template, discovered, style_profile)
-    if style_profile != "template":
-        required = ("body", "abstract", "caption", "reference")
+    custom_template = any(
+        getattr(style, "builtin", False) is False
+        and style.type == WD_STYLE_TYPE.PARAGRAPH
+        for style in template.styles
+    )
+    required_roles = {"title"}
+    if body_blocks:
+        required_roles.add("body")
+    if abstract:
+        required_roles.add("abstract")
+    if metadata.authors:
+        required_roles.add("authors")
+    if metadata.affiliations or metadata.contacts:
+        required_roles.add("affiliations")
+    if any(block.kind in {"image", "table_caption"} for block in body_blocks):
+        required_roles.add("caption")
+    if used and (
+        resolved_bibliography_scope == "all"
+        or citation_base is None
+        or any(key not in citation_base for key in used)
+    ):
+        required_roles.add("reference")
+    if custom_template:
         missing = [
-            role
-            for role in required
-            if discovered[role] == "Normal" and styles[role] == "Normal"
+            role for role in sorted(required_roles)
+            if discovered.get(role) == "Normal" and styles.get(role) == "Normal"
         ]
         if missing:
             raise ValueError(
@@ -2289,7 +2377,6 @@ def assemble_markdown_template(
         styles["heading_3"],
         styles["references_heading"],
     }
-    name_by_id = {style.style_id: style.name for style in template.styles}
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
@@ -2311,18 +2398,6 @@ def assemble_markdown_template(
             styles["caption"],
             styles["reference"],
         }
-        justify_names = {
-            "P1",
-            "Abstract",
-            "FigureCaption",
-            "SchemeCaption",
-            "TableCaption",
-            "References",
-            "P1_without_Indendation",
-            "Acknowledgements",
-        }
-        if name_by_id.get(style_id) in justify_names:
-            _justify_paragraph(node)
         if style_id == styles["title"] and style_id not in shared_roles:
             title_style = _style(template, style_id)
             if title_style.font.size is None:

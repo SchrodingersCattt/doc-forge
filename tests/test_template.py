@@ -1190,3 +1190,67 @@ def test_main_numbering_prefix_remains_numeric_by_default(tmp_path: Path) -> Non
     document = render_blocks_to_doc(parse_markdown(source))
     assert document.tables[0].cell(0, 2).text == "(1)"
     assert "(S1)" not in document._element.xml
+
+
+def test_custom_body_alignment_controls_generated_blocks(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    for name in (
+        "BBAuthorName",
+        "FA_Corresponding_Author_Footnote",
+        "TA_Main_Text",
+        "EndNote Bibliography",
+    ):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.styles["TA_Main_Text"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    document.add_paragraph("Template title", style="BBAuthorName")
+    body_prototype = document.add_paragraph("Body prototype", style="TA_Main_Text")
+    body_prototype.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    document.add_paragraph("Heading prototype", style="Heading 1")
+    document.save(template)
+
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Body text.\n\n> Quoted text.\n\n- Bullet text\n\n1. Ordered text\n\n"
+        "| A | B |\n|---|---|\n| 1 | 2 |\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+
+    rendered = Document(output)
+    paragraphs = [
+        paragraph
+        for paragraph in rendered.paragraphs
+        if paragraph.text in {"Body text.", "Quoted text.", "• Bullet text", "1. Ordered text"}
+    ]
+    assert len(paragraphs) == 4
+    for paragraph in paragraphs:
+        alignment = paragraph._p.find(".//" + qn("w:jc"))
+        assert alignment is not None and alignment.get(qn("w:val")) == "both"
+    table_paragraph = rendered.tables[0].cell(1, 0).paragraphs[0]
+    alignment = table_paragraph._p.find(".//" + qn("w:jc"))
+    assert alignment is not None and alignment.get(qn("w:val")) == "both"
+
+
+def test_assembly_rejects_missing_used_semantic_role(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    for name in (
+        "BBAuthorName",
+        "FA_Corresponding_Author_Footnote",
+        "EndNote Bibliography",
+    ):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Template title", style="BBAuthorName")
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Body text.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="body"):
+        assemble_markdown_template(
+            [source], template_path=template, output=tmp_path / "output.docx", metadata_path=metadata
+        )
