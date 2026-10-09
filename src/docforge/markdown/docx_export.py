@@ -16,7 +16,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from PIL import Image
 from lxml import etree, html as lxml_html
@@ -46,6 +46,37 @@ class MarkdownExportResult:
     command: tuple[str, ...]
     media: tuple[Path, ...]
     sections: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class ReviewApplyResult:
+    """Result of applying a reviewed DOCX to Markdown sources.
+
+    ``docx_to_markdown`` deliberately remains a conversion primitive.  This
+    result belongs to the higher-level *apply* operation, which may update a
+    set of source files and optionally write one delivery copy.  Keeping the
+    paths explicit makes the operation auditable and lets callers verify the
+    exact files that were changed.
+    """
+
+    reviewed: Path
+    markdown: Path | None
+    sources: tuple[Path, ...]
+    delivery: Path | None
+    media: tuple[Path, ...]
+    sections: tuple[Path, ...]
+
+    @property
+    def output(self) -> Path | None:
+        """Primary Markdown artifact, for parity with MarkdownExportResult."""
+
+        return self.markdown or self.delivery
+
+    @property
+    def source_paths(self) -> tuple[Path, ...]:
+        """Updated source paths under a stable, descriptive attribute name."""
+
+        return self.sources
 
 
 def _image_source(value: str, media_root: Path) -> Path | None:
@@ -417,22 +448,20 @@ def reuse_unchanged_roundtrip_source(
     *,
     force: bool = False,
 ) -> bool:
-    """Reuse the source DOCX when a Markdown bundle is byte-for-byte unchanged.
+    """Copy the source DOCX when every editable bundle file is unchanged.
 
-    A Markdown renderer cannot encode every OOXML detail (for example custom
-    run properties, theme colors, relationship ids, or section controls).  A
-    conversion manifest therefore carries a portable source snapshot and the
-    SHA-256 values of every editable source.  When all values still match, the
-    exact source package is copied to the requested output.  If anything
-    changed, ``False`` is returned and the caller can continue through the
-    normal Markdown renderer.
+    The Markdown renderer cannot preserve all package-level OOXML details, so
+    an unchanged audited bundle is intentionally served from its exact source
+    snapshot.  A changed section or media file returns ``False`` so callers
+    can continue with normal rendering.
     """
 
-    manifest_path = manifest_path.resolve()
+    manifest_path = Path(manifest_path).resolve()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if payload.get("schema") != "docforge.docx2md.v1":
         raise ValueError("roundtrip manifest must use schema docforge.docx2md.v1")
-    root = manifest_path.parent
+    root = manifest_path.parent.resolve()
+
     source_name = payload.get("source_copy")
     source_sha = payload.get("source_copy_sha256")
     if not isinstance(source_name, str) or not isinstance(source_sha, str):
@@ -441,7 +470,7 @@ def reuse_unchanged_roundtrip_source(
         raise ValueError("roundtrip source snapshot must use a bundle-relative path")
     source = (root / source_name).resolve()
     try:
-        source.relative_to(root.resolve())
+        source.relative_to(root)
     except ValueError as exc:
         raise ValueError("roundtrip source snapshot escapes the bundle") from exc
     if not source.is_file() or _sha256(source) != source_sha:
@@ -450,26 +479,18 @@ def reuse_unchanged_roundtrip_source(
     if original_sha is not None and original_sha != source_sha:
         raise ValueError("roundtrip source SHA-256 does not match the source snapshot")
 
-    for name, expected in dict(payload.get("section_sha256", {})).items():
-        if Path(str(name)).is_absolute():
-            raise ValueError("roundtrip section path must be bundle-relative")
-        path = (root / str(name)).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError as exc:
-            raise ValueError("roundtrip section path escapes the bundle") from exc
-        if not path.is_file() or _sha256(path) != expected:
-            return False
-    for name, expected in dict(payload.get("media_sha256", {})).items():
-        if Path(str(name)).is_absolute():
-            raise ValueError("roundtrip media path must be bundle-relative")
-        path = (root / str(name)).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError as exc:
-            raise ValueError("roundtrip media path escapes the bundle") from exc
-        if not path.is_file() or _sha256(path) != expected:
-            return False
+    for key in ("section_sha256", "media_sha256"):
+        for name, expected in dict(payload.get(key, {})).items():
+            value = str(name)
+            if Path(value).is_absolute():
+                raise ValueError(f"roundtrip {key[:-9]} path must be bundle-relative")
+            path = (root / value).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(f"roundtrip {key[:-9]} path escapes the bundle") from exc
+            if not path.is_file() or _sha256(path) != expected:
+                return False
 
     validate_output_path(output)
     if output.exists() and not force:
@@ -579,9 +600,227 @@ def docx_to_markdown(
     return MarkdownExportResult(output, split_dir, command, media, tuple(sections))
 
 
+def apply_reviewed_docx(
+    reviewed_docx: Path,
+    sources: Sequence[Path] = (),
+    *,
+    source_paths: Sequence[Path] | None = None,
+    source_dir: Path | None = None,
+    output: Path | None = None,
+    output_dir: Path | None = None,
+    section_map_path: Path | None = None,
+    media_dir: Path | None = None,
+    track_changes: str = "accept",
+    delivery_name: str | Path | None = None,
+    delivery_path: str | Path | None = None,
+    force: bool = False,
+) -> ReviewApplyResult:
+    """Apply a reviewed DOCX's accepted view to Markdown source files.
+
+    The operation is intentionally a small orchestration layer around
+    :func:`docx_to_markdown`: the DOCX is converted once, then the resulting
+    Markdown is copied to the explicitly named source files.  A section map
+    is required when more than one source is supplied, because positional
+    splitting without a map is ambiguous.  ``delivery_name`` writes an
+    additional Markdown copy after sources are updated; a ``.docx`` delivery
+    name instead publishes a clean copy of the reviewed Word artifact with
+    revisions and comments accepted.  This gives scripts a single command
+    that applies review edits and publishes the chosen delivery name without
+    changing the existing ``docx2md`` API.
+
+    Conversion is staged in a temporary directory when source files or a
+    delivery copy are requested.  If Pandoc or section validation fails, no
+    source file is modified.  Existing files are protected unless ``force``
+    is true, matching :func:`docx_to_markdown` semantics.
+    """
+
+    reviewed_docx = Path(reviewed_docx)
+    if not reviewed_docx.exists():
+        raise FileNotFoundError(reviewed_docx)
+    if source_paths is not None:
+        if sources:
+            raise ValueError("Pass either sources or source_paths, not both")
+        sources = source_paths
+    if delivery_path is not None:
+        if delivery_name is not None:
+            raise ValueError("Pass either delivery_name or delivery_path, not both")
+        delivery_name = delivery_path
+    source_paths = tuple(Path(path) for path in sources)
+    if source_dir is not None:
+        source_dir = Path(source_dir)
+        if source_paths:
+            raise ValueError("Pass either sources or source_dir, not both")
+        if section_map_path is not None:
+            source_paths = tuple(
+                source_dir / str(item["file"])
+                for item in load_section_map(Path(section_map_path))
+            )
+        else:
+            source_paths = tuple(sorted(source_dir.glob("*.md")))
+    if len(source_paths) > 1 and section_map_path is None:
+        raise ValueError("Multiple Markdown sources require --section-map")
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    if output is not None:
+        output = Path(output)
+        validate_output_path(output)
+        if output.exists() and not force:
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+    if delivery_name is not None:
+        delivery = Path(delivery_name)
+        if not delivery.is_absolute():
+            delivery = (output_dir or (output.parent if output is not None else reviewed_docx.parent)) / delivery
+        if delivery.suffix == "":
+            delivery = delivery.with_suffix(".md")
+        validate_output_path(delivery, label="delivery")
+    else:
+        delivery = None
+    for path in source_paths:
+        validate_output_path(path, label="source")
+        if path.exists() and not force:
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {path}")
+    if delivery is not None and delivery.exists() and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {delivery}")
+
+    # A caller asking only for a normal docx2md conversion should retain the
+    # established direct-write behavior and result type.  The staged path is
+    # used whenever we need to fan out to sources or a delivery copy.
+    staged = bool(source_paths or delivery is not None)
+    if not staged:
+        result = docx_to_markdown(
+            reviewed_docx,
+            output=output,
+            media_dir=media_dir,
+            track_changes=track_changes,
+            force=force,
+        )
+        return ReviewApplyResult(reviewed_docx, result.output, (), None, result.media, result.sections)
+
+    with tempfile.TemporaryDirectory(prefix="docforge-apply-review-") as temporary:
+        staging_root = Path(temporary)
+        staged_output = staging_root / "reviewed.md"
+        staged_split = staging_root / "sections" if section_map_path is not None else None
+        staged_media = staging_root / "media-root"
+        converted = docx_to_markdown(
+            reviewed_docx,
+            output=staged_output if staged_split is None else None,
+            split_dir=staged_split,
+            section_map_path=section_map_path,
+            media_dir=staged_media if media_dir is None else media_dir,
+            track_changes=track_changes,
+            force=True,
+        )
+        if staged_split is None:
+            if converted.output is None or not converted.output.exists():
+                raise RuntimeError("Reviewed DOCX conversion produced no Markdown output")
+            markdown_path = converted.output
+            if source_paths:
+                if len(source_paths) != 1:
+                    raise ValueError("Multiple Markdown sources require --section-map")
+                source_payloads = ((source_paths[0], markdown_path.read_bytes()),)
+            else:
+                source_payloads = ()
+        else:
+            markdown_path = None
+            if len(source_paths) != len(converted.sections):
+                raise ValueError(
+                    "Source count does not match section map: "
+                    f"{len(source_paths)} sources for {len(converted.sections)} sections"
+                )
+            source_payloads = tuple(
+                (destination, section.read_bytes())
+                for destination, section in zip(source_paths, converted.sections)
+            )
+
+        if output is not None:
+            if markdown_path is not None:
+                output_payload = markdown_path.read_bytes()
+            else:
+                output_payload = b"\n\n".join(section.read_bytes().rstrip() for section in converted.sections) + b"\n"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = output.with_name(f".{output.name}.docforge-tmp")
+            temporary_path.write_bytes(output_payload)
+            os.replace(temporary_path, output)
+
+        # Check all parents and write only after conversion and cardinality
+        # checks have succeeded.  A temporary sibling + replace prevents a
+        # process interruption from leaving a truncated source.
+        for destination, payload in source_payloads:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = destination.with_name(f".{destination.name}.docforge-tmp")
+            temporary_path.write_bytes(payload)
+            os.replace(temporary_path, destination)
+        if delivery is not None:
+            delivery.parent.mkdir(parents=True, exist_ok=True)
+            if delivery.suffix.casefold() == ".docx":
+                # A delivery name may intentionally refer to the clean Word
+                # artifact rather than a Markdown copy.  Preserve the
+                # reviewed layout, accept its revisions, and remove review
+                # metadata before publishing that path.
+                from .launcher import accept_docx_revisions, remove_docx_comments
+
+                temporary_path = delivery.with_name(f".{delivery.name}.docforge-tmp")
+                shutil.copy2(reviewed_docx, temporary_path)
+                accept_docx_revisions(temporary_path)
+                remove_docx_comments(temporary_path)
+                os.replace(temporary_path, delivery)
+                delivery_payload = None
+            elif markdown_path is not None:
+                delivery_payload = markdown_path.read_bytes()
+            else:
+                # A split conversion has no single Markdown output.  Publish
+                # the deterministic concatenation in section order, retaining
+                # blank lines between source sections for a valid GFM file.
+                delivery_payload = b"\n\n".join(section.read_bytes().rstrip() for section in converted.sections) + b"\n"
+            if delivery_payload is not None:
+                temporary_path = delivery.with_name(f".{delivery.name}.docforge-tmp")
+                temporary_path.write_bytes(delivery_payload)
+                os.replace(temporary_path, delivery)
+
+        # Media extracted into staging must be copied beside a requested
+        # output/delivery path.  Existing ``media_dir`` remains caller-owned;
+        # only the default staged media is promoted to the output directory.
+        if media_dir is None and converted.media:
+            media_destinations = [
+                path for path in (delivery, output, *source_paths) if path is not None
+            ]
+            for media_destination in media_destinations:
+                media_root = media_destination.parent / "media"
+                media_root.mkdir(parents=True, exist_ok=True)
+                for media in converted.media:
+                    target = media_root / media.name
+                    if not target.exists() or force:
+                        shutil.copy2(media, target)
+
+        primary_markdown = output
+        if primary_markdown is None and delivery is not None and delivery.suffix.casefold() != ".docx":
+            primary_markdown = delivery
+        return ReviewApplyResult(
+            reviewed=reviewed_docx,
+            markdown=primary_markdown,
+            sources=source_paths,
+            delivery=delivery,
+            media=converted.media,
+            sections=converted.sections,
+        )
+
+
+# Descriptive aliases keep integrations written against early prototypes
+# working while exposing one canonical operation in the public API.
+apply_reviewed_docx_to_markdown = apply_reviewed_docx
+apply_review_docx = apply_reviewed_docx
+apply_reviewed_docx_to_sources = apply_reviewed_docx
+
+
 __all__ = [
     "MarkdownExportResult",
+    "ReviewApplyResult",
     "docx_to_markdown",
+    "apply_reviewed_docx",
+    "apply_reviewed_docx_to_markdown",
+    "apply_review_docx",
+    "apply_reviewed_docx_to_sources",
     "load_section_map",
     "metadata_markdown",
     "normalize_media_links",
