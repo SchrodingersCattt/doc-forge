@@ -360,6 +360,23 @@ def test_dotx_template_content_type_is_accepted(tmp_path: Path) -> None:
     assert "Body." in "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
 
 
+def test_one_pass_template_body_style_ignores_title_placeholder_shape(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    document.add_paragraph("[TITLE]")
+    body = document.add_paragraph("body prototype")
+    body.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    generated = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "Body text.")
+    assert generated.alignment == WD_ALIGN_PARAGRAPH.LEFT
+
+
 def test_one_section_template_uses_terminal_section_properties(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _one_section_template(template)

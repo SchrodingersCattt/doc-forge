@@ -1156,9 +1156,15 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         for index, node in body_candidates
         if index > first_heading
     ]
-    body = copy.deepcopy(
-        max(post_front or [node for _, node in body_candidates], key=lambda node: len(_text_of(node._p)))._p
-    ) if (post_front or body_candidates) else choose("body")
+    # One-section templates often have no Heading 1 prototype.  Avoid copying
+    # a title or placeholder sample paragraph as the generated body style.
+    def usable_body(node) -> bool:
+        text = _text_of(node._p).strip().lower()
+        return not any(token in text for token in FORBIDDEN_TOKENS)
+
+    body_pool = post_front or [node for _, node in body_candidates]
+    usable_pool = [node for node in body_pool if usable_body(node)] or body_pool
+    body = copy.deepcopy(max(usable_pool, key=lambda node: len(_text_of(node._p)))._p) if usable_pool else choose("body")
     caption = choose("caption", long=True)
     references = choose("reference", long=True)
     references_heading = next((copy.deepcopy(paragraph._p) for paragraph in paragraphs if paragraph.text.strip().lower() in {"references", "bibliography"}), None)
