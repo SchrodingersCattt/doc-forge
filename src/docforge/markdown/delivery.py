@@ -289,7 +289,13 @@ def deliver(
             metadata_path=metadata,
             bibliography_path=bibliography,
             citation_base_path=citation_base,
-            command=["docforge", "deliver", "--profile", source],
+            command=[
+                "docforge",
+                "deliver",
+                "--profile",
+                source,
+                *( ["--accept-revisions"] if accept_revisions else [] ),
+            ],
         )
         built.append(DeliveryArtifact(key, output, manifest, checksum, tuple(inputs)))
         aggregate_map.extend(_source_map(inputs))
