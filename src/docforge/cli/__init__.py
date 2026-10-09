@@ -73,15 +73,36 @@ def build_parser() -> argparse.ArgumentParser:
     roundtrip.add_argument("--output", type=Path, required=True, help="Output DOCX path")
     roundtrip.add_argument("--section-map", type=Path, help="JSON section map copied into the bundle")
     roundtrip.add_argument(
-        "--track-changes",
-        nargs="?",
-        const="all",
-        choices=("accept", "reject", "all"),
-        default="accept",
-        help="Pandoc tracked-change policy during export (default: accept)",
+        "--track-changes", nargs="?", const="all", choices=("accept", "reject", "all"),
+        default="accept", help="Pandoc tracked-change policy during export (default: accept)",
     )
     roundtrip.add_argument("--baseline", type=Path, help="DOCX baseline for an optional native tracked diff")
     roundtrip.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
+    apply_review = sub.add_parser(
+        "apply-review",
+        aliases=("apply-reviewed", "accept-review", "review", "reviewed-docx"),
+        help="Apply reviewed DOCX revisions to Markdown sources and publish a delivery copy",
+    )
+    apply_review.add_argument("reviewed", type=Path, help="Reviewed DOCX path")
+    apply_review.add_argument(
+        "sources", nargs="*", type=Path,
+        help="Markdown source files to update in section-map order",
+    )
+    apply_review.add_argument("--source", dest="source_options", action="append", type=Path, default=[], help="Markdown source to update (repeatable)")
+    apply_review.add_argument("--source-dir", type=Path, help="Directory containing Markdown source files")
+    apply_review.add_argument("-o", "--output", type=Path, help="Single Markdown output path")
+    apply_review.add_argument("--output-dir", type=Path, help="Base directory for a relative delivery name")
+    apply_review.add_argument("--section-map", type=Path, help="JSON section map for multiple Markdown sources")
+    apply_review.add_argument("--media-dir", type=Path, help="Pandoc extraction root (contains media/)")
+    apply_review.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
+    apply_review.add_argument(
+        "--delivery-name", "--delivery", "--publish-name",
+        dest="delivery_name", type=Path,
+        help="Additional Markdown delivery filename or path",
+    )
+    apply_review.add_argument("--publish-as", dest="delivery_name", type=Path, help="Alias for --delivery-name")
+    apply_review.add_argument("--force", action="store_true", help="Overwrite existing source/output files")
 
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
     md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
@@ -130,6 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--verify-clean", action="store_true", help="Require accepted revisions and no comments")
     check.add_argument("--verify-template", action="store_true", help="Check template placeholders, citations, sections, and image parts")
 
+    audit = sub.add_parser("audit", help="Audit a DOCX package and print a machine-readable validation result")
+    audit.add_argument("docx", type=Path, help="DOCX to audit")
+
     gate = sub.add_parser("gate", help="Run project-neutral source quality gates")
     gate_sub = gate.add_subparsers(dest="gate_kind", required=True)
     abbr = gate_sub.add_parser("abbr", help="Check abbreviations and project whitelist")
@@ -161,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_docx2md(args)
         if args.command == "roundtrip":
             return _cmd_roundtrip(args)
+        if args.command in {"apply-review", "apply-reviewed", "accept-review", "review", "reviewed-docx"}:
+            return _cmd_apply_review(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "tex2docx":
@@ -173,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_sourcepack(args)
         if args.command == "check":
             return _cmd_check(args)
+        if args.command == "audit":
+            return _cmd_audit(args)
         if args.command == "gate":
             return _cmd_gate(args)
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as exc:
@@ -312,6 +340,35 @@ def _cmd_redline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_apply_review(args: argparse.Namespace) -> int:
+    from ..markdown import apply_reviewed_docx
+
+    # Positional sources and repeatable --source are intentionally combined so
+    # shell scripts can use either style without changing the API.
+    sources = tuple(dict.fromkeys([*args.sources, *args.source_options]))
+    if args.output is None and not sources and args.source_dir is None and args.delivery_name is None:
+        raise ValueError("apply-review requires --output, source paths, or --delivery-name")
+    result = apply_reviewed_docx(
+        args.reviewed,
+        sources,
+        source_dir=args.source_dir,
+        output=args.output,
+        output_dir=args.output_dir,
+        section_map_path=args.section_map,
+        media_dir=args.media_dir,
+        track_changes=args.track_changes,
+        delivery_name=args.delivery_name,
+        force=args.force,
+    )
+    if result.markdown is not None:
+        print(result.markdown)
+    for source in result.sources:
+        print(source)
+    if result.delivery is not None and result.delivery != result.markdown:
+        print(result.delivery)
+    return 0
+
+
 def _cmd_docx2md(args: argparse.Namespace) -> int:
     from ..markdown import docx_to_markdown
     from ..output import validate_output_path
@@ -351,8 +408,6 @@ def _cmd_roundtrip(args: argparse.Namespace) -> int:
         force=args.force,
         command=args._command_argv,
     )
-    # Keep CLI output machine-readable so callers can audit an invocation
-    # without parsing human status messages.
     import json
 
     print(json.dumps(result.as_dict(), ensure_ascii=False, sort_keys=True))
@@ -498,6 +553,18 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
         verify_template_output(args.docx)
     print(f"OK {args.docx}")
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """Run the same deterministic package audit used by ``roundtrip``."""
+
+    import json
+
+    from ..roundtrip import audit_docx_package
+
+    result = audit_docx_package(args.docx)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 
