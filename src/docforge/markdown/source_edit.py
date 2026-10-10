@@ -19,6 +19,7 @@ from pathlib import Path
 from lxml import etree
 
 from ..docxdiff.package import Package
+from .inline import display, key as inline_key
 from ..output import validate_output_path
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -151,13 +152,7 @@ def _opcode_key(block: _Block) -> str:
 
 
 def _key(raw: str) -> str:
-    value = TAG_RE.sub("", raw)
-    value = ESCAPE_RE.sub(r"\1", value)
-    value = value.replace("*", "")
-    value = unicodedata.normalize("NFKC", value).translate(DASHES)
-    value = value.replace("\u00a0", " ").replace("\u202f", " ")
-    value = LEAD_NUMBER_RE.sub("", value.strip())
-    return re.sub(r"\s+", " ", value).strip()
+    return inline_key(raw)
 
 
 def _paragraph_key(element: etree._Element) -> str:
@@ -375,7 +370,7 @@ def _copy_paragraph_properties(
 def _display_text(raw: str) -> str:
     heading = HEADING_RE.match(raw.strip())
     text = heading.group(2).strip() if heading else raw
-    return ESCAPE_RE.sub(r"\1", text)
+    return text
 
 
 def _run_properties(paragraph: etree._Element | None) -> etree._Element | None:
@@ -391,21 +386,17 @@ def _add_runs(
     base_properties: etree._Element | None,
     extra_marks: frozenset[str] = frozenset(),
 ) -> None:
-    position = 0
-    for match in INLINE_RE.finditer(text):
-        if match.start() > position:
-            _append_run(paragraph, text[position:match.start()], base_properties, set(extra_marks))
-        if match.group(1) is not None:
-            _append_run(paragraph, match.group(1), base_properties, set(extra_marks) | {"b"})
-        elif match.group(2) is not None:
-            _append_run(paragraph, match.group(2), base_properties, set(extra_marks) | {"i"})
-        elif match.group(3) is not None:
-            _append_run(paragraph, match.group(3), base_properties, set(extra_marks) | {"sub"})
-        else:
-            _append_run(paragraph, match.group(4), base_properties, set(extra_marks) | {"sup"})
-        position = match.end()
-    if position < len(text):
-        _append_run(paragraph, text[position:], base_properties, set(extra_marks))
+    for run in display(text):
+        marks = set(extra_marks)
+        if run.bold:
+            marks.add("b")
+        if run.italic:
+            marks.add("i")
+        if run.subscript:
+            marks.add("sub")
+        elif run.superscript:
+            marks.add("sup")
+        _append_run(paragraph, run.text, base_properties, marks)
 
 
 def _append_run(paragraph: etree._Element, text: str, base_properties: etree._Element | None, marks: set[str]) -> None:
