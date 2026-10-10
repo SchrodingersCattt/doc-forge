@@ -111,14 +111,22 @@ def plan_markdown_delta(
         if any(block.kind != "text" for block in new_blocks):
             raise ValueError("markdown delta changes a table or image; those stay in the source DOCX")
         if tag == "insert":
-            anchor = _anchor_before(baseline_blocks, mapping, i1)
-            operations.append(("insert", anchor, new_blocks, prototypes))
+            mode, anchor = _insertion_anchor(mapping, i1)
+            style_anchor = max(
+                (value for key, value in mapping.items() if key < i1),
+                default=None,
+            )
+            operations.append(("insert", mode, anchor, new_blocks, prototypes, style_anchor))
             continue
         mapped = [mapping.get(index) for index in range(i1, i2)]
         if not mapped or any(index is None for index in mapped):
             missing = baseline_blocks[i1].raw[:80]
             raise ValueError(f"edited paragraph does not match a unique source paragraph: {missing}")
-        operations.append(("replace", mapped, new_blocks, prototypes))
+        # Extra edited blocks belong after the replacement and before the next
+        # mapped source node. Keep that node in the operation so opaque source
+        # children between the two mapped paragraphs remain in their place.
+        next_anchor = _next_mapped(mapping, i2)
+        operations.append(("replace", mapped, new_blocks, prototypes, next_anchor))
     return operations
 
 
@@ -156,7 +164,11 @@ def _key(raw: str) -> str:
     value = value.replace("*", "")
     value = unicodedata.normalize("NFKC", value).translate(DASHES)
     value = value.replace("\u00a0", " ").replace("\u202f", " ")
-    value = LEAD_NUMBER_RE.sub("", value.strip())
+    value = value.strip()
+    heading = HEADING_RE.match(value)
+    if heading:
+        value = heading.group(2).strip()
+    value = LEAD_NUMBER_RE.sub("", value)
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -170,37 +182,100 @@ def _paragraph_key(element: etree._Element) -> str:
 
 
 def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[int, int]:
-    unused = {index: key for index, key in docx_keys if key}
+    """Map Markdown blocks to source children without crossing their order.
+
+    The old implementation treated source paragraphs as a bag of strings.
+    That makes duplicate sentences ambiguous and lets a high-similarity
+    paragraph from a distant section capture an edit. Exact keys are paired in
+    a forward-only pass first; a second pass may pair only the nearest
+    still-unmatched neighbour when its fuzzy score is both strong and clearly
+    better than the next neighbour.
+    """
+
+    source = [(index, key) for index, key in docx_keys if key]
+    used: set[int] = set()
     mapping: dict[int, int] = {}
+
+    # Exact keys are anchors. Picking the first occurrence after the previous
+    # anchor gives duplicate sentences their natural occurrence order.
+    cursor = -1
     for index, block in enumerate(blocks):
-        if block.kind != "text" or len(block.key) < 8:
+        if block.kind != "text":
             continue
-        exact = [child for child, key in unused.items() if key == block.key]
-        if len(exact) == 1:
+        exact = [child for child, key in source if child > cursor and child not in used and key == block.key]
+        if exact:
             mapping[index] = exact[0]
-            del unused[exact[0]]
+            used.add(exact[0])
+            cursor = exact[0]
+
+    # Fuzzy matches are deliberately conservative. For each gap between exact
+    # anchors, only the first still-unmatched source paragraph is a candidate;
+    # a distant high-ratio paragraph must remain unmapped. Compare that
+    # candidate with its immediate next neighbour and require a 0.04 margin.
+    for index, block in enumerate(blocks):
+        if block.kind != "text" or index in mapping:
             continue
-        if len(exact) > 1:
+        previous = max((value for key, value in mapping.items() if key < index), default=None)
+        following = min((value for key, value in mapping.items() if key > index), default=None)
+        candidates = [
+            (child, key)
+            for child, key in source
+            if child not in used
+            and (previous is None or child > previous)
+            and (following is None or child < following)
+        ]
+        if not candidates:
             continue
-        ranked = sorted(
-            ((SequenceMatcher(a=block.key, b=key, autojunk=False).ratio(), child) for child, key in unused.items()),
-            reverse=True,
+        best_child, best_key = candidates[0]
+        best_ratio = SequenceMatcher(a=block.key, b=best_key, autojunk=False).ratio()
+        # Compare with the next source neighbour even when that neighbour is
+        # already an exact anchor. A close future anchor makes the fuzzy pair
+        # ambiguous and must therefore fail the required ratio margin.
+        next_key = next(
+            (
+                key
+                for child, key in source
+                if child > best_child
+                and (following is None or child <= following)
+            ),
+            None,
         )
-        if not ranked:
-            continue
-        best_ratio, best_child = ranked[0]
-        second = ranked[1][0] if len(ranked) > 1 else 0.0
-        if best_ratio >= 0.92 and best_ratio - second >= 0.04:
+        next_ratio = (
+            SequenceMatcher(a=block.key, b=next_key, autojunk=False).ratio()
+            if next_key is not None
+            else 0.0
+        )
+        if best_ratio >= 0.92 and best_ratio - next_ratio >= 0.04:
             mapping[index] = best_child
-            del unused[best_child]
+            used.add(best_child)
     return mapping
 
 
 def _anchor_before(blocks: list[_Block], mapping: dict[int, int], start: int) -> int:
-    for index in range(start - 1, -1, -1):
-        if index in mapping:
-            return mapping[index]
-    raise ValueError("inserted Markdown has no matched paragraph before it")
+    """Return the source index used by an insertion at ``start``.
+
+    Kept as a small compatibility helper for callers of the historical
+    private function. New code should use :func:`_insertion_anchor` when it
+    also needs to know whether to insert before or after that node.
+    """
+
+    return _insertion_anchor(mapping, start)[1]
+
+
+def _next_mapped(mapping: dict[int, int], start: int) -> int | None:
+    return min((value for key, value in mapping.items() if key >= start), default=None)
+
+
+def _insertion_anchor(mapping: dict[int, int], start: int) -> tuple[str, int]:
+    """Choose the first mapped node after an insertion, or the previous one."""
+
+    after = _next_mapped(mapping, start)
+    if after is not None:
+        return "before", after
+    before = max((value for key, value in mapping.items() if key < start), default=None)
+    if before is not None:
+        return "after", before
+    raise ValueError("inserted Markdown has no matched paragraph before or after it")
 
 
 def _heading_style_ids(styles_xml: bytes | None) -> dict[int, str]:
@@ -264,35 +339,100 @@ def _apply(root: etree._Element, operations: list[tuple]) -> None:
     body = root.find(f"{{{W}}}body")
     children = [child for child in list(body) if etree.QName(child).localname != "sectPr"]
     tails = {index: child for index, child in enumerate(children)}
+    before_tails: dict[int, etree._Element] = {}
     for operation in operations:
         if operation[0] == "insert":
-            anchor = operation[1]
-            tails[anchor] = _insert_after(tails[anchor], operation[2], operation[3])
+            mode, anchor, blocks, prototypes = operation[1:5]
+            style_anchor = operation[5] if len(operation) > 5 else None
+            style_node = children[style_anchor] if style_anchor is not None else children[anchor]
+            if mode == "before":
+                target = children[anchor]
+                cursor = before_tails.get(anchor)
+                before_tails[anchor] = _insert_before(
+                    target, blocks, prototypes, cursor=cursor, style_anchor=style_node
+                )
+            else:
+                tails[anchor] = _insert_after(
+                    tails[anchor], blocks, prototypes, style_anchor=style_node
+                )
             continue
         indexes, new_blocks, prototypes = operation[1], operation[2], operation[3]
+        next_anchor = operation[4] if len(operation) > 4 else None
         first = children[indexes[0]]
         _write_paragraph(first, new_blocks[0].raw, prototypes, replacement=first)
         for extra in indexes[1:]:
             parent = children[extra].getparent()
             if parent is not None:
                 parent.remove(children[extra])
-        cursor = first
-        for block in new_blocks[1:]:
-            cursor = _insert_after(cursor, [block], prototypes)
-        tails[indexes[0]] = cursor
+        if len(new_blocks) > 1:
+            if next_anchor is not None:
+                target = children[next_anchor]
+                cursor = before_tails.get(next_anchor)
+                before_tails[next_anchor] = _insert_before(
+                    target, new_blocks[1:], prototypes, cursor=cursor
+                )
+            else:
+                tails[indexes[0]] = _insert_after(
+                    first, new_blocks[1:], prototypes, style_anchor=first
+                )
 
 
-def _insert_after(anchor: etree._Element, blocks: list[_Block], prototypes: dict) -> etree._Element:
-    cursor = anchor
+def _insert_before(
+    target: etree._Element,
+    blocks: list[_Block],
+    prototypes: dict,
+    *,
+    cursor: etree._Element | None = None,
+    style_anchor: etree._Element | None = None,
+) -> etree._Element:
+    """Insert blocks immediately before ``target`` in source order.
+
+    ``cursor`` is the tail of an earlier insertion at the same anchor. Keeping
+    it prevents later operations from reversing adjacent inserted paragraphs.
+    """
+
     for block in blocks:
         paragraph = etree.Element(f"{{{W}}}p")
-        properties = _properties_for(block.raw, prototypes, anchor)
+        source = style_anchor if style_anchor is not None else target
+        properties = _properties_for(block.raw, prototypes, source)
         if properties is not None:
             paragraph.append(properties)
         heading = _is_heading(block.raw)
-        run_source = _heading_prototype(block.raw, prototypes) if heading else None
+        run_source = _heading_prototype(block.raw, prototypes) if heading else source
+        _add_runs(
+            paragraph,
+            _display_text(block.raw),
+            _run_properties(run_source),
+            extra_marks={"b"} if heading else frozenset(),
+        )
+        if cursor is None:
+            target.addprevious(paragraph)
+        else:
+            cursor.addnext(paragraph)
+        cursor = paragraph
+    if cursor is None:
+        raise ValueError("cannot insert an empty Markdown block sequence")
+    return cursor
+
+
+def _insert_after(
+    anchor: etree._Element,
+    blocks: list[_Block],
+    prototypes: dict,
+    *,
+    style_anchor: etree._Element | None = None,
+) -> etree._Element:
+    cursor = anchor
+    source = style_anchor if style_anchor is not None else anchor
+    for block in blocks:
+        paragraph = etree.Element(f"{{{W}}}p")
+        properties = _properties_for(block.raw, prototypes, source)
+        if properties is not None:
+            paragraph.append(properties)
+        heading = _is_heading(block.raw)
+        run_source = _heading_prototype(block.raw, prototypes) if heading else source
         if run_source is None:
-            run_source = anchor
+            run_source = source
         _add_runs(
             paragraph,
             _display_text(block.raw),
