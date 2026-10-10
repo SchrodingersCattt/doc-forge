@@ -39,6 +39,7 @@ from .template import (
     verify_template_output,
     write_assembly_sidecars,
 )
+from .source_edit import apply_markdown_delta
 from .docx_export import (
     MarkdownExportResult,
     docx_to_markdown,
@@ -100,4 +101,5 @@ __all__ = [
     "split_markdown_sections",
     "write_conversion_manifest",
     "reuse_unchanged_roundtrip_source",
+    "apply_markdown_delta",
 ]
