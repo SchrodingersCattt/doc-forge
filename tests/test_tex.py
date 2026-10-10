@@ -16,7 +16,12 @@ from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_e
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
 from docforge.math.pandoc import latex_to_omml
-from docforge.tex.converter import add_rich_text, _display_math_rows, latex_to_docx
+from docforge.tex.converter import (
+    _display_math_rows,
+    _normalize_display_math_source,
+    add_rich_text,
+    latex_to_docx,
+)
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -92,6 +97,15 @@ class TokenizeTests(unittest.TestCase):
         self.assertTrue(equation.xpath(".//m:d", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
         self.assertTrue(equation.xpath(".//m:m/m:mr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
         self.assertFalse(equation.xpath(".//m:eqArr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
+
+    def test_legacy_display_macros_are_normalized(self) -> None:
+        normalized = _normalize_display_math_source(
+            r"\vdet + \etasq + \left( x \right) \, y \quad z \qquad q"
+        )
+        self.assertEqual(
+            normalized,
+            r"V_{\mathrm{det}} + \eta^{2} + ( x )   y    z      q",
+        )
 
     def test_starred_equations_do_not_shift_label_numbers(self) -> None:
         source = r"""

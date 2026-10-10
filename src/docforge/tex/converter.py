@@ -815,6 +815,16 @@ def _normalize_display_math_source(s: str) -> str:
         s = s[2:]
     if s.endswith(r"\]"):
         s = s[:-2]
+    # Keep the legacy display-math aliases accepted by the TeX converter.
+    # They are source conveniences rather than environments, so normalizing
+    # them here leaves the structural cases/array/matrix markup untouched.
+    s = re.sub(r"\\left\s*([([|.])", r"\1", s)
+    s = re.sub(r"\\right\s*([)\]|.])", r"\1", s)
+    s = re.sub(r"\\vdet\b", lambda _: r"V_{\mathrm{det}}", s)
+    s = re.sub(r"\\etasq\b", lambda _: r"\eta^{2}", s)
+    s = s.replace(r"\,", " ")
+    s = re.sub(r"\\qquad\b", "    ", s)
+    s = re.sub(r"\\quad\b", "  ", s)
     return s.strip()
 
 
