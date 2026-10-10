@@ -95,6 +95,25 @@ def test_delivery_output_pattern_is_confined_and_expands_role_timestamp() -> Non
         _output_name({}, "article", {"output_pattern": "../{role}.docx"}, timestamp="now")
 
 
+def test_delivery_rejects_colliding_artifact_destinations(tmp_path: Path) -> None:
+    (tmp_path / "body.md").write_text("Body.\n", encoding="utf-8")
+    template = Document()
+    template.add_paragraph("Template")
+    template.save(tmp_path / "template.docx")
+    profile = {
+        "delivery_dir": "delivery",
+        "artifacts": [
+            {"id": "article", "inputs": ["body.md"], "template": "template.docx", "output": "same.docx"},
+            {"id": "supplement", "inputs": ["body.md"], "template": "template.docx", "output": "same.docx"},
+        ],
+    }
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises(ValueError, match="collide"):
+        deliver(path)
+    assert not (tmp_path / "delivery").exists()
+
+
 def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "body.md"
     source.write_text("old\nkeep\n", encoding="utf-8")

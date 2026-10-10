@@ -1306,8 +1306,9 @@ def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) 
     # fields frequently live inside a table and must follow that field's text.
     current_paragraphs = list(current_body.iter(f"{{{W}}}p"))
     if not current_paragraphs:
-        return
+        raise AssertionError(f"Unmatched comment anchors: {sorted(missing_ids)}")
     targets: dict[str, etree._Element] = {}
+    unmatched: list[str] = []
     for identifier in missing_ids:
         old_index = None
         old_text = ""
@@ -1322,13 +1323,11 @@ def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) 
                     target = paragraph
                     break
         if target is None:
-            index = old_index if old_index is not None else 0
-            # Prefer a corresponding paragraph after a deleted first block;
-            # never relocate a review thread to the cover's first paragraph.
-            if index == 0 and len(current_paragraphs) > 1:
-                index = 1
-            target = current_paragraphs[min(index, len(current_paragraphs) - 1)]
+            unmatched.append(identifier)
+            continue
         targets[identifier] = target
+    if unmatched:
+        raise AssertionError(f"Unmatched comment anchors: {sorted(unmatched)}")
     by_kind = (("commentRangeStart", 0), ("commentRangeEnd", 1), ("commentReference", 2))
     for name, position in by_kind:
         for node in raw.findall(f".//w:{name}", NS):

@@ -106,7 +106,8 @@ older `article`/`supplement` keys, `si`, `supporting_information`,
 `sources`/`markdown`, `delivery_names`, and `review`/`reviewed` fields remain
 supported as compatibility aliases and are normalized before building.
 `--accept-revisions` requires a reviewed DOCX, `section_map`, confined
-`source_dir`, and hashed `start_line`/`end_line` ranges. Conversion happens in
+`source_dir`, and hashed source plus reviewed `start_line`/`end_line` ranges.
+Conversion happens in
 a scratch directory and only the mapped ranges are applied to staged Markdown
 copies; any hash or path mismatch aborts before publishing. Outputs and source
 updates are committed together. The aggregate manifest records each source

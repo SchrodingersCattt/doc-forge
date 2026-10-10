@@ -285,6 +285,8 @@ def _confined(path: Path, root: Path, *, label: str) -> Path:
 
 
 def _review_chunks(markdown: str, entries: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    if any(item.get("reviewed_start_line") is None or item.get("reviewed_end_line") is None for item in entries):
+        raise ValueError("section map requires reviewed_start_line/reviewed_end_line for every reviewed section")
     if any(item.get("start") is not None or item.get("end") is not None for item in entries):
         return split_markdown_sections(markdown, entries)
     lines = markdown.splitlines(keepends=True)
@@ -294,10 +296,7 @@ def _review_chunks(markdown: str, entries: list[dict[str, Any]]) -> list[tuple[s
         start = item.get("reviewed_start_line", item.get("start_line"))
         end = item.get("reviewed_end_line", item.get("end_line"))
         if start is None or end is None:
-            if len(entries) != 1:
-                raise ValueError(f"section map entry {filename!r} needs reviewed line range")
-            chunks.append((filename, markdown if markdown.endswith("\n") else markdown + "\n"))
-            continue
+            raise ValueError(f"section map entry {filename!r} needs reviewed line range")
         start, end = int(start), int(end)
         if start < 1 or end < start or end > len(lines):
             raise ValueError(f"reviewed section range is invalid for {filename!r}: {start}-{end}")
@@ -344,6 +343,10 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
     if not reviewed_path.is_file() or not section_map_path.is_file() or not source_dir.is_dir():
         raise FileNotFoundError("reviewed_docx, section_map, and source_dir must exist")
     mapped = load_section_map(section_map_path)
+    required = ("start_line", "end_line", "hash", "reviewed_start_line", "reviewed_end_line")
+    missing = [str(item.get("file", "<unknown>")) for item in mapped if any(item.get(field) is None for field in required)]
+    if missing:
+        raise ValueError("review section map requires source and reviewed line ranges plus hash: " + ", ".join(missing))
     full_md = stage_root / "reviewed" / f"{hashlib.sha1(str(reviewed_path).encode()).hexdigest()}.md"
     full_md.parent.mkdir(parents=True, exist_ok=True)
     docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
@@ -501,6 +504,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if accept_revisions and not any(entry.get("reviewed_docx") for _key, entry in entries):
         raise ValueError("--accept-revisions requires reviewed_docx/reviewed input in the delivery profile")
+    output_targets: set[Path] = set()
     for key, entry in entries:
         reviewed = entry.get("reviewed_docx")
         if reviewed is not None:
@@ -511,6 +515,10 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
                 raise ValueError(f"{key} reviewed DOCX contains unapplied revisions; pass --accept-revisions")
         output = delivery_dir / _output_name(entry, key, payload, timestamp=timestamp)
         _confined(output, delivery_dir, label=f"delivery {key}")
+        output_key = output.resolve()
+        if output_key in output_targets:
+            raise ValueError(f"delivery artifacts collide at output path: {output}")
+        output_targets.add(output_key)
         if output.exists() and not force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
         template = _path(entry.get("template", shared.get("template")), base, label=f"{key}.template")
