@@ -39,6 +39,25 @@ def test_bibtex_year_is_accepted_by_markdown_formatter(tmp_path: Path) -> None:
     assert "**2024**" in format_entry(load_bib(bib_path)["paper"], profile="markdown")
 
 
+@pytest.mark.parametrize("opener, closer", [("{", "}"), ("(", ")")])
+def test_bib_record_delimiters_reach_load_and_format(tmp_path: Path, opener: str, closer: str) -> None:
+    bib_path = tmp_path / "delimiters.bib"
+    bib_path.write_text(
+        f'''@article{opener}paper,
+ author={{A}},
+ title="Title (with parentheses)",
+ journal={{Journal}},
+ year=2024
+{closer}
+''',
+        encoding="utf-8",
+    )
+    entry = load_bib(bib_path)["paper"]
+    rendered = format_entry(entry, profile="markdown")
+    assert "Title (with parentheses)." in rendered
+    assert "**2024**" in rendered
+
+
 def test_resolver_supports_inherited_and_source_order_numbering() -> None:
     entries = {key: {"title": key} for key in ("b", "a", "c")}
     resolver = CitationResolver(entries, strict=True)
