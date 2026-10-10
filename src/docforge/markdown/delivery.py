@@ -441,6 +441,12 @@ def _post_review_source_map(review: _PreparedReview) -> list[dict[str, Any]]:
                 record["path"] = str(logical.resolve())
                 record["source"] = str(logical)
             record["provenance"] = "reviewed-docx-accepted"
+            for changed in review.source_map:
+                if (
+                    changed.get("path") == str(logical or staged)
+                    and changed.get("start_line") == record.get("start_line")
+                ):
+                    record["original_hash"] = changed.get("original_hash")
         result.extend(records)
     return result
 
