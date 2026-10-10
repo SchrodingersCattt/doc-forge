@@ -324,6 +324,59 @@ def test_unknown_citation_fails_before_writing(tmp_path: Path) -> None:
     assert not output.exists()
 
 
+def test_level_one_heading_preserves_markdown_case(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("# Introduction to RNA-seq\n\nBody.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata
+    )
+    assert "Introduction to RNA-seq" in [p.text for p in Document(output).paragraphs]
+
+
+def test_dotx_template_content_type_is_accepted(tmp_path: Path) -> None:
+    template_docx = tmp_path / "template.docx"
+    _one_section_template(template_docx)
+    template = tmp_path / "template.dotx"
+    with __import__("zipfile").ZipFile(template_docx) as source, __import__("zipfile").ZipFile(template, "w") as target:
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                payload = payload.replace(
+                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+                    b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
+                )
+            target.writestr(info, payload)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("# Introduction\n\nBody.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    assert "Body." in "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
+
+
+def test_one_pass_template_body_style_ignores_title_placeholder_shape(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    document.add_paragraph("[TITLE]")
+    body = document.add_paragraph("body prototype")
+    body.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    generated = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "Body text.")
+    assert generated.alignment == WD_ALIGN_PARAGRAPH.LEFT
+
+
 def test_one_section_template_uses_terminal_section_properties(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _one_section_template(template)
@@ -476,6 +529,30 @@ def test_word_compatible_image_bytes_normalizes_large_rgba_png(tmp_path: Path) -
         assert image.format == "PNG"
         assert image.mode == "RGB"
         assert image.size == (4096, 2458)
+
+
+def test_word_compatible_image_bytes_flattens_transparency_and_pdf(tmp_path: Path) -> None:
+    transparent = tmp_path / "transparent.png"
+    image = Image.new("RGBA", (8, 6), (255, 0, 0, 0))
+    image.putpixel((0, 0), (255, 0, 0, 255))
+    image.save(transparent)
+    with Image.open(BytesIO(_word_compatible_image_bytes(transparent))) as flattened:
+        assert flattened.mode == "RGB"
+        assert flattened.getpixel((1, 1)) == (255, 255, 255)
+        assert flattened.getpixel((0, 0)) == (255, 0, 0)
+    try:
+        import fitz
+    except ImportError:
+        return
+    pdf = tmp_path / "figure.pdf"
+    document = fitz.open()
+    page = document.new_page(width=72, height=36)
+    page.draw_rect(fitz.Rect(0, 0, 72, 36), color=(0, 0, 1), fill=(0, 0, 1))
+    document.save(pdf)
+    document.close()
+    with Image.open(BytesIO(_word_compatible_image_bytes(pdf))) as rasterized:
+        assert rasterized.mode == "RGB"
+        assert rasterized.width > rasterized.height
 
 
 def test_figure_span_cli_default_and_override() -> None:
@@ -775,7 +852,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert "CONTENTS" in text
     contents = next(p for p in document.paragraphs if p.text == "CONTENTS")
     assert contents.style.name == "TOC Heading"
-    assert all(value in text for value in ("METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"))
+    assert all(value in text for value in ("Methods", "Supplementary Tables", "Supplementary Figures"))
     headings = [p for p in document.paragraphs if p._p.find(".//" + qn("w:outlineLvl")) is not None]
     numbered = [p.text for p in headings if p.text[:1].isdigit()]
     assert numbered == ["1. One", "2. Two", "1. Table Section", "1. Figure Section"]
@@ -797,7 +874,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert body_indent.get(qn("w:firstLineChars")) == "200"
     assert result.body_first_line_chars == 2
     for paragraph in headings:
-        if paragraph.text in {"METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"}:
+        if paragraph.text in {"Methods", "Supplementary Tables", "Supplementary Figures"}:
             assert paragraph._p.find(".//" + qn("w:pageBreakBefore")) is not None
     assert result.page_break_before_h1 is True
 

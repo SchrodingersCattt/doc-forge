@@ -10,8 +10,10 @@ import copy
 import hashlib
 import json
 import re
+import shutil
 import sys
 import zipfile
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -1155,9 +1157,15 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         for index, node in body_candidates
         if index > first_heading
     ]
-    body = copy.deepcopy(
-        max(post_front or [node for _, node in body_candidates], key=lambda node: len(_text_of(node._p)))._p
-    ) if (post_front or body_candidates) else choose("body")
+    # One-section templates often have no Heading 1 prototype.  Avoid copying
+    # a title or placeholder sample paragraph as the generated body style.
+    def usable_body(node) -> bool:
+        text = _text_of(node._p).strip().lower()
+        return not any(token in text for token in FORBIDDEN_TOKENS)
+
+    body_pool = post_front or [node for _, node in body_candidates]
+    usable_pool = [node for node in body_pool if usable_body(node)] or body_pool
+    body = copy.deepcopy(max(usable_pool, key=lambda node: len(_text_of(node._p)))._p) if usable_pool else choose("body")
     caption = choose("caption", long=True)
     references = choose("reference", long=True)
     references_heading = next((copy.deepcopy(paragraph._p) for paragraph in paragraphs if paragraph.text.strip().lower() in {"references", "bibliography"}), None)
@@ -1418,7 +1426,10 @@ def _clone_rendered_block(
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
         role = f"heading_{level}"
-        return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False, uppercase=level == 1)]
+        # Markdown heading text is authored content.  Preserve its case even
+        # when a template uses an uppercase Heading 1 style; style formatting
+        # must not rewrite the source text.
+        return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False)]
     if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet", "code", "equation", "table", "separator"}:
         generated = render_blocks_to_doc([block], equation_start=equation_number or 1, number_prefix=number_prefix)
         result: list = []
@@ -1440,8 +1451,11 @@ def _clone_rendered_block(
                 old_properties = properties
                 source_properties = _clean_paragraph_prototype(p.get("body")) if p.get("body") is not None else None
                 # Keep list indentation and quote offsets from the generated
-                # paragraph while importing the template's font/spacing.
-                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs"), qn("w:jc")}
+                # paragraph while importing the template's font, spacing, and
+                # justification.  A template's alignment is part of its
+                # semantic body style and must not be replaced by the
+                # temporary renderer's default justification.
+                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs")}
                 for child_prop in list(old_properties):
                     if child_prop.tag not in keep and child_prop.tag != qn("w:pStyle"):
                         old_properties.remove(child_prop)
@@ -1510,8 +1524,8 @@ def _clone_figure(
                 if section_width_twips is not None
                 else int(source_extent.get("cx", "1"))
             )
-            with Image.open(image_path) as image_file:
-                ratio = image_file.height / max(1, image_file.width)
+            image_width, image_height = _image_dimensions(image_path, image_bytes)
+            ratio = image_height / max(1, image_width)
             height = max(1, round(width * ratio))
             extent.set("cx", str(width))
             extent.set("cy", str(height))
@@ -1532,10 +1546,9 @@ def _clone_figure(
         # drawing, constrained to the current section column.
         temporary = Document()
         picture = temporary.add_paragraph()
-        with Image.open(image_path) as image_file:
-            available = section_width_twips * 635 if section_width_twips is not None else _body_column_width_twips(target) * 635
-            width = max(914400, available)
-            picture.add_run().add_picture(str(image_path), width=width)
+        available = section_width_twips * 635 if section_width_twips is not None else _body_column_width_twips(target) * 635
+        width = min(914400 * 6.5, max(914400, available))
+        picture.add_run().add_picture(BytesIO(image_bytes), width=width)
         paragraph = copy.deepcopy(picture._p)
         _set_paragraph_flag(paragraph, "w:keepNext")
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
@@ -1553,13 +1566,41 @@ def _clone_figure(
     return [paragraph, cap]
 
 
+def _rasterize_figure(path: Path):
+    """Load a figure into a Pillow image, rasterizing the first PDF page."""
+    if path.suffix.lower() != ".pdf":
+        return Image.open(path)
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ValueError("PDF figures require the optional PyMuPDF dependency") from exc
+    document = fitz.open(path)
+    try:
+        if document.page_count < 1:
+            raise ValueError(f"PDF figure has no pages: {path}")
+        page = document.load_page(0)
+        pixmap = page.get_pixmap(alpha=False)
+        return Image.open(BytesIO(pixmap.tobytes("png")))
+    finally:
+        document.close()
+
+
+def _image_dimensions(path: Path, payload: bytes | None = None) -> tuple[int, int]:
+    if payload is not None:
+        with Image.open(BytesIO(payload)) as image:
+            return image.size
+    with _rasterize_figure(path) as image:
+        return image.size
+
+
 def _word_compatible_image_bytes(image_path: Path, *, max_dimension: int = 4096) -> bytes:
-    """Return a conservative RGB PNG payload for reliable Word rendering."""
-    with Image.open(image_path) as source:
-        if source.mode in {"RGBA", "LA"} or (source.mode == "P" and "transparency" in source.info):
+    """Return a white-flattened RGB PNG payload for reliable Word rendering."""
+    with _rasterize_figure(image_path) as source:
+        if source.mode in {"RGBA", "LA"} or "transparency" in source.info:
             rgba = source.convert("RGBA")
-            image = Image.new("RGB", rgba.size, (255, 255, 255))
-            image.paste(rgba, mask=rgba.getchannel("A"))
+            background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            background.alpha_composite(rgba)
+            image = background.convert("RGB")
         else:
             image = source.convert("RGB")
         if max(image.size) > max_dimension:
@@ -1613,6 +1654,41 @@ def _insert_before(body, anchor, nodes: Iterable) -> None:
     for node in nodes:
         body.insert(index, node)
         index += 1
+
+
+def _load_template_document(path: Path) -> DocumentType:
+    """Load a clean view of a DOCX or DOTX template.
+
+    Reviewed templates may hide the role prototypes in ``w:ins`` nodes, which
+    python-docx does not expose.  Work on a temporary copy, accept revisions,
+    and then normalize DOTX's main-part content type before opening it.  The
+    caller's source package is never modified and the returned document is an
+    ordinary in-memory python-docx document.
+    """
+    with tempfile.TemporaryDirectory(prefix="docforge-template-") as directory:
+        accepted = Path(directory) / path.name
+        shutil.copyfile(path, accepted)
+        accept_docx_revisions(accepted)
+        try:
+            return Document(accepted)
+        except ValueError as error:
+            template_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+            document_type = b"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+            try:
+                with zipfile.ZipFile(accepted) as source:
+                    content_types = source.read("[Content_Types].xml")
+                    if template_type not in content_types:
+                        raise error
+                    normalized = Path(directory) / "template.docx"
+                    with zipfile.ZipFile(normalized, "w", zipfile.ZIP_DEFLATED) as target:
+                        for info in source.infolist():
+                            payload = source.read(info.filename)
+                            if info.filename == "[Content_Types].xml":
+                                payload = payload.replace(template_type, document_type)
+                            target.writestr(info, payload)
+                    return Document(normalized)
+            except (KeyError, OSError, zipfile.BadZipFile):
+                raise error
 
 
 def _geometry(document: DocumentType) -> tuple[tuple[int, int, int, int, int, int], ...]:
@@ -1884,7 +1960,7 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
-    template = Document(template_path)
+    template = _load_template_document(template_path)
     if citation_format == "template":
         citation_style = (
             CitationStyle.SUPERSCRIPT
