@@ -618,18 +618,6 @@ def _set_paragraph_flag(element, tag: str) -> None:
         properties.append(OxmlElement(tag))
 
 
-def _center_paragraph(element) -> None:
-    properties = element.find(qn("w:pPr"))
-    if properties is None:
-        properties = OxmlElement("w:pPr")
-        element.insert(0, properties)
-    align = properties.find(qn("w:jc"))
-    if align is None:
-        align = OxmlElement("w:jc")
-        properties.append(align)
-    align.set(qn("w:val"), "center")
-
-
 def _override_run_size(element, points: float) -> None:
     value = str(round(points * 2))
     for run in element.iter(qn("w:r")):
@@ -2359,7 +2347,6 @@ def assemble_markdown_template(
         if style_id == styles["title"] and style_id not in shared_roles:
             title_style = _style(template, style_id)
             if title_style.font.size is None:
-                _center_paragraph(node)
                 _override_run_size(node, 18)
     body_element = template._element.body
     for child in list(body_element):
