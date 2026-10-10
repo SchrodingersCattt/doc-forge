@@ -67,6 +67,16 @@ def build_parser() -> argparse.ArgumentParser:
     docx_md.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
     docx_md.add_argument("--force", action="store_true", help="Overwrite existing output files")
 
+    delta = sub.add_parser(
+        "apply-delta",
+        help="Apply a Markdown paragraph delta onto a source DOCX without redrawing it",
+    )
+    delta.add_argument("source", type=Path, help="Source DOCX whose layout is preserved")
+    delta.add_argument("baseline", type=Path, help="Markdown exported from the source DOCX")
+    delta.add_argument("edited", type=Path, help="Edited Markdown; only matched paragraph changes are applied")
+    delta.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    delta.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
     md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
     md2.add_argument("current", type=Path, help="Freshly generated DOCX")
@@ -143,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_md2docx(args)
         if args.command == "docx2md":
             return _cmd_docx2md(args)
+        if args.command == "apply-delta":
+            return _cmd_apply_delta(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "tex2docx":
@@ -162,6 +174,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def _cmd_apply_delta(args: argparse.Namespace) -> int:
+    from ..markdown.source_edit import apply_markdown_delta
+
+    summary = apply_markdown_delta(
+        args.source,
+        args.baseline,
+        args.edited,
+        args.output,
+        overwrite=args.force,
+    )
+    print("markdown delta: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
+    print(args.output)
+    return 0
 
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
