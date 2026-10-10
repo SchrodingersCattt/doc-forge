@@ -525,6 +525,11 @@ def test_redline_stable_bibliography_bracket_labels_and_report(tmp_path: Path) -
     report = json.loads((tmp_path / "alignment.json").read_text(encoding="utf-8"))
     assert report["schema"] == "docforge.redline.v1"
     assert report["actions"]
+    assert report["summary"] == summary
+    assert {
+        key: sum(item.get("summary_key") == key for item in report["actions"])
+        for key in summary
+    } == summary
 
 
 def test_redline_matches_renumbered_references_by_content() -> None:
