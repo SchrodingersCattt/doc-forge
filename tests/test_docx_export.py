@@ -12,7 +12,7 @@ from docx.oxml.ns import qn
 from PIL import Image
 
 from docforge import _pandoc
-from docforge.docxdiff import create_tracked_docx
+from docforge.docxdiff import SparseRedlineError, create_tracked_docx
 from docforge.docxdiff.redline import _accepted_revision_view, _final_blocks, visible_text
 from docforge.markdown import (
     Block,
@@ -269,6 +269,104 @@ def test_redline_accepts_current_revisions_before_diff(tmp_path: Path) -> None:
     assert visible_text(root, "final").strip() == "after"
     assert visible_text(root, "original").strip() == "before"
     assert not root.xpath(".//w:rPrChange", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+
+
+def test_sparse_redline_refuses_without_writing_output(tmp_path: Path) -> None:
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    baseline_document = Document()
+    for index in range(8):
+        baseline_document.add_paragraph(
+            f"baseline alpha beta gamma delta epsilon zeta eta theta {index} has no shared manuscript context."
+        )
+    baseline_document.save(base)
+    current_document = Document()
+    current_document.add_paragraph(
+        "current quartz raven fox maple cedar birch elm has no shared manuscript context."
+    )
+    current_document.save(current)
+    output = tmp_path / "tracked.docx"
+
+    with pytest.raises(SparseRedlineError) as raised:
+        create_tracked_docx(base, current, output, workers=1)
+
+    assert not output.exists()
+    assert raised.value.summary["block_replace"] == 1
+    assert "baseline index" in str(raised.value)
+    assert "current index" in str(raised.value)
+    assert "delete" in str(raised.value)
+    assert "best rejected ratio" in str(raised.value)
+    assert "cutoff" in str(raised.value)
+
+
+def test_sparse_redline_can_explicitly_use_block_replace(tmp_path: Path) -> None:
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    baseline_document = Document()
+    for index in range(8):
+        baseline_document.add_paragraph(
+            f"baseline alpha beta gamma delta epsilon zeta eta theta {index} has no shared manuscript context."
+        )
+    baseline_document.save(base)
+    current_document = Document()
+    current_document.add_paragraph(
+        "current quartz raven fox maple cedar birch elm has no shared manuscript context."
+    )
+    current_document.save(current)
+    output = tmp_path / "tracked.docx"
+
+    summary = create_tracked_docx(
+        base,
+        current,
+        output,
+        workers=1,
+        allow_block_replace=True,
+    )
+
+    assert summary["block_replace"] == 1
+    with zipfile.ZipFile(output) as archive:
+        root = __import__("lxml.etree", fromlist=["etree"]).fromstring(
+            archive.read("word/document.xml")
+        )
+    assert visible_text(root, "final").count("current") == 1
+    assert visible_text(root, "original").count("baseline") == 8
+
+
+def test_sparse_redline_keeps_two_rewrites_word_level_with_shared_blocks(tmp_path: Path) -> None:
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    first = (
+        "This long opening paragraph keeps enough shared context while its middle clause "
+        "describes the baseline process and details clearly for reviewers to inspect each word."
+    )
+    first_new = first.replace("baseline", "current")
+    last = (
+        "Another long paragraph keeps its introduction while the baseline middle sentence "
+        "explains the old process and the ending records baseline details for comparison."
+    )
+    last_new = last.replace("baseline", "current").replace("old", "revised")
+    for path, first_text, last_text in ((base, first, last), (current, first_new, last_new)):
+        document = Document()
+        document.add_paragraph(first_text)
+        for index in range(20):
+            document.add_paragraph(
+                f"Identical body paragraph number {index} with stable words and content for alignment checks."
+            )
+        document.add_paragraph(last_text)
+        document.save(path)
+    output = tmp_path / "tracked.docx"
+
+    summary = create_tracked_docx(base, current, output, workers=1)
+
+    assert summary["changed"] == 2
+    assert "block_replace" not in summary
+    with zipfile.ZipFile(output) as archive:
+        root = __import__("lxml.etree", fromlist=["etree"]).fromstring(
+            archive.read("word/document.xml")
+        )
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=ns)) == 0
+    assert len(root.xpath(".//w:del", namespaces=ns)) >= 2
 
 
 def test_redline_tracks_inserted_table_rows(tmp_path: Path) -> None:
