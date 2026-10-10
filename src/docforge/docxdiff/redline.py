@@ -1302,7 +1302,9 @@ def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) 
     current_body = merged.find(".//w:body", NS)
     if current_body is None:
         return
-    current_paragraphs = current_body.findall("./w:p", NS)
+    # Include paragraphs nested in table cells. Comments on REF/HYPERLINK
+    # fields frequently live inside a table and must follow that field's text.
+    current_paragraphs = list(current_body.iter(f"{{{W}}}p"))
     if not current_paragraphs:
         return
     targets: dict[str, etree._Element] = {}
