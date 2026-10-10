@@ -17,7 +17,6 @@ from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
 from docforge.math.pandoc import latex_to_omml
 from docforge.tex.converter import (
-    _display_math_rows,
     _normalize_display_math_source,
     add_rich_text,
     latex_to_docx,
@@ -98,6 +97,28 @@ class TokenizeTests(unittest.TestCase):
         self.assertTrue(equation.xpath(".//m:m/m:mr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
         self.assertFalse(equation.xpath(".//m:eqArr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
 
+    def test_invisible_right_delimiter_remains_paired_in_omml(self) -> None:
+        source = r"""\left\{
+        \begin{array}{ll}
+        x &= 1 \\
+        y &= 2
+        \end{array}
+        \right."""
+        self.assertEqual(
+            _normalize_display_math_source(source).count(r"\left"),
+            _normalize_display_math_source(source).count(r"\right"),
+        )
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml(source)
+        ns = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
+        delimiter = equation.xpath(".//m:d/m:dPr", namespaces=ns)[0]
+        assert delimiter.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}begChr").get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/math}val"
+        ) == "{"
+        assert delimiter.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}endChr").get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/math}val"
+        ) == ""
+
     def test_legacy_display_macros_are_normalized(self) -> None:
         normalized = _normalize_display_math_source(
             r"\vdet + \etasq + \left( x \right) \, y \quad z \qquad q"
@@ -148,15 +169,6 @@ class TokenizeTests(unittest.TestCase):
         self.assertNotIn("(2)", text)
         self.assertTrue(root.xpath(".//m:d", namespaces=ns))
         self.assertFalse(root.xpath(".//m:eqArr", namespaces=ns))
-
-    def test_aligned_display_rows_are_preserved(self) -> None:
-        rows = _display_math_rows(
-            r"""\begin{align*}
-            M_i &= a_i + b_i,\\
-            N_i &= c_i.
-            \end{align*}"""
-        )
-        self.assertEqual(rows, ["M_i = a_i + b_i", "N_i = c_i."])
 
     def test_tokenize_tex_plain(self) -> None:
         spans = tokenize_tex(r"Hello \alpha and $x_i$.")

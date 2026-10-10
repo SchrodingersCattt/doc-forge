@@ -802,6 +802,60 @@ def add_algorithm(doc: Document, block: str, resolver: CitationResolver,
         _set_paragraph_border(last_para, bottom=True)
 
 
+_DISPLAY_DELIMITER_RE = re.compile(
+    r"\\(?P<side>left|right)\s*"
+    r"(?P<delimiter>\\(?:[{}]|[A-Za-z]+)|[()\[\]|.])"
+)
+
+
+def _normalize_display_delimiters(source: str) -> str:
+    """Normalize paired size delimiters without breaking invisible rights.
+
+    Ordinary ``\\left(...\\right)`` pairs are reduced to their literal
+    delimiters for compatibility with the previous converter.  Pairs that
+    contain a brace or an invisible ``.`` delimiter stay as TeX commands:
+    those commands carry the pairing information needed by texmath (for
+    example ``\\left\\{ ... \\right.``).  Unmatched commands are left alone so
+    strict Pandoc conversion reports the malformed source instead of silently
+    changing its meaning.
+    """
+    tokens = list(_DISPLAY_DELIMITER_RE.finditer(source))
+    if not tokens:
+        return source
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        if token.group("side") == "left":
+            stack.append(index)
+        elif stack:
+            pairs.append((stack.pop(), index))
+    replacements: dict[tuple[int, int], str] = {}
+    for left_index, right_index in pairs:
+        left = tokens[left_index]
+        right = tokens[right_index]
+        left_delimiter = left.group("delimiter")
+        right_delimiter = right.group("delimiter")
+        if (
+            left_delimiter == "."
+            or right_delimiter == "."
+            or left_delimiter.startswith("\\")
+            or right_delimiter.startswith("\\")
+        ):
+            continue
+        replacements[left.span()] = left_delimiter
+        replacements[right.span()] = right_delimiter
+    if not replacements:
+        return source
+    chunks: list[str] = []
+    cursor = 0
+    for start, end in sorted(replacements):
+        chunks.append(source[cursor:start])
+        chunks.append(replacements[(start, end)])
+        cursor = end
+    chunks.append(source[cursor:])
+    return "".join(chunks)
+
+
 def _normalize_display_math_source(s: str) -> str:
     """Remove only outer display delimiters, preserving TeX structure.
 
@@ -818,8 +872,7 @@ def _normalize_display_math_source(s: str) -> str:
     # Keep the legacy display-math aliases accepted by the TeX converter.
     # They are source conveniences rather than environments, so normalizing
     # them here leaves the structural cases/array/matrix markup untouched.
-    s = re.sub(r"\\left\s*([([|.])", r"\1", s)
-    s = re.sub(r"\\right\s*([)\]|.])", r"\1", s)
+    s = _normalize_display_delimiters(s)
     s = re.sub(r"\\vdet\b", lambda _: r"V_{\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: r"\eta^{2}", s)
     s = s.replace(r"\,", " ")
@@ -827,36 +880,6 @@ def _normalize_display_math_source(s: str) -> str:
     s = re.sub(r"\\quad\b", "  ", s)
     return s.strip()
 
-
-def _display_math_rows(math_tex: str) -> list[str]:
-    """Return plain rows for callers that need a display preview.
-
-    Rendering itself intentionally does not use this lossy representation;
-    it sends the complete TeX source to :func:`latex_to_omml`.
-    """
-    s = _normalize_display_math_source(math_tex)
-    # This compatibility helper intentionally returns a plain preview.  The
-    # rendering path above never calls it, so stripping wrappers here cannot
-    # damage the structural OMML representation.
-    s = re.sub(
-        r"\\begin\{(?:equation|aligned|alignedat|align|alignat|gather|gathered|multline|split|cases)\*?\}(?:\{[^}]*\})?",
-        "",
-        s,
-    )
-    s = re.sub(
-        r"\\end\{(?:equation|aligned|alignedat|align|alignat|gather|gathered|multline|split|cases)\*?\}",
-        "",
-        s,
-    )
-    rows = re.split(r"\\\\", s)
-    clean_rows = []
-    for row in rows:
-        row = re.sub(r"\s*&\s*=\s*&\s*", " \u2009=\u2009 ", row)
-        row = row.replace("&", " ")
-        row = re.sub(r"\s+", " ", row).strip(" ,;")
-        if row:
-            clean_rows.append(row)
-    return clean_rows
 
 def _starts_lowercase_continuation(text: str) -> bool:
     match=re.search(r"[A-Za-z]",text)
