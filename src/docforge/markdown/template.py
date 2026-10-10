@@ -1304,6 +1304,30 @@ def _section_orientation(section) -> str:
     return "landscape" if width > height else "portrait"
 
 
+def _section_geometry(section) -> tuple[int, int, int, int, int, int]:
+    """Return page and margin geometry from a ``w:sectPr`` XML element."""
+    page = section.find(qn("w:pgSz"))
+    margins = section.find(qn("w:pgMar"))
+    if page is None:
+        page_width, page_height = 12240, 15840
+    else:
+        page_width = int(page.get(qn("w:w"), "12240"))
+        page_height = int(page.get(qn("w:h"), "15840"))
+    if margins is None:
+        return tuple(value * 635 for value in (page_width, page_height, 1440, 1440, 1440, 1440))
+    return tuple(
+        value * 635
+        for value in (
+            page_width,
+            page_height,
+            int(margins.get(qn("w:top"), "1440")),
+            int(margins.get(qn("w:bottom"), "1440")),
+            int(margins.get(qn("w:left"), "1440")),
+            int(margins.get(qn("w:right"), "1440")),
+        )
+    )
+
+
 def _section_width_twips(section) -> int:
     page = section.find(qn("w:pgSz"))
     margins = section.find(qn("w:pgMar"))
@@ -1949,7 +1973,6 @@ def assemble_markdown_template(
         raise ValueError("Template assembly requires --title or a TITLE metadata value")
 
     sections_before = len(template.sections)
-    geometry = _geometry(template)
     styles = _resolve_style_profile(template, discover_template_styles(template), style_profile)
     regions = _template_regions(template)
     prototypes = _template_prototypes(template, styles, regions)
@@ -2037,10 +2060,13 @@ def assemble_markdown_template(
     # numbering, headers/footers and line-number settings are retained.
     output_nodes: list = []
     section_sources: list[int] = []
+    section_geometries: list[tuple[int, int, int, int, int, int]] = []
     if front_region is not None:
         output_nodes.extend(front)
-        output_nodes.append(_section_break_node(adjusted(front_region.section)))
+        front_section = adjusted(front_region.section)
+        output_nodes.append(_section_break_node(front_section))
         section_sources.append(front_region.index)
+        section_geometries.append(_section_geometry(front_section))
     else:
         output_nodes.extend(front)
 
@@ -2159,6 +2185,7 @@ def assemble_markdown_template(
                 body_break_section = section
             output_nodes.append(_section_break_node(body_break_section))
             section_sources.append(selected_body.index)
+            section_geometries.append(_section_geometry(body_break_section))
             render_section = figure_section
         else:
             render_section = section
@@ -2184,6 +2211,7 @@ def assemble_markdown_template(
                 if requested_orientation == "landscape" and figure_region is not None
                 else selected_body.index
             )
+            section_geometries.append(_section_geometry(figure_section))
         figures.append(
             {
                 "number": figure_index + 1,
@@ -2237,8 +2265,10 @@ def assemble_markdown_template(
     final_region = body_regions[min(body_index, len(body_regions) - 1)]
     # The final section belongs to the document body.  A body-level sectPr is
     # required for Word/LibreOffice to balance the last two-column region.
-    output_nodes.append(adjusted(final_region.section))
+    final_section = adjusted(final_region.section)
+    output_nodes.append(final_section)
     section_sources.append(final_region.index)
+    section_geometries.append(_section_geometry(final_section))
 
     heading_style_ids = {
         styles["heading_1"],
@@ -2301,7 +2331,11 @@ def assemble_markdown_template(
     remove_docx_comments(output)
     _prune_images(output)
     convert_unicode_scripts_in_docx(output)
-    selected_geometry = tuple(geometry[index] for index in section_sources if index < len(geometry))
+    # ``section_sources`` records which template region supplied each section
+    # for auditability. A page-span figure may intentionally change columns
+    # or orientation, so verification uses the adjusted section XML emitted
+    # above instead of blindly reusing the source region geometry.
+    selected_geometry = tuple(section_geometries)
     verification = verify_template_output(
         output,
         expected_sections=len(section_sources),

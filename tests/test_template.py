@@ -420,7 +420,9 @@ def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) 
     assert result.figures[0]["orientation"] == "portrait"
     assert len(document.inline_shapes) == 1
     assert any(p.text.startswith("Figure 1.") for p in document.paragraphs)
-    verify_template_output(output, expected_sections=4)
+    # A portrait page-span figure already fits a one-column body section;
+    # keeping that section avoids redundant continuous breaks.
+    verify_template_output(output, expected_sections=2)
 
 
 def test_replacement_figure_drops_template_crop_and_fills_section_width(tmp_path: Path) -> None:
@@ -568,6 +570,89 @@ def test_portrait_page_span_in_one_column_keeps_existing_section(tmp_path: Path)
     assert result.section_sources == (0, 1)
     assert result.figures[0]["span"] == "page"
     assert result.figures[0]["columns"] == 1
+
+
+@pytest.mark.parametrize(
+    ("body_columns", "body_orientation", "figure_orientation", "expected_sections"),
+    (
+        (1, "portrait", "portrait", 2),
+        (2, "portrait", "portrait", 4),
+        (1, "landscape", "landscape", 2),
+        (2, "landscape", "landscape", 4),
+        (1, "portrait", "landscape", 4),
+        (2, "portrait", "landscape", 4),
+    ),
+)
+def test_page_span_handles_columns_and_orientation(
+    tmp_path: Path,
+    body_columns: int,
+    body_orientation: str,
+    figure_orientation: str,
+    expected_sections: int,
+) -> None:
+    source_image = tmp_path / "source.png"
+    Image.new("RGB", (160, 80), "white").save(source_image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, source_image)
+    document = Document(template)
+    section = document.sections[1]
+    page = section._sectPr.find(qn("w:pgSz"))
+    width = int(page.get(qn("w:w")))
+    height = int(page.get(qn("w:h")))
+    if body_orientation == "landscape" and width < height:
+        width, height = height, width
+    elif body_orientation == "portrait" and width > height:
+        width, height = height, width
+    page.set(qn("w:w"), str(width))
+    page.set(qn("w:h"), str(height))
+    if body_orientation == "landscape":
+        page.set(qn("w:orient"), "landscape")
+    else:
+        page.attrib.pop(qn("w:orient"), None)
+    columns = section._sectPr.find(qn("w:cols"))
+    if body_columns == 2:
+        if columns is None:
+            columns = OxmlElement("w:cols")
+            section._sectPr.append(columns)
+        columns.set(qn("w:num"), "2")
+        columns.set(qn("w:space"), "475")
+    elif columns is not None:
+        columns.attrib.pop(qn("w:num"), None)
+        columns.attrib.pop(qn("w:space"), None)
+    document.save(template)
+
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Body before.\n\n"
+        f"![Figure 1|span=page|orientation={figure_orientation}](source.png)\n\n"
+        "Figure 1. Full-page figure.\n\nBody after.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        line_numbers="on", figure_span="column",
+    )
+    rendered = Document(output)
+    assert len(rendered.sections) == expected_sections
+    assert result.figures[0]["columns"] == 1
+    assert result.figures[0]["orientation"] == figure_orientation
+    figure_sections = [
+        section for section in rendered.sections
+        if (
+            (int(section._sectPr.find(qn("w:pgSz")).get(qn("w:w")))
+             > int(section._sectPr.find(qn("w:pgSz")).get(qn("w:h"))))
+            == (figure_orientation == "landscape")
+            and int(
+                section._sectPr.find(qn("w:cols")).get(qn("w:num"), "1")
+                if section._sectPr.find(qn("w:cols")) is not None
+                else "1"
+            ) == 1
+        )
+    ]
+    assert figure_sections
 
 
 def test_invalid_and_conflicting_image_span_markers_fail(tmp_path: Path) -> None:
