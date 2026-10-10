@@ -5,6 +5,7 @@ from docx import Document
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
 from docforge.markdown.source_edit import apply_markdown_delta
+from docforge.markdown.source_edit import _Block, _map_blocks
 
 
 def test_markdown_delta_keeps_unedited_paragraphs(tmp_path):
@@ -142,3 +143,108 @@ def test_insert_keeps_anchor_size_and_unescapes_markdown(tmp_path):
     assert heading_run.font.size == Pt(14)
     assert citation_run.font.size == Pt(12)
     assert current_doc.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:numPr")) is None
+
+
+def test_insertions_follow_the_next_mapped_paragraph(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    original = [
+        "P stays byte-identical.",
+        "Q is the paragraph whose wording changes.",
+        "R is the next mapped paragraph.",
+        "S stays byte-identical too.",
+    ]
+    for text in original:
+        document.add_paragraph(text)
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("\n\n".join(original), encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "\n\n".join(
+            [
+                original[0],
+                "Q has revised wording.",
+                "Inserted before R (one).",
+                "Inserted before R (two).",
+                original[2],
+                original[3],
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    summary = apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    assert summary == {"replaced": 1, "inserted": 0}
+    assert [paragraph.text for paragraph in Document(output).paragraphs] == [
+        original[0],
+        "Q has revised wording.",
+        "Inserted before R (one).",
+        "Inserted before R (two).",
+        original[2],
+        original[3],
+    ]
+
+
+def test_mapping_pairs_duplicate_sentences_in_source_order():
+    blocks = [_Block("text", "Repeated sentence."), _Block("text", "Repeated sentence.")]
+    assert _map_blocks(blocks, [(3, "Repeated sentence."), (8, "Repeated sentence.")]) == {
+        0: 3,
+        1: 8,
+    }
+
+
+def test_mapping_allows_short_headings_and_does_not_jump_to_distant_fuzzy_match():
+    assert _map_blocks([_Block("text", "# R")], [(2, "R")]) == {0: 2}
+    block = _Block("text", "A sentence with a local edit.")
+    # The distant paragraph is a strong fuzzy match, but the nearest source
+    # neighbour is intentionally unrelated. Ordered matching must leave the
+    # block unmapped instead of reaching across that neighbour.
+    mapping = _map_blocks(
+        [block],
+        [
+            (0, "An unrelated paragraph."),
+            (1, "A sentence with a local edit!"),
+        ],
+    )
+    assert mapping == {}
+
+
+def test_insertion_before_short_heading_skips_unmapped_equation(tmp_path):
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Opening paragraph.")
+    equation = document.add_paragraph()
+    math = etree.SubElement(equation._p, "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath")
+    etree.SubElement(math, "{http://schemas.openxmlformats.org/officeDocument/2006/math}t").text = "E=mc2"
+    document.add_paragraph("R")
+    document.add_paragraph("Closing paragraph.")
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("\n\n".join(["Opening paragraph.", r"\[E=mc^2\]", "# R", "Closing paragraph."]), encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "\n\n".join(
+            [
+                "Opening paragraph.",
+                r"\[E=mc^2\]",
+                "Inserted after the equation.",
+                "# R",
+                "Closing paragraph.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    assert [paragraph.text for paragraph in Document(output).paragraphs] == [
+        "Opening paragraph.",
+        "",
+        "Inserted after the equation.",
+        "R",
+        "Closing paragraph.",
+    ]
