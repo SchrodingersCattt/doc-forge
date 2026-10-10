@@ -1280,6 +1280,74 @@ def _comment_counts(root: etree._Element) -> dict[str, tuple[int, int, int]]:
     return {key: tuple(value) for key, value in result.items()}
 
 
+def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) -> None:
+    """Carry anchors from accepted-away paragraphs to corresponding text.
+
+    A paragraph can disappear while accepting an earlier review pass.  Word's
+    comment part still contains that thread, so dropping its XML anchors makes
+    the comment look orphaned.  Match the old paragraph text first; when the
+    text was deleted, attach the anchor to the nearest surviving paragraph in
+    document order.  The old implementation used the first paragraph for all
+    misses, which visibly moved unrelated comments to the document cover.
+    """
+    wanted = _comment_counts(raw)
+    present = _comment_counts(merged)
+    missing_ids = {
+        identifier for identifier, counts in wanted.items()
+        if present.get(identifier, (0, 0, 0)) != counts
+    }
+    if not missing_ids:
+        return
+    raw_paragraphs = raw.findall(".//w:body/w:p", NS)
+    current_body = merged.find(".//w:body", NS)
+    if current_body is None:
+        return
+    current_paragraphs = current_body.findall("./w:p", NS)
+    if not current_paragraphs:
+        return
+    targets: dict[str, etree._Element] = {}
+    for identifier in missing_ids:
+        old_index = None
+        old_text = ""
+        for index, paragraph in enumerate(raw_paragraphs):
+            if any(node.get(f"{{{W}}}id") == identifier for node in paragraph.findall(".//w:commentRangeStart", NS) + paragraph.findall(".//w:commentRangeEnd", NS) + paragraph.findall(".//w:commentReference", NS)):
+                old_index, old_text = index, _normalize(visible_text(paragraph))
+                break
+        target = None
+        if old_text:
+            for paragraph in current_paragraphs:
+                if _normalize(visible_text(paragraph)) == old_text:
+                    target = paragraph
+                    break
+        if target is None:
+            index = old_index if old_index is not None else 0
+            # Prefer a corresponding paragraph after a deleted first block;
+            # never relocate a review thread to the cover's first paragraph.
+            if index == 0 and len(current_paragraphs) > 1:
+                index = 1
+            target = current_paragraphs[min(index, len(current_paragraphs) - 1)]
+        targets[identifier] = target
+    by_kind = (("commentRangeStart", 0), ("commentRangeEnd", 1), ("commentReference", 2))
+    for name, position in by_kind:
+        for node in raw.findall(f".//w:{name}", NS):
+            identifier = node.get(f"{{{W}}}id", "")
+            if identifier not in targets:
+                continue
+            counts = present.get(identifier, (0, 0, 0))
+            if counts[position] >= wanted.get(identifier, (0, 0, 0))[position]:
+                continue
+            target = targets[identifier]
+            clone = copy.deepcopy(node)
+            if name == "commentRangeStart":
+                insert_at = 1 if target.find("./w:pPr", NS) is not None else 0
+                target.insert(insert_at, clone)
+            else:
+                target.append(clone)
+            updated = list(counts)
+            updated[position] += 1
+            present[identifier] = tuple(updated)
+
+
 def _copy_comment_parts(base: Package, current: Package) -> None:
     def is_review_relationship(rel_type: str, target: str = "") -> bool:
         rel_type = rel_type.lower()
@@ -1541,20 +1609,26 @@ def create_tracked_docx(
     preserve_base_revisions: bool = True,
     ratio_cache: Path | None = None,
     workers: int | None = None,
+    accept_baseline: bool = False,
+    report_path: Path | None = None,
 ) -> dict[str, int]:
     """Write ``output_path`` as ``current_path`` tracked against ``base_path``.
 
     ``ratio_cache`` persists paragraph similarity ratios between runs, and
     ``workers`` sets the process count for ratios not yet cached (``1`` keeps
-    the computation in this process). Neither changes the result.
+    the computation in this process). Neither changes the result. Set
+    ``accept_baseline`` to materialize earlier baseline revisions first;
+    ``report_path`` optionally receives the alignment decisions.
     """
     validate_output_path(output_path)
+    validate_output_path(report_path, label="report")
     base_package = Package.load(base_path)
     current_package = Package.load(current_path)
     raw_base_root = base_package.xml("word/document.xml")
     # Keep the reviewed author's w:ins/w:del tree. Alignment still uses the
     # final view, so only new differences are added on top of those traces.
-    base_root = raw_base_root if preserve_base_revisions else _accepted_revision_view(raw_base_root)
+    baseline_preserve = preserve_base_revisions and not accept_baseline
+    base_root = raw_base_root if baseline_preserve else _accepted_revision_view(raw_base_root)
     # A freshly supplied current document may itself contain an earlier
     # review pass.  Diff only its accepted view so stale w:ins/w:del and
     # formatting-change markers cannot leak into the new redline.
@@ -1575,6 +1649,17 @@ def create_tracked_docx(
     aligned = _align(
         base_blocks, current_blocks, cache_path=ratio_cache, workers=workers
     )
+    alignment_report: list[dict[str, object]] = []
+    for action, base_index, current_index in aligned:
+        old = base_blocks[base_index] if base_index is not None else None
+        new = current_blocks[current_index] if current_index is not None else None
+        alignment_report.append({
+            "action": action,
+            "baseline_index": base_index,
+            "current_index": current_index,
+            "baseline_text": old.text if old is not None else None,
+            "current_text": new.text if new is not None else None,
+        })
     matched = sum(action == "match" for action, _, _ in aligned)
     # A rewritten document has too few shared paragraphs to interleave. Word
     # then drops old sentences into the new cover and headings. Keep the new
@@ -1592,7 +1677,7 @@ def create_tracked_docx(
                 if old.companion is not None and new.companion is not None:
                     children.append(_merge_paragraph(
                         old.companion, new.companion, context,
-                        preserve_base_revisions=preserve_base_revisions,
+                        preserve_base_revisions=baseline_preserve,
                     ))
                 elif new.companion is not None:
                     children.append(copy.deepcopy(new.companion))
@@ -1614,7 +1699,7 @@ def create_tracked_docx(
                         old.element,
                         new.element,
                         context,
-                        preserve_base_revisions=preserve_base_revisions,
+                        preserve_base_revisions=baseline_preserve,
                     )
                 )
                 summary["matched" if old.text == new.text else "changed"] += 1
@@ -1624,7 +1709,7 @@ def create_tracked_docx(
                     new.element,
                     context,
                     carry_base,
-                    preserve_base_revisions=preserve_base_revisions,
+                    preserve_base_revisions=baseline_preserve,
                 )
                 children.append(merged_table)
                 if _normalize(old.text) == _normalize(new.text):
@@ -1687,7 +1772,8 @@ def create_tracked_docx(
         current_body.append(child)
     if current_sectpr is not None:
         current_body.append(copy.deepcopy(current_sectpr))
-    original_markers = _comment_counts(base_root)
+    _carry_missing_comment_markers(raw_base_root, current_root)
+    original_markers = _comment_counts(raw_base_root)
     final_markers = _comment_counts(current_root)
     if final_markers != original_markers:
         missing = {key: value for key, value in original_markers.items() if final_markers.get(key) != value}
@@ -1707,6 +1793,26 @@ def create_tracked_docx(
     if _final_special_structure(current_root) != _final_special_structure(original_current_root):
         raise AssertionError("Tracked final view changed non-text layout controls from the generated DOCX")
     current_package.write(output_path, overwrite=overwrite)
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "schema": "docforge.redline.v1",
+                    "baseline": str(base_path),
+                    "current": str(current_path),
+                    "output": str(output_path),
+                    "accept_baseline": accept_baseline,
+                    "revision_author": author,
+                    "actions": alignment_report,
+                    "summary": summary,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     return summary
 
 

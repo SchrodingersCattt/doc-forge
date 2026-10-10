@@ -1,26 +1,30 @@
-"""Profile-driven delivery of article and supplement DOCX files.
+"""Profile-driven, transactional delivery of Markdown manuscripts.
 
-The delivery layer deliberately stays project-neutral.  A JSON profile names
-Markdown inputs, a template, and delivery names; the same citation manifest is
-then passed from the article to the supplement.  When ``accept_revisions`` is
-requested, reviewed DOCX files are converted to mapped Markdown sections
-before any document is built.  Missing mapping information fails closed so a
-review cannot be silently omitted.
+The delivery command is intentionally the only place where a reviewed DOCX is
+allowed to flow back into source files. A reviewed document is converted in a
+scratch directory, then its mapped line ranges are applied to staged copies of
+the existing Markdown files. Originals and delivery outputs are published
+together only after every artifact has passed preflight and built successfully.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from lxml import etree
+
 from ..output import validate_output_path
-from .docx_export import docx_to_markdown, load_section_map
-from .launcher import parse_markdown
-from .template import AssemblyResult, assemble_markdown_template, sha256_file, write_assembly_sidecars
+from .docx_export import docx_to_markdown, load_section_map, split_markdown_sections
+from .template import AssemblyResult, assemble_markdown_template, write_assembly_sidecars
 
 
 @dataclass(frozen=True)
@@ -43,19 +47,115 @@ class DeliveryResult:
     manifest: Path
 
 
+@dataclass(frozen=True)
+class _PreparedReview:
+    inputs: tuple[Path, ...]
+    logical_inputs: tuple[Path, ...]
+    updates: tuple[tuple[Path, Path], ...]
+    source_map: tuple[dict[str, Any], ...]
+
+
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_REVISION_NAMES = frozenset(
+    {"ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "sectPrChange", "trPrChange"}
+)
+_ROLE_ALIASES = {"si": "supplement", "supporting_information": "supplement"}
+_INPUT_ALIASES = ("inputs", "sources", "markdown")
+_REVIEW_ALIASES = ("reviewed_docx", "reviewed", "review")
+_OPTION_KEYS = (
+    "title", "keep_comments", "skip_images", "columns", "figure_span", "font_family",
+    "east_asia_font", "style_profile", "line_numbers", "include_title",
+    "strip_level_one_headings", "heading_before", "numbering_prefix", "bibliography_scope",
+    "citation_numbering", "bibliography_profile", "include_metadata_back_matter", "native_toc",
+    "restart_heading_numbering", "body_first_line_chars", "page_break_before_h1",
+    "body_font_size", "abstract_font_size", "caption_font_size", "reference_font_size",
+)
+
+
+def _canonical_entry(key: str, value: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    entry = dict(value)
+    for canonical, aliases in (("inputs", _INPUT_ALIASES), ("reviewed_docx", _REVIEW_ALIASES)):
+        if canonical not in entry:
+            for alias in aliases:
+                if alias in entry:
+                    entry[canonical] = entry[alias]
+                    break
+    for canonical, aliases in (("section_map", ("section_map_path",)), ("source_dir", ("sources_dir",)),
+                               ("source_markdown", ("source",))):
+        if canonical not in entry:
+            for alias in aliases:
+                if alias in entry:
+                    entry[canonical] = entry[alias]
+                    break
+    return key, entry
+
+
+def _canonical_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize historical aliases to one versioned delivery profile."""
+    payload = dict(profile)
+    schema = payload.get("schema", payload.get("profile_version"))
+    if schema is not None and str(schema) not in {"docforge.delivery.v1", "1", "1.0"}:
+        raise ValueError(f"unsupported delivery profile schema: {schema}")
+    payload["schema"] = "docforge.delivery.v1"
+    if "delivery_dir" not in payload and "output_dir" in payload:
+        payload["delivery_dir"] = payload["output_dir"]
+    if "names" not in payload and "delivery_names" in payload:
+        payload["names"] = payload["delivery_names"]
+    if "reviewed_docx" not in payload:
+        for alias in _REVIEW_ALIASES[1:]:
+            if alias in payload:
+                payload["reviewed_docx"] = payload[alias]
+                break
+    result: list[tuple[str, dict[str, Any]]] = []
+    artifacts = payload.get("artifacts")
+    if artifacts is not None:
+        if not isinstance(artifacts, list) or not artifacts:
+            raise ValueError("delivery profile 'artifacts' must be a non-empty list")
+        for index, item in enumerate(artifacts):
+            if not isinstance(item, Mapping):
+                raise ValueError(f"delivery artifact {index} must be an object")
+            value = dict(item)
+            key = str(value.pop("id", value.pop("name", f"artifact_{index + 1}")))
+            result.append(_canonical_entry(key, value))
+    else:
+        for original in ("article", "supplement", "si", "supporting_information"):
+            value = payload.get(original)
+            if value is None:
+                continue
+            if not isinstance(value, Mapping):
+                raise ValueError(f"delivery profile '{original}' must be an object")
+            key = _ROLE_ALIASES.get(original, original)
+            if any(item[0] == key for item in result):
+                raise ValueError(f"delivery profile defines '{key}' more than once")
+            result.append((key, _canonical_entry(key, value)[1]))
+    if not result:
+        raise ValueError("delivery profile requires article/supplement or artifacts")
+    canonical_artifacts = [{"id": key, **entry} for key, entry in result]
+    # Preserve the concise root-level review form while still presenting one
+    # canonical per-artifact shape to the rest of the implementation.
+    for item in canonical_artifacts:
+        key = str(item["id"])
+        for field in ("reviewed_docx", "section_map", "source_dir", "source_markdown"):
+            if field in item or field not in payload:
+                continue
+            value = payload[field]
+            item[field] = value.get(key) if isinstance(value, Mapping) else value
+    payload["artifacts"] = canonical_artifacts
+    for key in ("article", "supplement", "si", "supporting_information"):
+        payload.pop(key, None)
+    return payload
+
+
 def _load_profile(profile: Mapping[str, Any] | Path | str) -> tuple[dict[str, Any], Path, str]:
     if isinstance(profile, (str, Path)):
         profile_path = Path(profile)
         payload = json.loads(profile_path.read_text(encoding="utf-8"))
-        source = str(profile_path)
-        base = profile_path.parent.resolve()
+        source, base = str(profile_path), profile_path.parent.resolve()
     else:
-        payload = dict(profile)
-        source = "<mapping>"
-        base = Path.cwd().resolve()
+        payload, source, base = dict(profile), "<mapping>", Path.cwd().resolve()
     if not isinstance(payload, dict):
         raise ValueError("delivery profile must be a JSON object")
-    return payload, base, source
+    return _canonical_profile(payload), base, source
 
 
 def _path(value: Any, base: Path, *, label: str) -> Path:
@@ -67,28 +167,15 @@ def _path(value: Any, base: Path, *, label: str) -> Path:
 
 def _entries(profile: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     artifacts = profile.get("artifacts")
-    if artifacts is not None:
-        if not isinstance(artifacts, list) or not artifacts:
-            raise ValueError("delivery profile 'artifacts' must be a non-empty list")
-        result: list[tuple[str, dict[str, Any]]] = []
-        for index, item in enumerate(artifacts):
-            if not isinstance(item, Mapping):
-                raise ValueError(f"delivery artifact {index} must be an object")
-            value = dict(item)
-            key = str(value.pop("id", value.pop("name", f"artifact_{index + 1}")))
-            result.append((key, value))
-        return result
-    result = []
-    for key in ("article", "supplement", "si", "supporting_information"):
-        value = profile.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, Mapping):
-            raise ValueError(f"delivery profile '{key}' must be an object")
-        canonical = "supplement" if key in {"si", "supporting_information"} else key
-        result.append((canonical, dict(value)))
-    if not result:
-        raise ValueError("delivery profile requires article/supplement or artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("delivery profile requires a non-empty canonical 'artifacts' list")
+    result: list[tuple[str, dict[str, Any]]] = []
+    for index, item in enumerate(artifacts):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"delivery artifact {index} must be an object")
+        value = dict(item)
+        key = str(value.pop("id", value.pop("name", f"artifact_{index + 1}")))
+        result.append((key, _canonical_entry(key, value)[1]))
     return result
 
 
@@ -108,228 +195,354 @@ def _resolve_inputs(value: Any, base: Path, *, label: str) -> list[Path]:
     return result
 
 
-def _output_name(entry: Mapping[str, Any], key: str, profile: Mapping[str, Any]) -> str:
-    names = profile.get("names", profile.get("delivery_names", {}))
+def _safe_relative(value: Any, *, label: str) -> Path:
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError(f"{label} must be a non-empty relative path")
+    candidate = Path(str(value))
+    if candidate.is_absolute() or ".." in candidate.parts or candidate == Path("."):
+        raise ValueError(f"{label} must remain confined to its delivery directory: {value}")
+    return candidate
+
+
+def _output_name(entry: Mapping[str, Any], key: str, profile: Mapping[str, Any], *, timestamp: str) -> Path:
+    names = profile.get("names", {})
     named = names.get(key) if isinstance(names, Mapping) else None
     value = entry.get("delivery_name") or entry.get("output_name") or entry.get("output") or named
     if value is None:
         pattern = entry.get("output_pattern", profile.get("output_pattern"))
         if pattern:
-            value = str(pattern).format(name=key, key=key, kind=key)
+            try:
+                value = str(pattern).format(role=key, name=key, key=key, kind=key, timestamp=timestamp)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"invalid delivery output pattern: {pattern!r}") from exc
         else:
             value = f"{key}.docx"
-    name = Path(str(value)).name
-    if not name.lower().endswith(".docx"):
-        name += ".docx"
-    validate_output_path(Path(name), label=f"delivery {key}")
+    name = _safe_relative(value, label=f"delivery {key}")
+    if name.suffix.lower() != ".docx":
+        name = name.with_suffix(name.suffix + ".docx" if name.suffix else ".docx")
+    validate_output_path(name, label=f"delivery {key}")
     return name
 
 
-def _apply_review(entry: dict[str, Any], base: Path, *, force: bool) -> list[Path] | None:
-    reviewed = entry.get("reviewed_docx") or entry.get("reviewed") or entry.get("review")
-    if reviewed is None:
-        return None
-    reviewed_path = _path(reviewed, base, label="reviewed_docx")
-    if not reviewed_path.is_file():
-        raise FileNotFoundError(f"Reviewed DOCX does not exist: {reviewed_path}")
-    section_map_value = entry.get("section_map") or entry.get("section_map_path")
-    source_dir_value = entry.get("source_dir") or entry.get("sources_dir")
-    source_value = entry.get("source_markdown") or entry.get("source")
-    if section_map_value is not None or source_dir_value is not None:
-        if section_map_value is None or source_dir_value is None:
-            raise ValueError("accepting reviewed revisions requires both section_map and source_dir")
-        section_map = _path(section_map_value, base, label="section_map")
-        source_dir = _path(source_dir_value, base, label="source_dir")
-        load_section_map(section_map)  # validate before changing any files
-        docx_to_markdown(
-            reviewed_path,
-            split_dir=source_dir,
-            section_map_path=section_map,
-            track_changes="accept",
-            force=force,
-        )
-        mapped = load_section_map(section_map)
-        inputs = [source_dir / str(item["file"]) for item in mapped]
-        missing = [str(path) for path in inputs if not path.is_file()]
-        if missing:
-            raise RuntimeError(f"review conversion did not produce mapped source: {missing[0]}")
-        entry["inputs"] = [str(path) for path in inputs]
-        return inputs
-    if source_value is not None:
-        source = _path(source_value, base, label="source_markdown")
-        docx_to_markdown(reviewed_path, output=source, track_changes="accept", force=force)
-        entry["inputs"] = [str(source)]
-        return [source]
-    raise ValueError(
-        "--accept-revisions requires reviewed_docx plus section_map/source_dir "
-        "(or source_markdown) for each reviewed artifact"
-    )
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _source_map(inputs: Sequence[Path]) -> list[dict[str, Any]]:
+    """Return a line-addressable, hashed map of every source paragraph."""
     result: list[dict[str, Any]] = []
     for path in inputs:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
-        try:
-            blocks = parse_markdown(path)
-            paragraphs = [block.text for block in blocks]
-        except (ValueError, RuntimeError):
-            paragraphs = []
-        for index, text in enumerate(paragraphs):
-            result.append({"source": str(path), "paragraph": index, "text": text})
-        # Keep an entry even for an empty or parser-unsupported source so the
-        # manifest remains a complete map of the delivery inputs.
-        if not paragraphs:
-            result.append({"source": str(path), "paragraph": None, "line_count": len(lines)})
+        raw = path.read_text(encoding="utf-8-sig")
+        lines = raw.splitlines(keepends=True)
+        index, paragraph = 0, 0
+        found = False
+        while index < len(lines):
+            while index < len(lines) and not lines[index].strip():
+                index += 1
+            if index >= len(lines):
+                break
+            found, start = True, index
+            while index < len(lines) and lines[index].strip():
+                index += 1
+            segment = "".join(lines[start:index])
+            result.append({
+                "path": str(path.resolve()), "source": str(path),
+                "start_line": start + 1, "end_line": index,
+                "hash": _sha256_text(segment), "paragraph": paragraph,
+                "text": "\n".join(line.rstrip("\r\n") for line in lines[start:index]),
+            })
+            paragraph += 1
+        if not found:
+            result.append({
+                "path": str(path.resolve()), "source": str(path), "start_line": 1,
+                "end_line": 0, "hash": _sha256_text(raw), "paragraph": None,
+                "text": "", "line_count": len(lines),
+            })
     return result
 
 
-def deliver(
-    profile: Mapping[str, Any] | Path | str,
-    *,
-    accept_revisions: bool = False,
-    force: bool = False,
-) -> DeliveryResult:
-    """Build all documents declared by a delivery profile.
+def _docx_has_revisions(path: Path) -> bool:
+    with zipfile.ZipFile(path, "r") as archive:
+        for name in archive.namelist():
+            if not name.startswith("word/") or not name.endswith(".xml"):
+                continue
+            try:
+                root = etree.fromstring(archive.read(name))
+            except etree.XMLSyntaxError:
+                continue
+            if any(etree.QName(node).localname in _REVISION_NAMES for node in root.iter()):
+                return True
+    return False
 
-    ``article`` is built first.  Unless explicitly supplied, a supplement's
-    ``citation_base`` points at the article's manifest, ensuring shared citation
-    numbering.  Relative paths resolve next to the profile file, and every
-    delivery name is validated before writing so accidental ``final`` names
-    cannot be published.
-    """
+
+def _confined(path: Path, root: Path, *, label: str) -> Path:
+    root, candidate = root.resolve(), path.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes its configured directory: {path}") from exc
+    return candidate
+
+
+def _review_chunks(markdown: str, entries: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    if any(item.get("start") is not None or item.get("end") is not None for item in entries):
+        return split_markdown_sections(markdown, entries)
+    lines = markdown.splitlines(keepends=True)
+    chunks: list[tuple[str, str]] = []
+    for item in entries:
+        filename = str(item["file"])
+        start = item.get("reviewed_start_line", item.get("start_line"))
+        end = item.get("reviewed_end_line", item.get("end_line"))
+        if start is None or end is None:
+            if len(entries) != 1:
+                raise ValueError(f"section map entry {filename!r} needs reviewed line range")
+            chunks.append((filename, markdown if markdown.endswith("\n") else markdown + "\n"))
+            continue
+        start, end = int(start), int(end)
+        if start < 1 or end < start or end > len(lines):
+            raise ValueError(f"reviewed section range is invalid for {filename!r}: {start}-{end}")
+        chunks.append((filename, "".join(lines[start - 1:end])))
+    return chunks
+
+
+def _source_range(item: Mapping[str, Any], lines: list[str], *, next_start: int | None = None) -> tuple[int, int]:
+    """Resolve legacy heading maps to concrete source line ranges."""
+    if item.get("start_line") is not None or item.get("end_line") is not None:
+        start = int(item.get("start_line", 1))
+        end = int(item.get("end_line", len(lines)))
+        return start, end
+    headings: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            value = stripped.lstrip("#").strip().rstrip(":").strip().casefold()
+            if value:
+                headings.append((value, index + 1))
+
+    def resolve(reference: Any, default: int) -> int:
+        if reference is None:
+            return default
+        wanted = str(reference.get("heading") if isinstance(reference, Mapping) else reference).rstrip(":").strip().casefold()
+        occurrence = int(reference.get("occurrence", 1)) if isinstance(reference, Mapping) else 1
+        matches = [line for value, line in headings if value == wanted]
+        if occurrence < 1 or occurrence > len(matches):
+            raise ValueError(f"source map heading not found: {wanted!r}")
+        return matches[occurrence - 1]
+
+    start = resolve(item.get("start"), 1)
+    end_default = (next_start - 1) if next_start is not None else len(lines)
+    end = resolve(item.get("end"), end_default)
+    if end < start:
+        raise ValueError(f"source map heading range is empty: {item.get('file')}")
+    return start, end
+
+
+def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _PreparedReview:
+    reviewed_path = _path(entry["reviewed_docx"], base, label="reviewed_docx")
+    section_map_path = _path(entry.get("section_map"), base, label="section_map")
+    source_dir = _path(entry.get("source_dir"), base, label="source_dir").resolve()
+    if not reviewed_path.is_file() or not section_map_path.is_file() or not source_dir.is_dir():
+        raise FileNotFoundError("reviewed_docx, section_map, and source_dir must exist")
+    mapped = load_section_map(section_map_path)
+    full_md = stage_root / "reviewed" / f"{hashlib.sha1(str(reviewed_path).encode()).hexdigest()}.md"
+    full_md.parent.mkdir(parents=True, exist_ok=True)
+    docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
+    chunks = _review_chunks(full_md.read_text(encoding="utf-8"), mapped)
+    staged_root = stage_root / "sources"
+    staged_root.mkdir(parents=True, exist_ok=True)
+    staged_by_original: dict[Path, Path] = {}
+    ranges: dict[Path, list[tuple[int, int]]] = {}
+    records: list[dict[str, Any]] = []
+    for map_index, (item, (_name, replacement)) in enumerate(zip(mapped, chunks)):
+        target = _confined(source_dir / str(item["file"]), source_dir, label="source map file")
+        if not target.is_file():
+            raise FileNotFoundError(f"mapped Markdown source does not exist: {target}")
+        raw = target.read_text(encoding="utf-8-sig")
+        old_lines = raw.splitlines(keepends=True)
+        next_start = None
+        if map_index + 1 < len(mapped) and mapped[map_index + 1].get("file") == item.get("file"):
+            if mapped[map_index + 1].get("start_line") is not None:
+                next_start = int(mapped[map_index + 1]["start_line"])
+            else:
+                next_start, _ = _source_range(mapped[map_index + 1], [line.rstrip("\r\n") for line in old_lines])
+        start, end = _source_range(item, [line.rstrip("\r\n") for line in old_lines], next_start=next_start)
+        if start < 1 or end < start or end > len(old_lines):
+            raise ValueError(f"source map line range is invalid for {target}: {start}-{end}")
+        if any(not (end < a or start > b) for a, b in ranges.setdefault(target, [])):
+            raise ValueError(f"source map ranges overlap for {target}")
+        ranges[target].append((start, end))
+        expected = item.get("hash", item.get("sha256"))
+        old_segment = "".join(old_lines[start - 1:end])
+        if expected is not None and str(expected) != _sha256_text(old_segment):
+            raise RuntimeError(f"source map hash mismatch for {target}:{start}-{end}")
+        if not replacement.endswith("\n"):
+            replacement += "\n"
+        if target not in staged_by_original:
+            staged = staged_root / f"{len(staged_by_original):04d}_{target.name}"
+            shutil.copy2(target, staged)
+            staged_by_original[target] = staged
+        staged = staged_by_original[target]
+        staged_lines = staged.read_text(encoding="utf-8-sig").splitlines(keepends=True)
+        staged_lines[start - 1:end] = [replacement]
+        staged.write_text("".join(staged_lines), encoding="utf-8")
+        records.append({"path": str(target), "start_line": start, "end_line": end, "hash": _sha256_text(replacement), "file": str(item["file"])})
+    if not staged_by_original:
+        raise ValueError("section map produced no source updates")
+    if entry.get("inputs") is not None:
+        logical = _resolve_inputs(entry["inputs"], base, label="inputs")
+    else:
+        logical = list(staged_by_original)
+    staged_inputs = [staged_by_original.get(path.resolve(), path) for path in logical]
+    return _PreparedReview(tuple(staged_inputs), tuple(logical), tuple(staged_by_original.items()), tuple(records))
+
+
+def _rewrite_paths(value: Any, replacements: Mapping[str, str]) -> Any:
+    if isinstance(value, str):
+        return replacements.get(value, value)
+    if isinstance(value, list):
+        return [_rewrite_paths(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_paths(item, replacements) for key, item in value.items()}
+    return value
+
+
+def _commit_transaction(pairs: Sequence[tuple[Path, Path]], *, force: bool) -> None:
+    unique, seen = [], set()
+    for source, destination in pairs:
+        destination = destination.resolve()
+        if destination in seen:
+            continue
+        seen.add(destination)
+        unique.append((source, destination))
+    backup_root = Path(tempfile.mkdtemp(prefix="docforge-commit-backup-"))
+    backups, created = {}, []
+    try:
+        for _source, destination in unique:
+            if destination.exists():
+                if not force:
+                    raise FileExistsError(f"Output exists; pass --force to overwrite: {destination}")
+                backup = backup_root / str(len(backups))
+                shutil.copy2(destination, backup)
+                backups[destination] = backup
+        for source, destination in unique:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.exists():
+                created.append(destination)
+            try:
+                os.replace(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+                source.unlink(missing_ok=True)
+    except Exception:
+        for destination in created:
+            destination.unlink(missing_ok=True)
+        for destination, backup in backups.items():
+            shutil.copy2(backup, destination)
+        raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool = False, force: bool = False) -> DeliveryResult:
+    """Build all artifacts and publish outputs and source updates transactionally."""
     payload, base, source = _load_profile(profile)
     accept_revisions = accept_revisions or bool(payload.get("accept_revisions", False))
-    delivery_dir = _path(payload.get("delivery_dir", payload.get("output_dir", "delivery")), base, label="delivery_dir")
-    delivery_dir.mkdir(parents=True, exist_ok=True)
+    delivery_dir = _path(payload.get("delivery_dir", "delivery"), base, label="delivery_dir").resolve()
     shared = payload.get("shared", {})
     if not isinstance(shared, Mapping):
         raise ValueError("delivery profile 'shared' must be an object")
     entries = _entries(payload)
-    # Citation inheritance is deterministic even when a profile uses the
-    # generic ``artifacts`` list and happens to list the supplement first.
     entries.sort(key=lambda item: (0 if item[0] == "article" else 1))
-    if accept_revisions:
-        has_review = any(
-            isinstance(entry, Mapping)
-            and (entry.get("reviewed_docx") or entry.get("reviewed") or entry.get("review"))
-            for _key, entry in entries
-        ) or bool(payload.get("reviewed_docx") or payload.get("reviewed"))
-        if not has_review:
-            raise ValueError("--accept-revisions requires reviewed_docx/reviewed input in the delivery profile")
-    built: list[DeliveryArtifact] = []
-    aggregate_map: list[dict[str, Any]] = []
-    article_manifest: Path | None = None
-    for key, raw_entry in entries:
-        entry = dict(raw_entry)
-        if accept_revisions:
-            # Allow a top-level reviewed mapping for concise article +
-            # supplement profiles while retaining per-artifact overrides.
-            reviewed_defaults = payload.get("reviewed_docx") or payload.get("reviewed")
-            if "reviewed_docx" not in entry and "reviewed" not in entry and reviewed_defaults is not None:
-                if isinstance(reviewed_defaults, Mapping):
-                    if key in reviewed_defaults:
-                        entry["reviewed_docx"] = reviewed_defaults[key]
-                else:
-                    entry["reviewed_docx"] = reviewed_defaults
-            for field in ("section_map", "section_map_path", "source_dir", "sources_dir", "source_markdown", "source"):
-                if field not in entry and isinstance(payload.get(field), Mapping) and key in payload[field]:
-                    entry[field] = payload[field][key]
-                elif field not in entry and field in payload and not isinstance(payload[field], Mapping):
-                    entry[field] = payload[field]
-            reviewed_inputs = _apply_review(entry, base, force=force)
-        else:
-            reviewed_inputs = None
-        input_value = entry.get("inputs", entry.get("sources", entry.get("markdown")))
-        if input_value is None:
-            raise ValueError(f"delivery artifact '{key}' requires inputs")
-        inputs = reviewed_inputs or _resolve_inputs(input_value, base, label=f"{key}.inputs")
-        template_value = entry.get("template", shared.get("template"))
-        template = _path(template_value, base, label=f"{key}.template")
-        metadata_value = entry.get("metadata", entry.get("metadata_path", shared.get("metadata")))
-        metadata = _path(metadata_value, base, label=f"{key}.metadata") if metadata_value is not None else None
-        bibliography_value = entry.get("bibliography", shared.get("bibliography"))
-        bibliography = _path(bibliography_value, base, label=f"{key}.bibliography") if bibliography_value is not None else None
-        citation_base_value = entry.get("citation_base", shared.get("citation_base", payload.get("citation_base")))
-        if key == "supplement" and citation_base_value is None and article_manifest is not None:
-            citation_base_value = article_manifest
-        citation_base = _path(citation_base_value, base, label=f"{key}.citation_base") if citation_base_value is not None else None
-        options: dict[str, Any] = dict(shared.get("options", {})) if isinstance(shared.get("options", {}), Mapping) else {}
-        if isinstance(payload.get("options"), Mapping):
-            options.update(payload["options"])
-        if isinstance(entry.get("options"), Mapping):
-            options.update(entry["options"])
-        # Profile keys are also accepted as direct assemble options.
-        for option in (
-            "title", "keep_comments", "skip_images", "columns", "figure_span", "font_family",
-            "east_asia_font", "style_profile", "line_numbers", "include_title",
-            "strip_level_one_headings", "heading_before", "numbering_prefix", "bibliography_scope",
-            "citation_numbering", "bibliography_profile", "include_metadata_back_matter", "native_toc",
-            "restart_heading_numbering", "body_first_line_chars", "page_break_before_h1",
-            "body_font_size", "abstract_font_size", "caption_font_size", "reference_font_size",
-        ):
-            if option in entry:
-                options[option] = entry[option]
-        output = delivery_dir / _output_name(entry, key, payload)
-        validate_output_path(output, label=f"delivery {key}")
-        result: AssemblyResult = assemble_markdown_template(
-            inputs,
-            template_path=template,
-            output=output,
-            metadata_path=metadata,
-            bibliography_path=bibliography,
-            citation_base_path=citation_base,
-            force=force,
-            **options,
-        )
-        manifest, checksum = write_assembly_sidecars(
-            result,
-            inputs=inputs,
-            template_path=template,
-            metadata_path=metadata,
-            bibliography_path=bibliography,
-            citation_base_path=citation_base,
-            command=[
-                "docforge",
-                "deliver",
-                "--profile",
-                source,
-                *( ["--accept-revisions"] if accept_revisions else [] ),
-            ],
-        )
-        built.append(DeliveryArtifact(key, output, manifest, checksum, tuple(inputs)))
-        aggregate_map.extend(_source_map(inputs))
-        if key == "article":
-            article_manifest = manifest
-    aggregate = delivery_dir / str(payload.get("manifest", "delivery.manifest.json"))
-    validate_output_path(aggregate, label="delivery manifest")
-    aggregate.write_text(
-        json.dumps(
-            {
-                "schema": "docforge.delivery.v1",
-                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "profile": source,
-                "accept_revisions": accept_revisions,
-                "delivery_dir": str(delivery_dir),
-                "artifacts": [
-                    {
-                        "name": item.name,
-                        "output": str(item.output),
-                        "manifest": str(item.manifest),
-                        "checksum": str(item.checksum),
-                        "inputs": [str(path) for path in item.inputs],
-                    }
-                    for item in built
-                ],
-                "source_paragraph_map": aggregate_map,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return DeliveryResult(delivery_dir, tuple(built), aggregate)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if accept_revisions and not any(entry.get("reviewed_docx") for _key, entry in entries):
+        raise ValueError("--accept-revisions requires reviewed_docx/reviewed input in the delivery profile")
+    for key, entry in entries:
+        reviewed = entry.get("reviewed_docx")
+        if reviewed is not None:
+            reviewed_path = _path(reviewed, base, label="reviewed_docx")
+            if not reviewed_path.is_file():
+                raise FileNotFoundError(reviewed_path)
+            if not accept_revisions and _docx_has_revisions(reviewed_path):
+                raise ValueError(f"{key} reviewed DOCX contains unapplied revisions; pass --accept-revisions")
+        output = delivery_dir / _output_name(entry, key, payload, timestamp=timestamp)
+        _confined(output, delivery_dir, label=f"delivery {key}")
+        if output.exists() and not force:
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+        template = _path(entry.get("template", shared.get("template")), base, label=f"{key}.template")
+        if not template.is_file():
+            raise FileNotFoundError(template)
+        for field in ("metadata", "metadata_path", "bibliography"):
+            value = entry.get(field, shared.get(field))
+            if value is not None and not _path(value, base, label=f"{key}.{field}").is_file():
+                raise FileNotFoundError(_path(value, base, label=f"{key}.{field}"))
+    delivery_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".docforge-delivery-", dir=delivery_dir.parent) as temporary:
+        stage_root, stage_delivery = Path(temporary), Path(temporary) / "delivery"
+        stage_delivery.mkdir()
+        source_updates: dict[Path, Path] = {}
+        prepared = []
+        for key, raw_entry in entries:
+            entry = dict(raw_entry)
+            review = _prepare_review(entry, base, stage_root) if accept_revisions and entry.get("reviewed_docx") else None
+            if review is not None:
+                source_updates.update(dict(review.updates))
+                inputs = list(review.inputs)
+            else:
+                if entry.get("inputs") is None:
+                    raise ValueError(f"delivery artifact '{key}' requires inputs")
+                review, inputs = None, _resolve_inputs(entry["inputs"], base, label=f"{key}.inputs")
+            prepared.append((key, {**entry, "_inputs": inputs}, review, _output_name(entry, key, payload, timestamp=timestamp)))
+        built, source_records, article_manifest = [], [], None
+        stage_manifests: list[Path] = []
+        replacements: dict[str, str] = {}
+        for key, entry, review, output_rel in prepared:
+            inputs = list(entry["_inputs"])
+            template = _path(entry.get("template", shared.get("template")), base, label=f"{key}.template")
+            metadata_value = entry.get("metadata", entry.get("metadata_path", shared.get("metadata")))
+            metadata = _path(metadata_value, base, label=f"{key}.metadata") if metadata_value is not None else None
+            bibliography_value = entry.get("bibliography", shared.get("bibliography"))
+            bibliography = _path(bibliography_value, base, label=f"{key}.bibliography") if bibliography_value is not None else None
+            citation_value = entry.get("citation_base", shared.get("citation_base", payload.get("citation_base")))
+            if key == "supplement" and citation_value is None and article_manifest is not None:
+                citation_value = article_manifest
+            citation_base = _path(citation_value, base, label=f"{key}.citation_base") if citation_value is not None else None
+            options = dict(shared.get("options", {})) if isinstance(shared.get("options", {}), Mapping) else {}
+            if isinstance(payload.get("options"), Mapping):
+                options.update(payload["options"])
+            if isinstance(entry.get("options"), Mapping):
+                options.update(entry["options"])
+            for option in _OPTION_KEYS:
+                if option in entry:
+                    options[option] = entry[option]
+            stage_output = stage_delivery / output_rel
+            stage_output.parent.mkdir(parents=True, exist_ok=True)
+            result: AssemblyResult = assemble_markdown_template(inputs, template_path=template, output=stage_output, metadata_path=metadata, bibliography_path=bibliography, citation_base_path=citation_base, force=True, **options)
+            stage_manifest, stage_checksum = write_assembly_sidecars(result, inputs=inputs, template_path=template, metadata_path=metadata, bibliography_path=bibliography, citation_base_path=citation_base, command=["docforge", "deliver", "--profile", source, *( ["--accept-revisions"] if accept_revisions else [] )])
+            stage_manifests.append(stage_manifest)
+            final_output = delivery_dir / output_rel
+            final_manifest, final_checksum = final_output.with_suffix(".manifest.json"), final_output.with_suffix(".sha256")
+            replacements.update({str(stage_output.resolve()): str(final_output), str(stage_manifest.resolve()): str(final_manifest), str(stage_checksum.resolve()): str(final_checksum)})
+            if review is not None:
+                replacements.update({str(staged.resolve()): str(logical.resolve()) for logical, staged in review.updates})
+            built.append(DeliveryArtifact(key, final_output, final_manifest, final_checksum, tuple(review.logical_inputs if review else inputs)))
+            source_records.extend(_source_map(review.logical_inputs if review else inputs))
+            if key == "article":
+                # The supplement needs a readable citation base while both
+                # artifacts are still staged. It is rewritten to the final
+                # path below before publication.
+                article_manifest = stage_manifest
+        aggregate_rel = _safe_relative(payload.get("manifest", "delivery.manifest.json"), label="delivery manifest")
+        aggregate = stage_delivery / aggregate_rel
+        final_aggregate = delivery_dir / aggregate_rel
+        validate_output_path(final_aggregate, label="delivery manifest")
+        aggregate.write_text(json.dumps({"schema": "docforge.delivery.v1", "generated_at_utc": datetime.now(timezone.utc).isoformat(), "profile": source, "accept_revisions": accept_revisions, "delivery_dir": str(delivery_dir), "artifacts": [{"name": x.name, "output": str(x.output), "manifest": str(x.manifest), "checksum": str(x.checksum), "inputs": [str(p) for p in x.inputs]} for x in built], "source_paragraph_map": source_records}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        for manifest in stage_manifests:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest.write_text(json.dumps(_rewrite_paths(data, replacements), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        pairs = [(file, delivery_dir / file.relative_to(stage_delivery)) for file in stage_delivery.rglob("*") if file.is_file()]
+        pairs.extend((staged, logical) for logical, staged in source_updates.items())
+        _commit_transaction(pairs, force=force)
+        return DeliveryResult(delivery_dir, tuple(built), final_aggregate)
 
 
 __all__ = ["DeliveryArtifact", "DeliveryResult", "deliver"]

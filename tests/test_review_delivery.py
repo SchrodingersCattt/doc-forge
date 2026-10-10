@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
 
 from docforge.cli import build_parser
 from docforge.markdown import deliver
+import docforge.markdown.delivery as delivery_module
 
 
 def test_redline_accept_baseline_named_arguments_parse() -> None:
@@ -47,3 +50,97 @@ def test_deliver_accept_revisions_fails_closed_without_review_input(tmp_path: Pa
     path.write_text(json.dumps(profile), encoding="utf-8")
     with pytest.raises(ValueError, match="reviewed_docx"):
         deliver(path, accept_revisions=True)
+
+
+def test_deliver_default_rejects_unapplied_revisions_before_output(tmp_path: Path) -> None:
+    reviewed = tmp_path / "reviewed.docx"
+    document = Document()
+    document.add_paragraph("Reviewed")
+    document.save(reviewed)
+    with zipfile.ZipFile(reviewed, "r") as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    xml = files["word/document.xml"]
+    marker = b'<w:ins w:id="7" w:author="Reviewer">'
+    xml = xml.replace(b"<w:r>", marker + b"<w:r>", 1).replace(b"</w:r>", b"</w:r></w:ins>", 1)
+    files["word/document.xml"] = xml
+    with zipfile.ZipFile(reviewed, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in files.items():
+            archive.writestr(name, payload)
+    (tmp_path / "body.md").write_text("Body.\n", encoding="utf-8")
+    template = Document()
+    template.add_paragraph("Template")
+    template.save(tmp_path / "template.docx")
+    profile = {
+        "delivery_dir": "delivery",
+        "article": {
+            "inputs": ["body.md"], "template": "template.docx",
+            "reviewed_docx": "reviewed.docx", "section_map": "map.json", "source_dir": ".",
+        },
+    }
+    (tmp_path / "map.json").write_text(json.dumps({"sections": [{"file": "body.md", "start_line": 1, "end_line": 1, "hash": "bad"}]}), encoding="utf-8")
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    with pytest.raises(ValueError, match="unapplied revisions"):
+        deliver(profile_path)
+    assert not (tmp_path / "delivery").exists()
+
+
+def test_delivery_output_pattern_is_confined_and_expands_role_timestamp() -> None:
+    from docforge.markdown.delivery import _output_name
+
+    profile = {"output_pattern": "{role}_{timestamp}.docx"}
+    path = _output_name({}, "article", profile, timestamp="20261010T000000Z")
+    assert path == Path("article_20261010T000000Z.docx")
+    with pytest.raises(ValueError, match="confined"):
+        _output_name({}, "article", {"output_pattern": "../{role}.docx"}, timestamp="now")
+
+
+def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "body.md"
+    source.write_text("old\nkeep\n", encoding="utf-8")
+    template = Document()
+    template.add_paragraph("Template")
+    template.save(tmp_path / "template.docx")
+    reviewed = tmp_path / "reviewed.docx"
+    template.save(reviewed)
+    old_hash = delivery_module._sha256_text("old\n")
+    section_map = {
+        "sections": [{
+            "file": "body.md", "start_line": 1, "end_line": 1,
+            "reviewed_start_line": 1, "reviewed_end_line": 1, "hash": old_hash,
+        }],
+    }
+    (tmp_path / "map.json").write_text(json.dumps(section_map), encoding="utf-8")
+    profile = {
+        "delivery_dir": "delivery",
+        "article": {
+            "inputs": ["body.md"], "template": "template.docx",
+            "reviewed_docx": "reviewed.docx", "section_map": "map.json", "source_dir": ".",
+        },
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    def fake_docx_to_markdown(_input: Path, *, output: Path, **_kwargs):
+        output.write_text("new\n", encoding="utf-8")
+
+    def fake_assemble(_inputs, *, output: Path, **_kwargs):
+        output.write_bytes(b"docx")
+        return SimpleNamespace(output=output)
+
+    def fake_sidecars(result, **_kwargs):
+        manifest = result.output.with_suffix(".manifest.json")
+        checksum = result.output.with_suffix(".sha256")
+        manifest.write_text("{}\n", encoding="utf-8")
+        checksum.write_text("hash\n", encoding="utf-8")
+        return manifest, checksum
+
+    monkeypatch.setattr(delivery_module, "docx_to_markdown", fake_docx_to_markdown)
+    monkeypatch.setattr(delivery_module, "assemble_markdown_template", fake_assemble)
+    monkeypatch.setattr(delivery_module, "write_assembly_sidecars", fake_sidecars)
+    deliver(profile_path, accept_revisions=True, force=True)
+    assert source.read_text(encoding="utf-8") == "new\nkeep\n"
+    source.write_text("changed\nkeep\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        deliver(profile_path, accept_revisions=True, force=True)
+    assert source.read_text(encoding="utf-8") == "changed\nkeep\n"

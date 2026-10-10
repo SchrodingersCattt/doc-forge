@@ -39,7 +39,6 @@ from .template import (
     verify_template_output,
     write_assembly_sidecars,
 )
-from .source_edit import apply_markdown_delta
 from .docx_export import (
     MarkdownExportResult,
     docx_to_markdown,
@@ -53,6 +52,8 @@ from .docx_export import (
     write_conversion_manifest,
     reuse_unchanged_roundtrip_source,
 )
+from .delivery import DeliveryArtifact, DeliveryResult, deliver
+from .source_edit import apply_markdown_delta
 
 __all__ = [
     "Block",
@@ -101,5 +102,8 @@ __all__ = [
     "split_markdown_sections",
     "write_conversion_manifest",
     "reuse_unchanged_roundtrip_source",
+    "DeliveryArtifact",
+    "DeliveryResult",
+    "deliver",
     "apply_markdown_delta",
 ]
