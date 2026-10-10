@@ -66,6 +66,10 @@ docforge md-roundtrip reviewed.docx md --id main --split split.json --render wor
 docforge md-build md --id main -o revised.docx
 docforge redline reviewed.docx revised.docx -o revised_tracked.docx
 
+# Exact DOCX-origin roundtrip (reuse unchanged bytes; patch changed text)
+docforge roundtrip reviewed.docx --workdir md --section-map section-map.json \
+  --output revised.docx --redline revised-tracked.docx --force
+
 # LaTeX manuscript -> DOCX (main + optional SI + bib)
 docforge tex2docx main.tex --si si.tex --bib ref.bib -o main.docx
 

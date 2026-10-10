@@ -10,6 +10,7 @@ docforge md-export  paper.docx md/ --id main --split split.json --bibliography 0
 docforge md-build   md/ --id main -o paper.clean.docx
 docforge redline    --baseline paper.docx --current paper.clean.docx -o paper.tracked.docx --revision-author NAME
 docforge md-roundtrip paper.docx md/ --id main --split split.json --render word
+docforge roundtrip paper.docx --workdir md/ --section-map section-map.json --output paper.roundtrip.docx
 ```
 
 `md-roundtrip` exports, rebuilds and compares. It passes only if:
@@ -25,6 +26,15 @@ docforge md-roundtrip paper.docx md/ --id main --split split.json --render word
 Word is the reference renderer (`--render word`, Windows with pywin32).
 LibreOffice shapes text per run, so merging two runs with identical formatting
 can move its line breaks even though Word lays the text out the same way.
+
+`roundtrip` is the package-preserving command for a DOCX-origin bundle. It
+records section and media hashes in a portable output manifest. If those hashes
+are unchanged, the source package is copied byte-for-byte and the report uses
+`mode: exact-source-reuse`. If Markdown changed, the command applies the delta
+to the source package and reports `mode: source-package-patch`; it never redraws
+the document through a Markdown renderer. `--baseline` accepts a DOCX baseline
+for `--redline` or a Markdown baseline for a custom delta, and
+`--track-changes` controls DOCX-to-Markdown revision handling.
 
 ## Bundle layout
 

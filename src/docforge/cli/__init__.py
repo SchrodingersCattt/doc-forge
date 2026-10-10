@@ -96,6 +96,19 @@ def build_parser() -> argparse.ArgumentParser:
     mdr.add_argument("--report", type=Path, help="Write the JSON report here")
     mdr.add_argument("--force", action="store_true", help="Re-export a document that is already in the bundle")
 
+    rt = sub.add_parser(
+        "roundtrip",
+        help="Exact DOCX roundtrip: reuse unchanged source or patch its package",
+    )
+    rt.add_argument("input", type=Path, help="DOCX source")
+    rt.add_argument("--workdir", type=Path, required=True, help="Markdown bundle directory")
+    rt.add_argument("--output", "-o", type=Path, required=True, help="Round-tripped DOCX")
+    rt.add_argument("--section-map", type=Path, required=True, help="JSON section map for DOCX-origin Markdown")
+    rt.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
+    rt.add_argument("--baseline", type=Path, help="Baseline DOCX for redline, or baseline Markdown")
+    rt.add_argument("--redline", type=Path, help="Optional tracked-changes DOCX output")
+    rt.add_argument("--force", action="store_true", help="Overwrite output and bundle files")
+
     delta = sub.add_parser(
         "apply-delta",
         help="Apply a Markdown paragraph delta onto a source DOCX without redrawing it",
@@ -200,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_md_build(args)
         if args.command == "md-roundtrip":
             return _cmd_md_roundtrip(args)
+        if args.command == "roundtrip":
+            return _cmd_roundtrip(args)
         if args.command == "apply-delta":
             return _cmd_apply_delta(args)
         if args.command == "redline":
@@ -387,6 +402,23 @@ def _cmd_md_roundtrip(args: argparse.Namespace) -> int:
         args.report.write_text(text, encoding="utf-8")
     print(text)
     return 0 if report["ok"] else 1
+
+
+def _cmd_roundtrip(args: argparse.Namespace) -> int:
+    from ..docxmd import roundtrip
+
+    report = roundtrip(
+        args.input,
+        args.workdir,
+        section_map=args.section_map,
+        track_changes=args.track_changes,
+        baseline=args.baseline,
+        redline=args.redline,
+        output=args.output,
+        force=args.force,
+    )
+    print(json.dumps(report, indent=1, ensure_ascii=False, default=str))
+    return 0 if report.get("ok") else 1
 
 
 def _cmd_apply_delta(args: argparse.Namespace) -> int:
