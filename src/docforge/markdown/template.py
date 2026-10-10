@@ -460,7 +460,7 @@ def _apply_style_to_paragraph(element, document: DocumentType, style_id: str) ->
     # w:jc values from the temporary renderer or a prototype would compete
     # with that semantic style, so discard them after grafting the paragraph.
     alignment = properties.find(qn("w:jc"))
-    if alignment is not None:
+    if alignment is not None and style_id != "Normal":
         properties.remove(alignment)
 
 
@@ -495,7 +495,7 @@ def _is_section_break(element) -> bool:
     return element.tag == qn("w:p") and element.find(".//" + qn("w:sectPr")) is not None
 
 
-def _clean_paragraph_prototype(element):
+def _clean_paragraph_prototype(element, *, keep_alignment: bool = False):
     """Keep a prototype's paragraph properties but remove example content."""
     result = copy.deepcopy(element)
     properties = result.find(qn("w:pPr"))
@@ -509,7 +509,7 @@ def _clean_paragraph_prototype(element):
             # Direct alignment belongs to the sample paragraph, not the
             # semantic role.  Let the named style define it for generated
             # paragraphs.
-            if child.tag in {qn("w:sectPr"), qn("w:jc")}:
+            if child.tag == qn("w:sectPr") or (child.tag == qn("w:jc") and not keep_alignment):
                 properties.remove(child)
     for child in list(result):
         if child.tag != qn("w:pPr"):
@@ -702,7 +702,7 @@ def _new_paragraph(
         if properties is not None:
             element.remove(properties)
         if original_properties is not None:
-            element.insert(0, _clean_paragraph_prototype(prototype).find(qn("w:pPr")))
+            element.insert(0, _clean_paragraph_prototype(prototype, keep_alignment=style_id == "Normal").find(qn("w:pPr")))
     properties = element.find(qn("w:pPr"))
     if properties is None:
         properties = OxmlElement("w:pPr")
@@ -1502,10 +1502,15 @@ def _clone_rendered_block(
                     properties = OxmlElement("w:pPr")
                     clone.insert(0, properties)
                 old_properties = properties
-                source_properties = _clean_paragraph_prototype(p.get("body")) if p.get("body") is not None else None
+                source_properties = (
+                    _clean_paragraph_prototype(p.get("body"), keep_alignment=styles["body"] == "Normal")
+                    if p.get("body") is not None else None
+                )
                 # Keep list indentation and quote offsets from the generated
                 # paragraph while importing the template's font/spacing.
                 keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs")}
+                if styles["body"] == "Normal":
+                    keep.add(qn("w:jc"))
                 for child_prop in list(old_properties):
                     if child_prop.tag not in keep and child_prop.tag != qn("w:pStyle"):
                         old_properties.remove(child_prop)
