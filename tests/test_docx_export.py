@@ -423,7 +423,7 @@ def test_redline_keeps_low_similarity_same_slot_as_word_diff(tmp_path: Path) -> 
 def test_redline_keeps_omml_atomic_while_diffing_surrounding_words() -> None:
     from lxml import etree
 
-    from docforge.docxdiff.redline import Context, M, W, _merge_paragraph
+    from docforge.docxdiff.redline import Context, M, W, _accepted_revision_view, _merge_paragraph
 
     def paragraph(prefix: str, equation: str, suffix: str) -> etree._Element:
         result = etree.Element(f"{{{W}}}p", nsmap={"w": W, "m": M})
@@ -436,16 +436,35 @@ def test_redline_keeps_omml_atomic_while_diffing_surrounding_words() -> None:
         etree.SubElement(run, f"{{{W}}}t").text = suffix
         return result
 
-    merged = _merge_paragraph(
-        paragraph("Before ", "x", " after."),
-        paragraph("Changed ", "x", " after."),
-        Context("tester", 1),
-    )
+    base = paragraph("Before ", "x", " after.")
+    current = paragraph("Changed ", "x", " after.")
+    merged = _merge_paragraph(base, current, Context("tester", 1))
     ns = {"w": W, "m": M}
     assert len(merged.xpath("./m:oMath", namespaces=ns)) == 1
     assert merged.xpath("./w:del", namespaces=ns)
     assert merged.xpath("./w:ins", namespaces=ns)
     assert not merged.xpath("./w:pPr/w:rPr/w:del", namespaces=ns)
+    accepted = _accepted_revision_view(merged)
+    assert etree.tostring(accepted.find("./m:oMath", ns), method="c14n") == etree.tostring(
+        current.find("./m:oMath", ns), method="c14n"
+    )
+
+
+def test_redline_atomic_registry_keeps_distinct_math_signatures_distinct() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import M, _AtomicRegistry, _atomic_token
+
+    def equation(text: str) -> etree._Element:
+        root = etree.Element(f"{{{M}}}oMath", nsmap={"m": M})
+        etree.SubElement(root, f"{{{M}}}t").text = text
+        return root
+
+    registry = _AtomicRegistry()
+    first, second = equation("first"), equation("second")
+    assert _atomic_token(first, registry) != _atomic_token(second, registry)
+    assert _atomic_token(first, registry) == _atomic_token(first, registry)
+    assert _atomic_token(first) != _atomic_token(second)
 
 
 def test_redline_keeps_unchanged_drawing_atomic_with_word_revisions(tmp_path: Path) -> None:
@@ -554,6 +573,22 @@ def test_redline_matches_renumbered_references_by_content() -> None:
         ("match", 0, 0),
         ("match", 1, 1),
     ]
+
+
+def test_redline_prefers_stable_bibliography_bookmark_over_body_similarity() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _score
+
+    def block(text: str) -> Block:
+        paragraph = etree.Element(f"{{{W}}}p", nsmap={"w": W})
+        bookmark = etree.SubElement(paragraph, f"{{{W}}}bookmarkStart")
+        bookmark.set(f"{{{W}}}name", "ref_same-key")
+        run = etree.SubElement(paragraph, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = text
+        return Block(paragraph, "p", text, "Bibliography", False)
+
+    assert _score(block("[1] Completely old title."), block("[9] Rewritten title.")) > 0
 
 
 def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:

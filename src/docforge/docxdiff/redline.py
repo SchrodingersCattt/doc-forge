@@ -204,15 +204,6 @@ def _atomic_roots(paragraph: etree._Element) -> list[etree._Element]:
     return roots
 
 
-def _math_roots(paragraph: etree._Element) -> list[etree._Element]:
-    """Return top-level OMML objects (legacy private helper)."""
-    return [
-        root
-        for root in _atomic_roots(paragraph)
-        if etree.QName(root).namespace == M
-    ]
-
-
 def _atomic_signature(root: etree._Element) -> bytes:
     """Return an identity for an atomic object independent of package IDs.
 
@@ -231,22 +222,32 @@ def _atomic_signature(root: etree._Element) -> bytes:
     return etree.tostring(clone, method="c14n")
 
 
-def _atomic_token(root: etree._Element, occupied: dict[str, etree._Element] | None = None) -> str:
-    """Return a stable one-character token for one atomic layout object."""
-    signature = _atomic_signature(root)
-    digest = hashlib.sha1(signature).digest()
-    offset = int.from_bytes(digest[:2], "big") % MATH_PUA_SIZE
-    while occupied is not None:
-        token = chr(MATH_PUA_START + offset)
-        prior = occupied.get(token)
-        if prior is None or _atomic_signature(prior) == signature:
-            occupied[token] = root
-            return token
-        offset = (offset + 1) % MATH_PUA_SIZE
-    return chr(MATH_PUA_START + offset)
+class _AtomicRegistry:
+    """Assign collision-free private tokens to complete atomic signatures."""
+
+    def __init__(self) -> None:
+        self._tokens: dict[bytes, str] = {}
+        self._next = 0
+
+    def token(self, root: etree._Element) -> str:
+        signature = _atomic_signature(root)
+        existing = self._tokens.get(signature)
+        if existing is not None:
+            return existing
+        if self._next >= MATH_PUA_SIZE:
+            raise ValueError("too many atomic objects in one paragraph")
+        token = chr(MATH_PUA_START + self._next)
+        self._next += 1
+        self._tokens[signature] = token
+        return token
 
 
-_math_token = _atomic_token
+_DEFAULT_ATOMIC_REGISTRY = _AtomicRegistry()
+
+
+def _atomic_token(root: etree._Element, registry: _AtomicRegistry | None = None) -> str:
+    """Return a collision-free token for a complete atomic object signature."""
+    return (registry or _DEFAULT_ATOMIC_REGISTRY).token(root)
 
 
 def visible_text(element: etree._Element, view: str = "final") -> str:
@@ -455,6 +456,13 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     label_a, label_b = _float_label(a), _float_label(b)
     if label_a and label_b and label_a != label_b:
         return -8.0
+    stable_a, stable_b = _stable_block_label(left), _stable_block_label(right)
+    if stable_a or stable_b:
+        if stable_a is None or stable_b is None or stable_a != stable_b:
+            return -8.0
+        # A stable key is stronger evidence than a wording ratio. Keep the
+        # entry in place even when an author list or title was rewritten.
+        return 7.0
     reference_a, reference_b = _reference_content(left), _reference_content(right)
     if reference_a and reference_b:
         # Numeric markers are presentation, not identity. Pair entries whose
@@ -469,13 +477,6 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
         # generic paragraph score, which could cross-pair adjacent entries
         # that happen to share an author or journal name.
         return -8.0
-    stable_a, stable_b = _stable_block_label(left), _stable_block_label(right)
-    if stable_a and stable_b:
-        if stable_a != stable_b:
-            return -8.0
-        # A stable key is stronger evidence than a wording ratio.  Keep the
-        # entry in place even when an author list or title was rewritten.
-        return 7.0
     if left.kind != "p":
         if a == b:
             return 5.0
@@ -566,8 +567,9 @@ def _same_slot(left: Block, right: Block) -> bool:
     insertions, deletions, and moved figures as structural revisions.
     """
     left_label, right_label = _stable_block_label(left), _stable_block_label(right)
-    if left_label and right_label and left_label != right_label:
-        return False
+    if left_label or right_label:
+        if left_label is None or right_label is None or left_label != right_label:
+            return False
     left_reference, right_reference = _reference_content(left), _reference_content(right)
     if (left_reference is None) != (right_reference is None):
         return False
@@ -689,13 +691,14 @@ def _segments(
     view: str,
     *,
     atomic_math: bool = False,
+    atomic_registry: _AtomicRegistry | None = None,
 ) -> tuple[str, list[tuple[int, int, Style]]]:
     pieces: list[str] = []
     spans: list[tuple[int, int, Style]] = []
     offset = 0
     roots = _atomic_roots(paragraph) if atomic_math else []
     root_set = set(roots)
-    occupied: dict[str, etree._Element] = {}
+    registry = atomic_registry or _AtomicRegistry()
     for node in paragraph.iter():
         if atomic_math and node is not paragraph and node not in root_set:
             ancestor = node.getparent()
@@ -710,7 +713,7 @@ def _segments(
         if atomic_math and node in root_set:
             if view == "final" and (_inside(node, "del") or _inside(node, "moveFrom")):
                 continue
-            value = _atomic_token(node, occupied)
+            value = _atomic_token(node, registry)
             style = Style(None)
             run = node
             while run is not None and run.tag != f"{{{W}}}r":
@@ -1051,15 +1054,15 @@ def _append_tracked(
         index = end
 
 
-def _atomic_token_map(paragraph: etree._Element) -> dict[str, etree._Element]:
-    occupied: dict[str, etree._Element] = {}
+def _atomic_token_map(
+    paragraph: etree._Element,
+    registry: _AtomicRegistry | None = None,
+) -> dict[str, etree._Element]:
+    registry = registry or _AtomicRegistry()
     return {
-        _atomic_token(root, occupied): root
+        _atomic_token(root, registry): root
         for root in _atomic_roots(paragraph)
     }
-
-
-_math_token_map = _atomic_token_map
 
 
 def _replace_atomic_tokens(
@@ -1120,9 +1123,6 @@ def _replace_atomic_tokens(
                     owner.insert(position, replacement)
 
 
-_replace_math_tokens = _replace_atomic_tokens
-
-
 def _merge_paragraph(
     base: etree._Element,
     current: etree._Element,
@@ -1131,10 +1131,15 @@ def _merge_paragraph(
     preserve_base_revisions: bool = False,
 ) -> etree._Element:
     atomic_math = bool(_atomic_roots(base) or _atomic_roots(current))
-    base_math = _atomic_token_map(base) if atomic_math else {}
-    current_math = _atomic_token_map(current) if atomic_math else {}
-    base_text, base_spans = _segments(base, "final", atomic_math=atomic_math)
-    current_text, current_spans = _segments(current, "final", atomic_math=atomic_math)
+    atomic_registry = _AtomicRegistry() if atomic_math else None
+    base_atomic = _atomic_token_map(base, atomic_registry) if atomic_registry else {}
+    current_atomic = _atomic_token_map(current, atomic_registry) if atomic_registry else {}
+    base_text, base_spans = _segments(
+        base, "final", atomic_math=atomic_math, atomic_registry=atomic_registry
+    )
+    current_text, current_spans = _segments(
+        current, "final", atomic_math=atomic_math, atomic_registry=atomic_registry
+    )
     events = _events(base, atomic_math=atomic_math)
     base_has_revisions = preserve_base_revisions and _has_revisions(base)
     # Unchanged final text keeps the reviewed w:ins/w:del author, date, and
@@ -1212,7 +1217,7 @@ def _merge_paragraph(
                 Event("baseline-revision", offset, -1, revision)
             )
     if atomic_math:
-        _replace_atomic_tokens(nodes, base_math, current_math, context)
+        _replace_atomic_tokens(nodes, base_atomic, current_atomic, context)
     result = etree.Element(f"{{{W}}}p", nsmap=current.nsmap)
     ppr = current.find("./w:pPr", NS)
     ppr_from_current = ppr is not None
