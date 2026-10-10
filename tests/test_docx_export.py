@@ -514,6 +514,45 @@ def test_redline_keeps_unchanged_drawing_atomic_with_word_revisions(tmp_path: Pa
     assert visible_text(paragraph, "final") == "Changed  after."
 
 
+def test_redline_ignores_drawing_bookkeeping_ids(tmp_path: Path) -> None:
+    from lxml import etree
+
+    image = tmp_path / "figure.png"
+    Image.new("RGB", (12, 12), "purple").save(image)
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    document = Document()
+    document.add_paragraph().add_run().add_picture(str(image))
+    document.save(base)
+    document.save(current)
+
+    def retag(path: Path, shape_id: str, anchor: str | None) -> None:
+        with zipfile.ZipFile(path) as archive:
+            root = etree.fromstring(archive.read("word/document.xml"))
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        doc_pr = root.find(".//wp:docPr", {"wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"})
+        doc_pr.set("id", shape_id)
+        inline = doc_pr.getparent()
+        if anchor:
+            inline.set("{http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing}anchorId", anchor)
+        parts["word/document.xml"] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, data in parts.items():
+                archive.writestr(name, data)
+
+    retag(base, "233147100", "7062E9F8")
+    retag(current, "3", None)
+    tracked = tmp_path / "tracked.docx"
+    summary = create_tracked_docx(base, current, tracked, overwrite=True)
+    assert summary["changed"] == summary["inserted"] == summary["deleted"] == 0
+    with zipfile.ZipFile(tracked) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.xpath(".//w:drawing", namespaces=ns)) == 1
+    assert root.xpath(".//w:ins", namespaces=ns) == []
+    assert root.xpath(".//w:del", namespaces=ns) == []
+
+
 def test_redline_stable_bibliography_bracket_labels_and_report(tmp_path: Path) -> None:
     from lxml import etree
 

@@ -74,6 +74,7 @@ PASSTHROUGH_LOCAL_NAMES = {
 }
 MATH_ROOT_NAMES = frozenset({"oMath", "oMathPara"})
 DRAWING_ROOT_NAMES = frozenset({"drawing"})
+WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 REFERENCE_MATCH_RATIO = 0.96
 MATH_PUA_START = 0xE000
 MATH_PUA_SIZE = 0x1900
@@ -207,17 +208,22 @@ def _atomic_roots(paragraph: etree._Element) -> list[etree._Element]:
 def _atomic_signature(root: etree._Element) -> bytes:
     """Return an identity for an atomic object independent of package IDs.
 
-    Drawing relationship IDs are allocated independently in the baseline and
-    current DOCX packages.  They are transport details rather than a change
-    to the picture, so ignore relationship attributes when tokenizing a
-    drawing.  Changed image payloads are still detected by ``_drawing_payloads``
-    before paragraph rendering.
+    Drawing relationship IDs, ``docPr``/``cNvPr`` ids, and Word's
+    ``wp14:anchorId``/``editId`` are allocated independently in each package.
+    They are transport details rather than a change to the picture, so ignore
+    them when tokenizing a drawing.  Changed image payloads are still detected
+    by ``_drawing_payloads`` before paragraph rendering.
     """
     clone = copy.deepcopy(root)
     if etree.QName(root).namespace == W and etree.QName(root).localname == "drawing":
         for node in clone.iter():
+            local = etree.QName(node).localname
             for key in list(node.attrib):
-                if etree.QName(key).namespace == R:
+                qname = etree.QName(key)
+                # Relationship ids, Word session ids, and shape ids are allocated
+                # per package. The picture bytes are compared separately.
+                bookkeeping = qname.namespace == WP14 and qname.localname in ("anchorId", "editId")
+                if qname.namespace == R or bookkeeping or (local in ("docPr", "cNvPr") and qname.localname == "id"):
                     del node.attrib[key]
     # Exclusive canonicalization: unused in-scope namespace declarations differ
     # between packages and are not part of the object.
