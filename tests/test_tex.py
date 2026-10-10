@@ -209,6 +209,18 @@ class TokenizeTests(unittest.TestCase):
         subscript = [span.text for span in spans if span.subscript]
         self.assertEqual(subscript, ["4"])
 
+    def test_two_argument_macros_keep_only_the_displayed_argument(self) -> None:
+        # Balanced parsing matters when either argument contains another TeX
+        # command; a flat ``[^}]*`` regex would leak the URL/bookmark text.
+        self.assertEqual(
+            spans_to_plain(tokenize_tex(r"\href{https://example.test}{\textbf{Link}}")),
+            "Link",
+        )
+        self.assertEqual(
+            spans_to_plain(tokenize_tex(r"\texorpdfstring{\textit{Shown}}{Fallback}")),
+            "Shown",
+        )
+
     def test_tokenize_texttt_is_mono(self) -> None:
         spans = tokenize_tex(r"set \texttt{n\_dim} here")
         mono = [span for span in spans if span.mono]
