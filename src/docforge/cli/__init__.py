@@ -104,7 +104,17 @@ def build_parser() -> argparse.ArgumentParser:
     delta.add_argument("baseline", type=Path, help="Markdown exported from the source DOCX")
     delta.add_argument("edited", type=Path, help="Edited Markdown; only matched paragraph changes are applied")
     delta.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    delta.add_argument("--block-map", type=Path, help="Exported source block map used to identify opaque blocks")
+    delta.add_argument("--allow-delete", action="store_true", help="Permit deletion of matched text paragraphs")
     delta.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
+    block_map = sub.add_parser(
+        "export-block-map",
+        help="Export ordered text paragraph indices and opaque source block ids from a DOCX",
+    )
+    block_map.add_argument("source", type=Path, help="Source DOCX")
+    block_map.add_argument("-o", "--output", type=Path, required=True, help="JSON block map path")
+    block_map.add_argument("--force", action="store_true", help="Overwrite an existing map")
 
     delivery = sub.add_parser("deliver", help="Build named article/supplement DOCX files from a JSON profile")
     delivery.add_argument("--profile", type=Path, required=True, help="Delivery profile JSON")
@@ -202,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_md_roundtrip(args)
         if args.command == "apply-delta":
             return _cmd_apply_delta(args)
+        if args.command == "export-block-map":
+            return _cmd_export_block_map(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "deliver":
@@ -398,8 +410,20 @@ def _cmd_apply_delta(args: argparse.Namespace) -> int:
         args.edited,
         args.output,
         overwrite=args.force,
+        allow_delete=args.allow_delete,
+        block_map=args.block_map,
     )
     print("markdown delta: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
+    print(args.output)
+    return 0
+
+
+def _cmd_export_block_map(args: argparse.Namespace) -> int:
+    from ..markdown.source_edit import export_block_map
+
+    if args.output.exists() and not args.force:
+        raise FileExistsError(args.output)
+    export_block_map(args.source, args.output)
     print(args.output)
     return 0
 
