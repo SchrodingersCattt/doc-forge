@@ -158,3 +158,25 @@ def test_export_is_stable(tmp_path):
     again = tmp_path / "again"
     export_docx(rebuilt, again, ExportOptions("main"))
     assert (again / "main.md").read_text(encoding="utf-8") == first
+
+
+def test_comment_ids_follow_markdown(tmp_path):
+    source = tmp_path / "source.docx"
+    _sample_docx(source)
+    bundle = tmp_path / "md"
+    export_docx(source, bundle, ExportOptions("main"))
+    text = (bundle / "main.md").read_text(encoding="utf-8")
+    text = text.replace("Some **bold**", 'Some <comment-start id="c7"/>**bold**<comment-end id="c7"/> '
+                        '<comment-start id="note"/>text<comment-end id="note"/>', 1)
+    text += ('\n::: comment {: id=c7 author=a date=2026-01-01T00:00:00Z}\nKept\n:::\n'
+             '\n::: comment {: id=note author=b date=2026-01-01T00:00:00Z}\nNew\n:::\n')
+    (bundle / "main.md").write_text(text, encoding="utf-8")
+    built = tmp_path / "built.docx"
+    build_docx(bundle, "main", built)
+    with zipfile.ZipFile(built) as package:
+        comments = etree.fromstring(package.read("word/comments.xml"))
+        document = etree.fromstring(package.read("word/document.xml"))
+    ids = [node.get(f"{{{W}}}id") for node in comments.iter(f"{{{W}}}comment")]
+    assert ids == ["7", "8"]
+    refs = {node.get(f"{{{W}}}id") for node in document.iter(f"{{{W}}}commentReference")}
+    assert refs == {"7", "8"}

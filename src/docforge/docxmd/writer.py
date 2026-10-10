@@ -254,7 +254,9 @@ class _Writer:
                 self.nsmap.setdefault(prefix, uri)
         styles = self.package.parts.get("word/styles.xml")
         self.styles = StyleSheet(etree.fromstring(styles) if styles else None)
-        self.parts = [parse_part((bundle / name).read_text(encoding="utf-8")) for name in document["parts"]]
+        texts = [(bundle / name).read_text(encoding="utf-8") for name in document["parts"]]
+        self.parts = [parse_part(text) for text in texts]
+        self._numbered_comments = {int(value) for text in texts for value in re.findall(r'id="?c(\d+)', text)}
         header = next((part.document for part in self.parts if part.document), None)
         if header is None:
             raise ValueError("The first part must carry the <!-- docforge:document --> header")
@@ -481,7 +483,12 @@ class _Writer:
 
     def _comment_number(self, md_id: str) -> int:
         if md_id not in self.comment_numbers:
-            self.comment_numbers[md_id] = len(self.comment_numbers)
+            match = re.fullmatch(r"c(\d+)", md_id or "")
+            if match:
+                self.comment_numbers[md_id] = int(match.group(1))
+            else:
+                used = self._numbered_comments | set(self.comment_numbers.values())
+                self.comment_numbers[md_id] = max(used, default=-1) + 1
         return self.comment_numbers[md_id]
 
     def _milestone(self, paragraph: etree._Element, atom: Atom) -> None:

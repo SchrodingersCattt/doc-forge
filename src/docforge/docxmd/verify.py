@@ -339,22 +339,25 @@ def render_pdfs(docs: list[Path], out_dir: Path, engine: str = "auto") -> list[P
         import win32com.client
 
         pythoncom.CoInitialize()
+        # Word works on copies (the originals may be open elsewhere) and keeps
+        # them locked for a while after quitting, so cleanup is best-effort.
+        tmp = Path(tempfile.mkdtemp(prefix=".render-", dir=out_dir))
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
         word.DisplayAlerts = 0
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                for index, (doc, pdf) in enumerate(zip(docs, outputs)):
-                    copy = Path(tmp) / f"{index}" / Path(doc).name
-                    copy.parent.mkdir()
-                    shutil.copy(doc, copy)
-                    opened = word.Documents.Open(str(copy.resolve()), ReadOnly=True, AddToRecentFiles=False, Visible=False)
-                    try:
-                        opened.ExportAsFixedFormat(str(pdf.resolve()), 17)
-                    finally:
-                        opened.Close(0)
+            for index, (doc, pdf) in enumerate(zip(docs, outputs)):
+                copy = tmp / f"{index}" / Path(doc).name
+                copy.parent.mkdir()
+                shutil.copy(doc, copy)
+                opened = word.Documents.Open(str(copy.resolve()), ReadOnly=True, AddToRecentFiles=False, Visible=False)
+                try:
+                    opened.ExportAsFixedFormat(str(pdf.resolve()), 17)
+                finally:
+                    opened.Close(0)
         finally:
             word.Quit()
+            shutil.rmtree(tmp, ignore_errors=True)
         return outputs
     soffice = _soffice()
     if not soffice:

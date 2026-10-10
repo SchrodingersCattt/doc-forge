@@ -231,8 +231,9 @@ class _Reader:
         return result
 
     def _comment_id(self, raw: str) -> str:
+        # Keeping Word's id lets a redline against the source match comments.
         if raw not in self.comment_ids:
-            self.comment_ids[raw] = f"c{len(self.comment_ids) + 1}"
+            self.comment_ids[raw] = f"c{raw}" if raw.isdigit() else f"c{len(self.comment_ids) + 1}"
         return self.comment_ids[raw]
 
     # -- raw fallback --------------------------------------------------------
@@ -743,10 +744,9 @@ def export_docx(source: Path, bundle: Path, options: ExportOptions) -> dict:
             if role == "title" and metadata["title"] is None:
                 metadata["title"] = model.text.strip()
             elif role == "authors":
-                metadata["authors"].extend(
-                    re.sub(r"[†‡*#§¶\d,]+$", "", name.strip()).strip()
-                    for name in re.split(r",\s*|\s+and\s+", model.text) if name.strip()
-                )
+                names = (re.sub(r"[†‡*#§¶\d,]+$", "", name.strip()).strip()
+                         for name in re.split(r",\s*|\s+and\s+", model.text))
+                metadata["authors"].extend(name for name in names if name)
             elif role == "affiliation" and model.text.strip():
                 metadata["affiliations"].append(model.text.strip())
             elif role == "keywords":
