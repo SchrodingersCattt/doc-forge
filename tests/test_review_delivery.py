@@ -123,10 +123,12 @@ def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkey
     reviewed = tmp_path / "reviewed.docx"
     template.save(reviewed)
     old_hash = delivery_module._sha256_text("old\n")
+    reviewed_hash = delivery_module._sha256_text("new\n")
     section_map = {
         "sections": [{
             "file": "body.md", "start_line": 1, "end_line": 1,
             "reviewed_start_line": 1, "reviewed_end_line": 1, "hash": old_hash,
+            "reviewed_paragraph": {"id": "p1", "hash": reviewed_hash},
         }],
     }
     (tmp_path / "map.json").write_text(json.dumps(section_map), encoding="utf-8")
@@ -134,7 +136,8 @@ def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkey
         "delivery_dir": "delivery",
         "article": {
             "inputs": ["body.md"], "template": "template.docx",
-            "reviewed_docx": "reviewed.docx", "section_map": "map.json", "source_dir": ".",
+            "reviewed_docx": "reviewed.docx", "section_map": "map.json",
+            "source_paragraph_map": "map.json", "source_dir": ".",
         },
     }
     profile_path = tmp_path / "profile.json"
@@ -172,8 +175,18 @@ def test_review_ranges_use_immutable_coordinates_for_one_source(tmp_path: Path, 
     source.write_text("a\nb\nc\nd\n", encoding="utf-8")
     section_map = {
         "sections": [
-            {"file": "body.md", "start_line": 1, "end_line": 1, "reviewed_start_line": 1, "reviewed_end_line": 1, "hash": delivery_module._sha256_text("a\n")},
-            {"file": "body.md", "start_line": 3, "end_line": 3, "reviewed_start_line": 2, "reviewed_end_line": 2, "hash": delivery_module._sha256_text("c\n")},
+            {
+                "file": "body.md", "start_line": 1, "end_line": 1,
+                "reviewed_start_line": 1, "reviewed_end_line": 1,
+                "hash": delivery_module._sha256_text("a\n"),
+                "reviewed_paragraph": {"id": "p1", "hash": delivery_module._sha256_text("A\n")},
+            },
+            {
+                "file": "body.md", "start_line": 3, "end_line": 3,
+                "reviewed_start_line": 2, "reviewed_end_line": 2,
+                "hash": delivery_module._sha256_text("c\n"),
+                "reviewed_paragraph": {"id": "p2", "hash": delivery_module._sha256_text("C\n")},
+            },
         ],
     }
     (tmp_path / "map.json").write_text(json.dumps(section_map), encoding="utf-8")
@@ -181,8 +194,78 @@ def test_review_ranges_use_immutable_coordinates_for_one_source(tmp_path: Path, 
     Document().save(reviewed)
     monkeypatch.setattr(delivery_module, "docx_to_markdown", lambda _input, *, output, **_kwargs: output.write_text("A\nC\n", encoding="utf-8"))
     prepared = delivery_module._prepare_review(
-        {"reviewed_docx": "reviewed.docx", "section_map": "map.json", "source_dir": "sources"},
+        {
+            "reviewed_docx": "reviewed.docx", "section_map": "map.json",
+            "source_paragraph_map": "map.json", "source_dir": "sources",
+        },
         tmp_path,
         tmp_path / "stage",
     )
     assert prepared.inputs[0].read_text(encoding="utf-8") == "A\nb\nC\nd\n"
+
+
+def test_review_rejects_unmatched_reviewed_paragraph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrelated DOCX paragraph must never become a source-file overwrite."""
+    source = tmp_path / "body.md"
+    source.write_text("original\n", encoding="utf-8")
+    template = Document()
+    template.add_paragraph("Template")
+    template.save(tmp_path / "template.docx")
+    template.save(tmp_path / "reviewed.docx")
+    section_map = {
+        "sections": [{
+            "file": "body.md", "start_line": 1, "end_line": 1,
+            "reviewed_start_line": 1, "reviewed_end_line": 1,
+            "hash": delivery_module._sha256_text("original\n"),
+            "reviewed_paragraph": {"id": "p-original", "hash": delivery_module._sha256_text("original\n")},
+        }],
+    }
+    (tmp_path / "map.json").write_text(json.dumps(section_map), encoding="utf-8")
+    profile = {
+        "delivery_dir": "delivery",
+        "article": {
+            "inputs": ["body.md"], "template": "template.docx",
+            "reviewed_docx": "reviewed.docx", "section_map": "map.json",
+            "source_paragraph_map": "map.json", "source_dir": ".",
+        },
+    }
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
+    monkeypatch.setattr(
+        delivery_module,
+        "docx_to_markdown",
+        lambda _input, *, output, **_kwargs: output.write_text("original\nunrelated insertion\n", encoding="utf-8"),
+    )
+    def fake_assemble(_inputs, *, output: Path, **_kwargs):
+        output.write_bytes(b"docx")
+        return SimpleNamespace(output=output)
+
+    def fake_sidecars(result, **_kwargs):
+        manifest = result.output.with_suffix(".manifest.json")
+        checksum = result.output.with_suffix(".sha256")
+        manifest.write_text("{}\n", encoding="utf-8")
+        checksum.write_text("hash\n", encoding="utf-8")
+        return manifest, checksum
+
+    monkeypatch.setattr(delivery_module, "assemble_markdown_template", fake_assemble)
+    monkeypatch.setattr(delivery_module, "write_assembly_sidecars", fake_sidecars)
+    with pytest.raises(ValueError, match="unmatched paragraphs"):
+        deliver(profile_path, accept_revisions=True, force=True)
+    assert source.read_text(encoding="utf-8") == "original\n"
+    assert not (tmp_path / "delivery").exists()
+
+
+def test_delivery_rejects_sidecar_and_aggregate_collisions(tmp_path: Path) -> None:
+    (tmp_path / "body.md").write_text("Body.\n", encoding="utf-8")
+    template = Document()
+    template.add_paragraph("Template")
+    template.save(tmp_path / "template.docx")
+    profile = {
+        "delivery_dir": "delivery",
+        "manifest": "article.manifest.json",
+        "article": {"inputs": ["body.md"], "template": "template.docx", "output": "article.docx"},
+    }
+    with pytest.raises(ValueError, match="collide"):
+        deliver(profile)
+    assert not (tmp_path / "delivery").exists()

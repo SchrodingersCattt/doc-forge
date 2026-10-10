@@ -135,7 +135,10 @@ def _canonical_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
     # canonical per-artifact shape to the rest of the implementation.
     for item in canonical_artifacts:
         key = str(item["id"])
-        for field in ("reviewed_docx", "section_map", "source_dir", "source_markdown"):
+        for field in (
+            "reviewed_docx", "section_map", "source_paragraph_map", "revision_map",
+            "source_dir", "source_markdown",
+        ):
             if field in item or field not in payload:
                 continue
             value = payload[field]
@@ -287,9 +290,24 @@ def _confined(path: Path, root: Path, *, label: str) -> Path:
 def _review_chunks(markdown: str, entries: list[dict[str, Any]]) -> list[tuple[str, str]]:
     if any(item.get("reviewed_start_line") is None or item.get("reviewed_end_line") is None for item in entries):
         raise ValueError("section map requires reviewed_start_line/reviewed_end_line for every reviewed section")
+    lines = markdown.splitlines(keepends=True)
+    reviewed_ranges: list[tuple[int, int, str]] = []
+    for item in entries:
+        filename = str(item.get("file", "<unknown>"))
+        start, end = int(item["reviewed_start_line"]), int(item["reviewed_end_line"])
+        if start < 1 or end < start or end > len(lines):
+            raise ValueError(f"reviewed section range is invalid for {filename!r}: {start}-{end}")
+        if any(not (end < previous_start or start > previous_end) for previous_start, previous_end, _ in reviewed_ranges):
+            raise ValueError(f"reviewed section ranges overlap for {filename!r}: {start}-{end}")
+        reviewed_ranges.append((start, end, filename))
+    covered = {line for start, end, _ in reviewed_ranges for line in range(start, end + 1)}
+    unmatched = [index for index, line in enumerate(lines, 1) if line.strip() and index not in covered]
+    if unmatched:
+        shown = ", ".join(str(index) for index in unmatched[:8])
+        suffix = "..." if len(unmatched) > 8 else ""
+        raise ValueError(f"reviewed DOCX contains unmatched paragraphs at lines {shown}{suffix}")
     if any(item.get("start") is not None or item.get("end") is not None for item in entries):
         return split_markdown_sections(markdown, entries)
-    lines = markdown.splitlines(keepends=True)
     chunks: list[tuple[str, str]] = []
     for item in entries:
         filename = str(item["file"])
@@ -338,7 +356,10 @@ def _source_range(item: Mapping[str, Any], lines: list[str], *, next_start: int 
 
 def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _PreparedReview:
     reviewed_path = _path(entry["reviewed_docx"], base, label="reviewed_docx")
-    section_map_path = _path(entry.get("section_map"), base, label="section_map")
+    revision_map_value = entry.get("revision_map") or entry.get("source_paragraph_map")
+    if revision_map_value is None:
+        raise ValueError("--accept-revisions requires a source_paragraph_map or revision_map")
+    section_map_path = _path(entry.get("section_map", revision_map_value), base, label="section_map")
     source_dir = _path(entry.get("source_dir"), base, label="source_dir").resolve()
     if not reviewed_path.is_file() or not section_map_path.is_file() or not source_dir.is_dir():
         raise FileNotFoundError("reviewed_docx, section_map, and source_dir must exist")
@@ -352,10 +373,18 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
             or item.get("hash", item.get("sha256")) is None
             or item.get("reviewed_start_line") is None
             or item.get("reviewed_end_line") is None
+            or item.get("reviewed_paragraph", item.get("reviewed_id")) is None
+            or (
+                item.get("reviewed_hash", item.get("accepted_hash")) is None
+                and not (
+                    isinstance(item.get("reviewed_paragraph", item.get("reviewed_id")), Mapping)
+                    and item.get("reviewed_paragraph", item.get("reviewed_id")).get("hash")
+                )
+            )
         )
     ]
     if missing:
-        raise ValueError("review section map requires source and reviewed line ranges plus hash: " + ", ".join(missing))
+        raise ValueError("revision map requires source path/range/hash and reviewed paragraph identity/hash: " + ", ".join(missing))
     full_md = stage_root / "reviewed" / f"{hashlib.sha1(str(reviewed_path).encode()).hexdigest()}.md"
     full_md.parent.mkdir(parents=True, exist_ok=True)
     docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
@@ -399,7 +428,10 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
             raise RuntimeError(f"source map hash mismatch for {target}:{start}-{end}")
         if not replacement.endswith("\n"):
             replacement += "\n"
+        reviewed_identity = item.get("reviewed_paragraph", item.get("reviewed_id"))
         reviewed_hash = item.get("reviewed_hash", item.get("accepted_hash"))
+        if reviewed_hash is None and isinstance(reviewed_identity, Mapping):
+            reviewed_hash = reviewed_identity.get("hash")
         if reviewed_hash is not None and str(reviewed_hash) != _sha256_text(replacement):
             raise RuntimeError(f"reviewed section hash mismatch for {target}:{start}-{end}")
         if target not in staged_by_original:
@@ -514,6 +546,17 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
     if accept_revisions and not any(entry.get("reviewed_docx") for _key, entry in entries):
         raise ValueError("--accept-revisions requires reviewed_docx/reviewed input in the delivery profile")
     output_targets: set[Path] = set()
+
+    def register_delivery_target(path: Path, *, label: str) -> Path:
+        """Register every eventual delivery path before publishing anything."""
+        resolved = _confined(path, delivery_dir, label=label)
+        if resolved in output_targets:
+            raise ValueError(f"delivery targets collide at output path: {path}")
+        output_targets.add(resolved)
+        return resolved
+
+    aggregate_rel = _safe_relative(payload.get("manifest", "delivery.manifest.json"), label="delivery manifest")
+    register_delivery_target(delivery_dir / aggregate_rel, label="delivery manifest")
     for key, entry in entries:
         reviewed = entry.get("reviewed_docx")
         if reviewed is not None:
@@ -523,11 +566,9 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
             if not accept_revisions and _docx_has_revisions(reviewed_path):
                 raise ValueError(f"{key} reviewed DOCX contains unapplied revisions; pass --accept-revisions")
         output = delivery_dir / _output_name(entry, key, payload, timestamp=timestamp)
-        _confined(output, delivery_dir, label=f"delivery {key}")
-        output_key = output.resolve()
-        if output_key in output_targets:
-            raise ValueError(f"delivery artifacts collide at output path: {output}")
-        output_targets.add(output_key)
+        register_delivery_target(output, label=f"delivery {key}")
+        register_delivery_target(output.with_suffix(".manifest.json"), label=f"delivery {key} manifest")
+        register_delivery_target(output.with_suffix(".sha256"), label=f"delivery {key} checksum")
         if output.exists() and not force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
         template = _path(entry.get("template", shared.get("template")), base, label=f"{key}.template")
@@ -542,12 +583,20 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
         stage_root, stage_delivery = Path(temporary), Path(temporary) / "delivery"
         stage_delivery.mkdir()
         source_updates: dict[Path, Path] = {}
+        source_targets: set[Path] = set()
         prepared = []
         for key, raw_entry in entries:
             entry = dict(raw_entry)
             review = _prepare_review(entry, base, stage_root) if accept_revisions and entry.get("reviewed_docx") else None
             if review is not None:
-                source_updates.update(dict(review.updates))
+                for logical, staged in review.updates:
+                    destination = logical.resolve()
+                    if destination in output_targets:
+                        raise ValueError(f"delivery source update collides at output path: {logical}")
+                    if destination in source_targets:
+                        raise ValueError(f"delivery source updates collide at path: {logical}")
+                    source_targets.add(destination)
+                    source_updates[logical] = staged
                 inputs = list(review.inputs)
             else:
                 if entry.get("inputs") is None:
@@ -593,7 +642,6 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
                 # artifacts are still staged. It is rewritten to the final
                 # path below before publication.
                 article_manifest = stage_manifest
-        aggregate_rel = _safe_relative(payload.get("manifest", "delivery.manifest.json"), label="delivery manifest")
         aggregate = stage_delivery / aggregate_rel
         final_aggregate = delivery_dir / aggregate_rel
         validate_output_path(final_aggregate, label="delivery manifest")
