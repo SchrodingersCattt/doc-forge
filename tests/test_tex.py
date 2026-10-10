@@ -5,14 +5,16 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
-from docforge.tex.converter import _scan_labels, add_rich_text
+from docforge.tex.converter import _scan_labels, add_rich_text, latex_to_docx
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -284,6 +286,66 @@ class LabelMapTests(unittest.TestCase):
         self.assertNotIn("fig:orphan", labels)
         self.assertNotIn("tab:orphan", labels)
         self.assertNotIn("eq:orphan", labels)
+
+    def test_align_labels_share_one_scoped_math_counter(self) -> None:
+        source = r"""
+        \begin{align}
+        a &= b \label{eq:balance}\\
+        c &= d \label{eq:second}
+        \end{align}
+        \begin{equation}\label{eq:next}z\end{equation}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["eq:balance"], "1")
+        self.assertEqual(labels["eq:second"], "1")
+        self.assertEqual(labels["eq:next"], "2")
+
+    def test_subsection_sec_label_uses_active_subsection_ref(self) -> None:
+        source = r"\section{Methods}\label{sec:methods}\subsection{Balance}\label{sec:balance}"
+        labels = _scan_labels(source)
+        self.assertEqual(labels["sec:methods"], "1")
+        self.assertEqual(labels["sec:balance"], "1.1")
+
+    def test_align_label_resolves_in_one_docx_conversion(self) -> None:
+        source = r"""
+        \documentclass{article}
+        \begin{document}
+        \begin{align}
+        a &= b \label{eq:balance}
+        \end{align}
+        See \autoref{eq:balance}.
+        \end{document}
+        """
+        with TemporaryDirectory() as directory, patch(
+            "docforge.tex.converter.latex_to_omml",
+            return_value=OxmlElement("m:oMathPara"),
+        ) as backend:
+            output = Path(directory) / "align.docx"
+            document = latex_to_docx(source, output=output)
+        backend.assert_called_once_with(
+            "\\begin{align}\na &= b \\label{eq:balance}\n\\end{align}"
+        )
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("Equation 1", text)
+
+    def test_starred_display_does_not_shift_next_equation_number(self) -> None:
+        source = r"""
+        \documentclass{article}
+        \begin{document}
+        \begin{equation*}x = 0\end{equation*}
+        \begin{equation}x = 1\end{equation}
+        \end{document}
+        """
+        with TemporaryDirectory() as directory, patch(
+            "docforge.tex.converter.latex_to_omml",
+            side_effect=lambda _: OxmlElement("m:oMathPara"),
+        ) as backend:
+            output = Path(directory) / "starred.docx"
+            document = latex_to_docx(source, output=output)
+        self.assertEqual(backend.call_count, 2)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("(1)", text)
+        self.assertNotIn("(2)", text)
 
 
 if __name__ == "__main__":
