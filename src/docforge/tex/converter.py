@@ -173,6 +173,12 @@ def _scan_label_refs(text: str, fig_offset: int = 0, tbl_offset: int = 0,
         key = m.group("label")
         if key is None:
             continue
+        # A label inside equation* has no ref-stepped counter.  Do not add
+        # even a textual fallback for it: otherwise the tokenizer would treat
+        # ``\ref{eq:star}`` as a seemingly valid (but fabricated) target,
+        # while a later numbered equation still starts at one.
+        if env_stack and env_stack[-1][0] == "equation" and env_stack[-1][1] is None:
+            continue
         normalized = key[2:] if key.lower().startswith("s-") else key
         prefix_kind = None
         if normalized.startswith(("fig:", "figure:")):

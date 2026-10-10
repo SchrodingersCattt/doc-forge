@@ -264,8 +264,10 @@ class LabelMapTests(unittest.TestCase):
         )
 
     def test_starred_equation_does_not_consume_number(self) -> None:
-        source = r"\begin{equation*}x\end{equation*}\begin{equation}\label{next}x\end{equation}"
-        self.assertEqual(_scan_labels(source)["next"], "1")
+        source = r"\begin{equation*}\label{eq:star}x\end{equation*}\begin{equation}\label{next}x\end{equation}"
+        labels = _scan_labels(source)
+        self.assertNotIn("eq:star", labels)
+        self.assertEqual(labels["next"], "1")
 
     def test_labels_after_closed_table_and_equation_do_not_inherit_float(self) -> None:
         source = r"""
