@@ -106,11 +106,15 @@ older `article`/`supplement` keys, `si`, `supporting_information`,
 `sources`/`markdown`, `delivery_names`, and `review`/`reviewed` fields remain
 supported as compatibility aliases and are normalized before building.
 `--accept-revisions` requires a reviewed DOCX, `section_map`, confined
-`source_dir`, and hashed source plus reviewed `start_line`/`end_line` ranges.
-Conversion happens in
-a scratch directory and only the mapped ranges are applied to staged Markdown
-copies; any hash or path mismatch aborts before publishing. Outputs and source
-updates are committed together. The aggregate manifest records each source
+`source_dir`, and a `source_paragraph_map` (the compatibility alias
+`revision_map` is also accepted). Each map entry must identify the source
+`path`/`file`, source `start_line`/`end_line` and hash, plus the reviewed
+`start_line`/`end_line` and `reviewed_paragraph` identity and hash. Conversion
+happens in a scratch directory only as a candidate for those mapped ranges;
+unmapped reviewed paragraphs, identity/hash mismatches, and path mismatches
+abort before publishing. Outputs and source updates are committed together,
+and all document, sidecar, aggregate-manifest, and source destinations are
+checked for collisions first. The aggregate manifest records each source
 paragraph's `path`, `start_line`, `end_line`, and `hash`. An `output_pattern`
 may use `{role}` and UTC `{timestamp}` and is confined to the delivery
 directory. Source files are snapshotted with their relative media tree while
