@@ -769,12 +769,18 @@ b &= 2
         "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
     }
     assert len(root.xpath(".//w:br[@w:type='page']", namespaces=ns)) == 1
-    arrays = root.xpath(".//m:eqArr", namespaces=ns)
+    # Pandoc 2.9 emits an OMML matrix (m:m) for aligned rows, while newer
+    # supported releases may use the equivalent equation-array (m:eqArr).
+    arrays = root.xpath(".//m:eqArr | .//m:m", namespaces=ns)
+    arrays = [array for array in arrays if len(array) == 2 or len(array.xpath("./m:mr", namespaces=ns)) == 2]
     assert len(arrays) == 1
-    assert len(arrays[0].xpath("./m:e", namespaces=ns)) == 2
-    equation = arrays[0].getparent().getparent()
-    assert "(1)" in visible_text(equation)
-    assert len(root.xpath(".//m:eqArr/ancestor::w:p", namespaces=ns)) == 1
+    if arrays[0].tag.endswith("eqArr"):
+        assert len(arrays[0].xpath("./m:e", namespaces=ns)) == 2
+    else:
+        assert len(arrays[0].xpath("./m:mr", namespaces=ns)) == 2
+    paragraph = arrays[0].xpath("ancestor::w:p", namespaces=ns)[0]
+    assert "(1)" in visible_text(paragraph)
+    assert len(arrays[0].xpath("ancestor::w:p", namespaces=ns)) == 1
 
 
 def test_ratio_cache_keeps_tracked_output_and_is_reused(tmp_path: Path) -> None:

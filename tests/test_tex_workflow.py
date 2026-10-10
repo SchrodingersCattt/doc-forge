@@ -138,6 +138,15 @@ See main Figure~\ref{fig:one} and \mainref{one}.
         with self.assertRaisesRegex(ValueError, "missing-figure placeholder"):
             validate_docx_package(output, source)
 
+    def test_unresolved_float_reference_names_label(self):
+        source = self.root / "unresolved-ref.tex"
+        source.write_text(
+            r"\begin{document}See Figure~\ref{fig:missing}.\end{document}",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, r"fig:missing"):
+            convert_files(source, output=self.root / "unresolved-ref.docx")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,13 +24,25 @@ def _sentence(text: str) -> str:
     return text if text.endswith(".") else f"{text}."
 
 
+
+def _venue(entry: BibliographyEntry) -> str:
+    """Return the most specific publication or event venue available."""
+    for name in (
+        "journal", "booktitle", "eventtitle", "conference", "event",
+        "publisher", "institution", "school", "organization", "howpublished",
+    ):
+        value = entry.get(name, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
 def plain(entry: BibliographyEntry, label: str = "") -> str:
     raw = entry.get("raw")
     if raw:
         return str(raw)
     authors = _authors(entry) or "unknown"
     title = str(entry.get("title", "")).strip()
-    venue = str(entry.get("journal", entry.get("booktitle", ""))).strip()
+    venue = _venue(entry)
     year = str(entry.get("year", "")).strip()
     volume = str(entry.get("volume", "")).strip()
     pages = str(entry.get("pages", entry.get("locator", ""))).strip()
@@ -62,14 +74,14 @@ def markdown(entry: BibliographyEntry, label: str = "") -> str:
     year = entry.get("year")
     if not isinstance(year, int) or isinstance(year, bool) or year < 0:
         raise ValueError(f"Bibliography record {entry.key!r} year must be a non-negative integer")
-    journal = str(entry.get("journal", entry.get("booktitle", ""))).strip()
-    if not journal:
-        raise ValueError(f"Bibliography record {entry.key!r} requires journal or booktitle")
+    venue = _venue(entry)
+    if not venue:
+        raise ValueError(f"Bibliography record {entry.key!r} requires a venue (journal, booktitle, or publisher)")
     parts = [_sentence(authors)]
     title = entry.get("title")
     if title:
         parts.append(_sentence(str(title).strip()))
-    journal_part = f"*{journal}*, **{year}**"
+    journal_part = f"*{venue}*, **{year}**"
     if entry.get("volume") not in (None, ""):
         journal_part += f", *{str(entry.get('volume')).strip()}*"
     if entry.get("issue") not in (None, ""):

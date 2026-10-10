@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from lxml import etree
 
 from docforge.tex.tokenize import spans_to_plain, tokenize_tex, unpaired_quote_errors
 from docforge.tex.bib import CitationResolver, parse_bib
 from docforge.tex.convert import build_label_map
-from docforge.tex.converter import add_rich_text
+from docforge.math.pandoc import latex_to_omml
+from docforge.tex.converter import (
+    _normalize_display_math_source,
+    _scan_labels,
+    add_rich_text,
+    latex_to_docx,
+)
 
 TEX_DOC = r"""
 \section{Introduction}
@@ -69,6 +79,99 @@ BIB_TEXT = r"""
 
 
 class TokenizeTests(unittest.TestCase):
+    def test_bare_aligned_rows_are_wrapped_for_omml(self) -> None:
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml(r"a &= b \\ c &= d")
+        self.assertEqual(
+            "".join(equation.xpath(".//m:t/text()", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"})),
+            "a=bc=d",
+        )
+
+    def test_structural_math_uses_native_omml(self) -> None:
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml(
+                r"""\begin{cases}
+                x &= 1 \\
+                y &= 2
+                \end{cases}"""
+            )
+        self.assertTrue(equation.xpath(".//m:d", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
+        self.assertTrue(equation.xpath(".//m:m/m:mr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
+        self.assertFalse(equation.xpath(".//m:eqArr", namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}))
+
+    def test_invisible_right_delimiter_remains_paired_in_omml(self) -> None:
+        source = r"""\left\{
+        \begin{array}{ll}
+        x &= 1 \\
+        y &= 2
+        \end{array}
+        \right."""
+        self.assertEqual(
+            _normalize_display_math_source(source).count(r"\left"),
+            _normalize_display_math_source(source).count(r"\right"),
+        )
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml(source)
+        ns = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
+        delimiter = equation.xpath(".//m:d/m:dPr", namespaces=ns)[0]
+        assert delimiter.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}begChr").get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/math}val"
+        ) == "{"
+        assert delimiter.find("{http://schemas.openxmlformats.org/officeDocument/2006/math}endChr").get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/math}val"
+        ) == ""
+
+    def test_legacy_display_macros_are_normalized(self) -> None:
+        normalized = _normalize_display_math_source(
+            r"\vdet + \etasq + \left( x \right) \, y \quad z \qquad q"
+        )
+        self.assertEqual(
+            normalized,
+            r"V_{\mathrm{det}} + \eta^{2} + ( x )   y    z      q",
+        )
+
+    def test_starred_equations_do_not_shift_label_numbers(self) -> None:
+        source = r"""
+        \begin{equation*}x = 0\label{eq:unpublished}\end{equation*}
+        \begin{equation}x = 1\label{eq:published}\end{equation}
+        """
+        labels = build_label_map(source)
+        self.assertNotIn("eq:unpublished", labels)
+        self.assertEqual(labels["eq:published"], "1")
+
+    def test_starred_display_is_unnumbered_and_structural_display_is_preserved(self) -> None:
+        source = r"""
+        \documentclass{article}
+        \begin{document}
+        \begin{equation*}
+        x = 0\label{eq:unpublished}
+        \end{equation*}
+        \begin{equation}
+        \begin{cases}
+        x &= 1 \\
+        y &= 2
+        \end{cases}\label{eq:published}
+        \end{equation}
+        See Equation~\ref{eq:published}.
+        \end{document}
+        """
+        with TemporaryDirectory() as directory, patch(
+            "docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"
+        ):
+            output = Path(directory) / "equations.docx"
+            latex_to_docx(source, output=output)
+            root = etree.fromstring(zipfile.ZipFile(output).read("word/document.xml"))
+        ns = {
+            "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+        }
+        text = "".join(root.xpath(".//w:t/text()", namespaces=ns))
+        self.assertIn("(1)", text)
+        self.assertIn("Equation 1", text)
+        self.assertNotIn("(2)", text)
+        self.assertTrue(root.xpath(".//m:d", namespaces=ns))
+        self.assertFalse(root.xpath(".//m:eqArr", namespaces=ns))
+
     def test_tokenize_tex_plain(self) -> None:
         spans = tokenize_tex(r"Hello \alpha and $x_i$.")
         text = spans_to_plain(spans)
@@ -153,6 +256,10 @@ class TokenizeTests(unittest.TestCase):
     def test_resolve_ref(self) -> None:
         spans = tokenize_tex(r"See \ref{fig:one}.", resolve_ref=lambda key: "1")
         self.assertEqual(spans_to_plain(spans), "See 1.")
+
+    def test_autoref_restores_prefixed_float_kind(self) -> None:
+        spans = tokenize_tex(r"See \autoref{fig:one} and \cref{tab:one}.", resolve_ref=lambda key: "1")
+        self.assertEqual(spans_to_plain(spans), "See Figure 1 and Table 1.")
 
     def test_consecutive_refs_collapse_to_en_dash_range(self) -> None:
         labels = {f"S-fig:S{n}": f"S{n}" for n in range(9, 18)}
@@ -248,6 +355,110 @@ class LabelMapTests(unittest.TestCase):
         self.assertEqual(labels["S-tab:one"], "S1")
         self.assertEqual(labels["S-fig:S1"], "S1")
         self.assertEqual(labels["S-sn:model"], "1")
+
+    def test_prefix_free_labels_are_scoped_and_keep_autoref_kind(self) -> None:
+        source = r"""
+        \begin{figure}\label{overview}\end{figure}
+        \section{Methods}\label{methods}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["overview"], "1")
+        self.assertEqual(labels["methods"], "1")
+        self.assertEqual(
+            spans_to_plain(
+                tokenize_tex(
+                    r"\autoref{overview} and \autoref{methods}",
+                    resolve_ref=lambda key: labels[key],
+                    resolve_ref_kind=lambda key: {
+                        "overview": "figure",
+                        "methods": "section",
+                    }.get(key),
+                )
+            ),
+            "Figure 1 and Section 1",
+        )
+
+    def test_starred_equation_does_not_consume_number(self) -> None:
+        source = r"\begin{equation*}\label{eq:star}x\end{equation*}\begin{equation}\label{next}x\end{equation}"
+        labels = _scan_labels(source)
+        self.assertNotIn("eq:star", labels)
+        self.assertEqual(labels["next"], "1")
+
+    def test_labels_after_closed_table_and_equation_do_not_inherit_float(self) -> None:
+        source = r"""
+        \begin{table}\label{table-one}\end{table}\label{after-table}
+        \begin{equation}\label{equation-one}x\end{equation}\label{after-equation}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["after-table"], "after-table")
+        self.assertEqual(labels["after-equation"], "after-equation")
+
+    def test_orphan_float_prefix_labels_stay_unresolved(self) -> None:
+        source = r"\section{Methods}\label{fig:orphan}\label{tab:orphan}\label{eq:orphan}"
+        labels = _scan_labels(source)
+        self.assertNotIn("fig:orphan", labels)
+        self.assertNotIn("tab:orphan", labels)
+        self.assertNotIn("eq:orphan", labels)
+
+    def test_align_labels_share_one_scoped_math_counter(self) -> None:
+        source = r"""
+        \begin{align}
+        a &= b \label{eq:balance}\\
+        c &= d \label{eq:second}
+        \end{align}
+        \begin{equation}\label{eq:next}z\end{equation}
+        """
+        labels = _scan_labels(source)
+        self.assertEqual(labels["eq:balance"], "1")
+        self.assertEqual(labels["eq:second"], "1")
+        self.assertEqual(labels["eq:next"], "2")
+
+    def test_subsection_sec_label_uses_active_subsection_ref(self) -> None:
+        source = r"\section{Methods}\label{sec:methods}\subsection{Balance}\label{sec:balance}"
+        labels = _scan_labels(source)
+        self.assertEqual(labels["sec:methods"], "1")
+        self.assertEqual(labels["sec:balance"], "1.1")
+
+    def test_align_label_resolves_in_one_docx_conversion(self) -> None:
+        source = r"""
+        \documentclass{article}
+        \begin{document}
+        \begin{align}
+        a &= b \label{eq:balance}
+        \end{align}
+        See \autoref{eq:balance}.
+        \end{document}
+        """
+        with TemporaryDirectory() as directory, patch(
+            "docforge.tex.converter.latex_to_omml",
+            return_value=OxmlElement("m:oMathPara"),
+        ) as backend:
+            output = Path(directory) / "align.docx"
+            document = latex_to_docx(source, output=output)
+        backend.assert_called_once_with(
+            "\\begin{align}\na &= b \\label{eq:balance}\n\\end{align}"
+        )
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("Equation 1", text)
+
+    def test_starred_display_does_not_shift_next_equation_number(self) -> None:
+        source = r"""
+        \documentclass{article}
+        \begin{document}
+        \begin{equation*}x = 0\end{equation*}
+        \begin{equation}x = 1\end{equation}
+        \end{document}
+        """
+        with TemporaryDirectory() as directory, patch(
+            "docforge.tex.converter.latex_to_omml",
+            side_effect=lambda _: OxmlElement("m:oMathPara"),
+        ) as backend:
+            output = Path(directory) / "starred.docx"
+            document = latex_to_docx(source, output=output)
+        self.assertEqual(backend.call_count, 2)
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("(1)", text)
+        self.assertNotIn("(2)", text)
 
 
 if __name__ == "__main__":

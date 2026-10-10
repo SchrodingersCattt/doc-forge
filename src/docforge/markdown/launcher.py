@@ -59,7 +59,14 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 INLINE_TOKEN_RE = re.compile(
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
+    # A doubled dollar delimiter belongs to a display-math block.  When it
+    # occurs inside prose (for example an unmatched ``$$``), it must remain
+    # literal text: allowing the single-dollar alternative to start at the
+    # second character turns the remainder into inline math and strips the
+    # authored spaces.  Guard both sides so only a real, single-dollar pair
+    # is tokenized here; standalone ``$$`` lines are parsed as block equations
+    # by :func:`parse_markdown`.
+    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\\\$|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$))"
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -102,8 +109,77 @@ def clean_markdown(text: str, strip_comments: bool) -> str:
 
 
 def split_table_row(line: str) -> tuple[str, ...]:
-    stripped = line.strip().strip("|")
-    return tuple(cell.strip() for cell in stripped.split("|"))
+    """Split one pipe-table row while respecting inline code and math.
+
+    A plain ``str.split("|")`` changes the table shape when a cell contains a
+    literal pipe in a code span (``| `` `a|b` `` |``) or an inline formula
+    (``| $p(x|y)$ `` |).  Markdown also permits an escaped ``\\|`` outside
+    those spans.  Scan the row once and only treat an unescaped pipe outside
+    a delimited span as a column separator.
+    """
+    value = line.strip()
+    # A leading/trailing pipe is table framing, rather than an empty cell.
+    start = 1 if value.startswith("|") else 0
+    end = len(value) - 1 if value.endswith("|") and len(value) > start else len(value)
+
+    cells: list[str] = []
+    current: list[str] = []
+    code_delimiter: str | None = None
+    math_delimiter: str | None = None
+    index = start
+    while index < end:
+        character = value[index]
+        # A pipe/backtick/dollar preceded by an odd number of backslashes
+        # is literal.  Keep the source spelling for the renderer.
+        backslashes = 0
+        probe = index - 1
+        while probe >= start and value[probe] == "\\":
+            backslashes += 1
+            probe -= 1
+        escaped = backslashes % 2 == 1
+
+        if character == "`" and not escaped and math_delimiter is None:
+            run_end = index + 1
+            while run_end < end and value[run_end] == "`":
+                run_end += 1
+            delimiter = value[index:run_end]
+            if code_delimiter is None:
+                code_delimiter = delimiter
+            elif delimiter == code_delimiter:
+                code_delimiter = None
+            current.append(delimiter)
+            index = run_end
+            continue
+
+        if character == "$" and not escaped and code_delimiter is None:
+            run_end = index + 1
+            while run_end < end and value[run_end] == "$":
+                run_end += 1
+            delimiter = value[index:run_end]
+            if math_delimiter is None:
+                math_delimiter = delimiter
+            elif delimiter == math_delimiter:
+                math_delimiter = None
+            current.append(delimiter)
+            index = run_end
+            continue
+
+        if character == "|" and code_delimiter is None and math_delimiter is None:
+            if escaped:
+                # The backslash protects a literal pipe from changing the
+                # table shape.  It is Markdown syntax, not cell content, so
+                # remove it before the cell reaches the DOCX renderer.
+                if current and current[-1] == "\\":
+                    current.pop()
+                current.append("|")
+            else:
+                cells.append("".join(current).strip())
+                current = []
+        else:
+            current.append(character)
+        index += 1
+    cells.append("".join(current).strip())
+    return tuple(cells)
 
 
 def is_table_start(lines: list[str], index: int) -> bool:
@@ -119,6 +195,36 @@ def is_table_start(lines: list[str], index: int) -> bool:
 def _looks_like_table_row(line: str) -> bool:
     stripped = line.strip()
     return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _has_unescaped_display_delimiter(line: str) -> bool:
+    """Return whether ``line`` contains ``$$`` outside code or escapes."""
+    index = 0
+    code_fence: str | None = None
+    while index < len(line):
+        if code_fence is not None:
+            if line.startswith(code_fence, index):
+                index += len(code_fence)
+                code_fence = None
+            else:
+                index += 1
+            continue
+        char = line[index]
+        if char == "\\":
+            # Backslash protects the next dollar (and any other literal).
+            index += 2
+            continue
+        if char == "`":
+            end = index
+            while end < len(line) and line[end] == "`":
+                end += 1
+            code_fence = line[index:end]
+            index = end
+            continue
+        if line.startswith("$$", index):
+            return True
+        index += 1
+    return False
 
 
 def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
@@ -208,13 +314,26 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             continue
         if is_table_start(lines, i):
             flush_paragraph()
-            rows = [split_table_row(lines[i])]
+            header = split_table_row(lines[i])
+            separator = split_table_row(lines[i + 1])
+            if len(separator) != len(header):
+                raise ValueError(
+                    f"Malformed Markdown table in {path}:{i + 2}; "
+                    f"separator has {len(separator)} cells, expected {len(header)}"
+                )
+            rows = [header]
             i += 2
             while i < len(lines):
                 row = lines[i].strip()
                 if not (row.startswith("|") and row.endswith("|")):
                     break
-                rows.append(split_table_row(row))
+                parsed = split_table_row(row)
+                if len(parsed) != len(header):
+                    raise ValueError(
+                        f"Malformed Markdown table in {path}:{i + 1}; "
+                        f"row has {len(parsed)} cells, expected {len(header)}"
+                    )
+                rows.append(parsed)
                 i += 1
             blocks.append(Block("table", rows=tuple(rows)))
             continue
@@ -255,6 +374,14 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             blocks.append(Block("table_caption", table_caption.group(1).strip()))
             i += 1
             continue
+        if _has_unescaped_display_delimiter(line):
+            # Display delimiters are structural blocks in this parser.  A
+            # doubled delimiter embedded in prose is almost always a damaged
+            # display equation; treating its second ``$`` as an inline opener
+            # silently eats spaces and produces misleading DOCX text.
+            raise ValueError(
+                f"Display equation delimiter must occupy its own line in {path}:{i + 1}"
+            )
         paragraph_lines.append(line)
         i += 1
     flush_paragraph()
@@ -480,6 +607,10 @@ def add_inline(
         elif token.startswith("`"):
             run = paragraph.add_run(token[1:-1])
             set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
+        elif token == r"\$":
+            run = paragraph.add_run("$")
+            run.bold = bold_default
+            set_run_font(run, size=size)
         elif token.startswith("$"):
             before = paragraph.runs[-1] if paragraph.runs else None
             first_math_run = len(paragraph.runs)

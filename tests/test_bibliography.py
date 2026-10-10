@@ -4,7 +4,14 @@ from types import MappingProxyType
 
 import pytest
 
-from docforge.bibliography import CitationResolver, format_entry, load_bib, load_json
+from docforge.bibliography import (
+    BibliographyEntry,
+    CitationResolver,
+    format_entry,
+    load_bib,
+    load_json,
+    parse_bib_text,
+)
 
 
 def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> None:
@@ -18,7 +25,37 @@ def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> 
     assert entries["raw"].get("raw") == "A raw record"
     bib_path = tmp_path / "refs.bib"
     bib_path.write_text("@article{paper,\n author={A},\n year={2024}\n}\n", encoding="utf-8")
-    assert load_bib(bib_path)["paper"].entry_type == "article"
+    bib_entry = load_bib(bib_path)["paper"]
+    assert bib_entry.entry_type == "article"
+    assert bib_entry.get("year") == 2024
+
+
+def test_bibtex_year_is_accepted_by_markdown_formatter(tmp_path: Path) -> None:
+    bib_path = tmp_path / "refs.bib"
+    bib_path.write_text(
+        "@article{paper, author={A}, title={A title}, journal={J}, year={2024}}\n",
+        encoding="utf-8",
+    )
+    assert "**2024**" in format_entry(load_bib(bib_path)["paper"], profile="markdown")
+
+
+@pytest.mark.parametrize("opener, closer", [("{", "}"), ("(", ")")])
+def test_bib_record_delimiters_reach_load_and_format(tmp_path: Path, opener: str, closer: str) -> None:
+    bib_path = tmp_path / "delimiters.bib"
+    bib_path.write_text(
+        f'''@article{opener}paper,
+ author={{A}},
+ title="Title (with parentheses)",
+ journal={{Journal}},
+ year=2024
+{closer}
+''',
+        encoding="utf-8",
+    )
+    entry = load_bib(bib_path)["paper"]
+    rendered = format_entry(entry, profile="markdown")
+    assert "Title (with parentheses)." in rendered
+    assert "**2024**" in rendered
 
 
 def test_resolver_supports_inherited_and_source_order_numbering() -> None:
@@ -46,3 +83,59 @@ def test_formatter_does_not_double_terminal_period(profile: str) -> None:
     assert "Roe, Alex B. C. " in text
     assert ".." not in text
 
+
+
+def test_bib_loader_balances_nested_braces_and_non_journal_venues(tmp_path: Path) -> None:
+    path = tmp_path / "nested.bib"
+    path.write_text(
+        """@inproceedings{nested-key,
+ author={Doe, Jane},
+ title={A {Nested} title, with commas},
+ booktitle={Proceedings of the {ACM} Symposium},
+ year={2024}
+}
+""",
+        encoding="utf-8",
+    )
+    entry = load_bib(path)["nested-key"]
+    assert entry.get("title") == "A {Nested} title, with commas"
+    assert entry.get("booktitle") == "Proceedings of the {ACM} Symposium"
+    assert "Proceedings" in format_entry(entry, profile="plain")
+
+
+def test_bib_loader_concatenates_hash_atoms_without_truncating_fields(tmp_path: Path) -> None:
+    path = tmp_path / "concat.bib"
+    path.write_text(
+        """@article{concat,
+ title = {Part A} # "Part B" # { C# },
+ journal = {Journal},
+ year = {2024}
+}
+""",
+        encoding="utf-8",
+    )
+    entry = load_bib(path)["concat"]
+    assert entry.get("title") == "Part APart B C#"
+    assert entry.get("journal") == "Journal"
+    assert entry.get("year") == 2024
+
+
+def test_bib_loader_preserves_hash_inside_a_single_atom(tmp_path: Path) -> None:
+    path = tmp_path / "literal-hash.bib"
+    path.write_text("@misc{hash, title = {C# guide}}\n", encoding="utf-8")
+    assert load_bib(path)["hash"].get("title") == "C# guide"
+
+
+def test_bib_loader_resolves_string_macros_in_hash_concatenations() -> None:
+    entries = parse_bib_text(
+        '@string{journal = "Journal of"}\n'
+        '@article{macro, title = "A" # " title", journal = journal # " Letters", year = {2024}}\n'
+    )
+    assert set(entries) == {"macro"}
+    assert entries["macro"].get("title") == "A title"
+    assert entries["macro"].get("journal") == "Journal of Letters"
+
+
+def test_markdown_formatter_accepts_publisher_venue() -> None:
+    entry = {"authors": ["Doe, Jane"], "title": "A book", "year": 2024, "publisher": "Press"}
+    assert "*Press*" in format_entry(BibliographyEntry.from_mapping("book", entry), profile="markdown")
