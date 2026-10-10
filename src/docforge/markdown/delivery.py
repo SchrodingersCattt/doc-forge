@@ -332,12 +332,15 @@ def _docx_paragraph_records(path: Path) -> dict[str, dict[str, Any]]:
         identifier = paragraph.get(f"{{{_W14}}}paraId")
         if not identifier:
             continue
+        key = str(identifier).casefold()
+        if key in records:
+            raise ValueError(f"reviewed DOCX repeats paragraph identity: {identifier}")
         revisions = {
             etree.QName(node).localname
             for node in paragraph.iter()
             if etree.QName(node).localname in {"ins", "del"}
         }
-        records[str(identifier).casefold()] = {
+        records[key] = {
             "id": str(identifier),
             "ordinal": ordinal,
             "revisions": revisions,
@@ -361,6 +364,7 @@ def _normalise_edit_text(value: str) -> str:
     value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", value)
     value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
     value = re.sub(r"[`*_#>~]", "", value)
+    value = value.replace("|", " ")
     return re.sub(r"\s+", " ", value).strip()
 
 
