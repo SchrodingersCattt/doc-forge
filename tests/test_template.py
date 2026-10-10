@@ -23,7 +23,11 @@ from docforge.markdown import (
     verify_template_output,
     write_assembly_sidecars,
 )
-from docforge.markdown.template import _format_citation_labels, _word_compatible_image_bytes
+from docforge.markdown.template import (
+    _format_citation_labels,
+    _template_uses_superscript_citations,
+    _word_compatible_image_bytes,
+)
 from docforge.output import validate_output_path
 
 
@@ -848,6 +852,15 @@ def test_template_inherits_superscript_citations_without_private_markers(tmp_pat
          or section._sectPr.find(qn("w:type")).get(qn("w:val")) == "continuous")
         for section in document.sections
     )
+
+
+def test_template_does_not_infer_citations_from_formula_superscripts() -> None:
+    document = Document()
+    paragraph = document.add_paragraph()
+    paragraph.add_run("H")
+    paragraph.add_run("2").font.superscript = True
+    paragraph.add_run("O")
+    assert not _template_uses_superscript_citations(document)
 
 
 def test_si_reuses_main_citation_numbers_and_prefixes_si_only_references(tmp_path: Path) -> None:
