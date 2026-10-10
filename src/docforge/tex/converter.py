@@ -11,7 +11,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import OxmlElement, parse_xml
-from lxml import etree
 from ..docxdiff import Package
 from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_view, _blocks, visible_text
 from ..math import latex_to_omml
@@ -26,7 +25,13 @@ PT_CAPTION=Pt(9)
 PT_REF=Pt(10)
 PT_HALF_LINE=Pt(5)
 
-
+# Display environments are collected as one block before being compiled to a
+# single native OMML equation.  ``aligned`` is usually nested inside
+# ``equation``, but accepting it (and the top-level ``align`` family) keeps
+# valid TeX input from falling through to ordinary paragraph parsing.
+_DISPLAY_ENV_RE = re.compile(
+    r"^\\begin\{(?P<environment>equation|align|aligned|gather|gathered|multline)(?P<star>\*)?\}"
+)
 def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> None:
     """Set body and caption sizes, including defaults bound when functions were defined."""
     global PT_BODY, PT_CAPTION
@@ -122,7 +127,69 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
                 result[key] = f"{prefix}{sec_n}"
             else:
                 result[key] = key
+    # Equation labels are handled in a separate pass.  The float scanner above
+    # intentionally has no notion of nested display environments, while a
+    # label inside ``equation``/``align`` must resolve to that display's
+    # number.  Keep starred displays out of the map: they have no number and
+    # therefore must not make a later equation appear to have a stale number.
+    equation_labels, equation_label_keys = _scan_equation_labels(body, prefix=prefix)
+    for key in equation_label_keys:
+        result.pop(key, None)
+    result.update(equation_labels)
     return result
+
+
+def _scan_equation_labels(text: str, *, prefix: str = "") -> tuple[dict[str, str], set[str]]:
+    """Return equation labels and all labels encountered in display math.
+
+    ``_scan_labels`` also sees ordinary ``\\label`` commands and historically
+    retained unknown labels verbatim.  Equation labels need the display
+    counter instead, and starred environments deliberately have no value.  A
+    small event scanner handles nested ``aligned``/``cases`` structures while
+    counting only the outer display environment.
+    """
+    event_re = re.compile(
+        r"\\begin\{(?P<begin>equation|align|aligned|gather|gathered|multline)"
+        r"(?P<begin_star>\*)?\}"
+        r"|\\end\{(?P<end>equation|align|aligned|gather|gathered|multline)\*?\}"
+        r"|\\label\{(?P<label>[^}]*)\}"
+    )
+    labels: dict[str, str] = {}
+    encountered: set[str] = set()
+    stack: list[tuple[str, int | None]] = []
+    equation_number = 0
+    for match in event_re.finditer(text):
+        begin = match.group("begin")
+        if begin:
+            if not stack:
+                if match.group("begin_star"):
+                    number = None
+                else:
+                    equation_number += 1
+                    number = equation_number
+                stack.append((begin, number))
+            else:
+                # Nested aligned/gathered environments are part of their
+                # outer display and must not consume another equation number.
+                stack.append((begin, stack[0][1]))
+            continue
+        end = match.group("end")
+        if end:
+            # TeX input is validated later by the converter.  Being forgiving
+            # here keeps label-map construction deterministic for malformed
+            # source and avoids popping an unrelated outer environment.
+            for index in range(len(stack) - 1, -1, -1):
+                if stack[index][0] == end:
+                    del stack[index:]
+                    break
+            continue
+        label = match.group("label")
+        if label is not None and stack:
+            encountered.add(label)
+            number = stack[0][1]
+            if number is not None:
+                labels[label] = f"{prefix}{number}"
+    return labels, encountered
 
 
 def _build_label_map(full_text: str, aux_text: str | None = None,
@@ -735,18 +802,77 @@ def add_algorithm(doc: Document, block: str, resolver: CitationResolver,
         _set_paragraph_border(last_para, bottom=True)
 
 
+_DISPLAY_DELIMITER_RE = re.compile(
+    r"\\(?P<side>left|right)\s*"
+    r"(?P<delimiter>\\(?:[{}]|[A-Za-z]+)|[()\[\]|.])"
+)
+
+
+def _normalize_display_delimiters(source: str) -> str:
+    """Normalize paired size delimiters without breaking invisible rights.
+
+    Ordinary ``\\left(...\\right)`` pairs are reduced to their literal
+    delimiters for compatibility with the previous converter.  Pairs that
+    contain a brace or an invisible ``.`` delimiter stay as TeX commands:
+    those commands carry the pairing information needed by texmath (for
+    example ``\\left\\{ ... \\right.``).  Unmatched commands are left alone so
+    strict Pandoc conversion reports the malformed source instead of silently
+    changing its meaning.
+    """
+    tokens = list(_DISPLAY_DELIMITER_RE.finditer(source))
+    if not tokens:
+        return source
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        if token.group("side") == "left":
+            stack.append(index)
+        elif stack:
+            pairs.append((stack.pop(), index))
+    replacements: dict[tuple[int, int], str] = {}
+    for left_index, right_index in pairs:
+        left = tokens[left_index]
+        right = tokens[right_index]
+        left_delimiter = left.group("delimiter")
+        right_delimiter = right.group("delimiter")
+        if (
+            left_delimiter == "."
+            or right_delimiter == "."
+            or left_delimiter.startswith("\\")
+            or right_delimiter.startswith("\\")
+        ):
+            continue
+        replacements[left.span()] = left_delimiter
+        replacements[right.span()] = right_delimiter
+    if not replacements:
+        return source
+    chunks: list[str] = []
+    cursor = 0
+    for start, end in sorted(replacements):
+        chunks.append(source[cursor:start])
+        chunks.append(replacements[(start, end)])
+        cursor = end
+    chunks.append(source[cursor:])
+    return "".join(chunks)
+
+
 def _normalize_display_math_source(s: str) -> str:
+    """Remove only outer display delimiters, preserving TeX structure.
+
+    Pandoc's DOCX writer emits native OMML for ``cases``, ``array``, matrix,
+    and alignment environments.  Stripping those environments and rebuilding
+    rows as an ``eqArr`` loses delimiters, cell alignment, and nested math
+    semantics, so the complete display is sent through one compiler call.
+    """
     s = s.strip()
     if s.startswith(r"\["):
         s = s[2:]
     if s.endswith(r"\]"):
         s = s[:-2]
-    s = re.sub(r"\\begin\{equation\*?\}", "", s)
-    s = re.sub(r"\\end\{equation\*?\}", "", s)
-    s = re.sub(r"\\begin\{(?:array|aligned|align)\}(?:\{[^}]*\})?", "", s)
-    s = re.sub(r"\\end\{(?:array|aligned|align)\}", "", s)
-    s = re.sub(r"\\left\s*([(\[|.])", r"\1", s)
-    s = re.sub(r"\\right\s*([)\]|.])", r"\1", s)
+    # Keep the legacy display-math aliases accepted by the TeX converter.
+    # They are source conveniences rather than environments, so normalizing
+    # them here leaves the structural cases/array/matrix markup untouched.
+    s = _normalize_display_delimiters(s)
     s = re.sub(r"\\vdet\b", lambda _: r"V_{\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: r"\eta^{2}", s)
     s = s.replace(r"\,", " ")
@@ -755,64 +881,39 @@ def _normalize_display_math_source(s: str) -> str:
     return s.strip()
 
 
-def _display_math_rows(math_tex: str) -> list[str]:
-    s = _normalize_display_math_source(math_tex)
-    rows = re.split(r"\\\\", s)
-    clean_rows = []
-    for row in rows:
-        row = re.sub(r"\s*&\s*=\s*&\s*", " \u2009=\u2009 ", row)
-        row = row.replace("&", " ")
-        row = re.sub(r"\s+", " ", row).strip(" ,;")
-        if row:
-            clean_rows.append(row)
-    return clean_rows
-
-
 def _starts_lowercase_continuation(text: str) -> bool:
     match=re.search(r"[A-Za-z]",text)
     return bool(match and match.group(0).islower())
 
 
-_MATH_NS="http://schemas.openxmlformats.org/officeDocument/2006/math"
-
-
-def _omath_element(omml: etree._Element) -> etree._Element:
-    for child in omml:
-        if etree.QName(child).localname=="oMath":
-            return child
-    raise RuntimeError("display math conversion did not return an oMath element")
-
-
-def _stacked_display_math(rows: list[str]) -> etree._Element:
-    """One OMML equation array, so a multi-row display keeps a single number."""
-    omath=etree.Element(f"{{{_MATH_NS}}}oMath")
-    array=etree.SubElement(omath,f"{{{_MATH_NS}}}eqArr")
-    props=etree.SubElement(array,f"{{{_MATH_NS}}}eqArrPr")
-    for name in ("maxDist","objDist"):
-        node=etree.SubElement(props,f"{{{_MATH_NS}}}{name}")
-        node.set(f"{{{_MATH_NS}}}val","0")
-    for row in rows:
-        slot=etree.SubElement(array,f"{{{_MATH_NS}}}e")
-        inner=_omath_element(latex_to_omml(row))
-        for child in list(inner):
-            slot.append(child)
-    return omath
-
-
 def add_display_math(doc: Document, math_tex: str, resolver: CitationResolver, equation_prefix: str=""):
-    rows=_display_math_rows(math_tex)
-    if not rows: return
-    context=_context(); context.eq_counter+=1
-    label=f"({equation_prefix}{context.eq_counter})"
-    p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(0)
-    p.paragraph_format.tab_stops.add_tab_stop(Cm(8),WD_TAB_ALIGNMENT.CENTER)
-    p.paragraph_format.tab_stops.add_tab_stop(Cm(16),WD_TAB_ALIGNMENT.RIGHT)
-    run=p.add_run("\t"); run.font.size=PT_BODY; run.font.name=FONT_BODY
-    if len(rows)==1:
-        p._p.append(latex_to_omml(rows[0]))
-    else:
-        p._p.append(_stacked_display_math(rows))
-    run=p.add_run(f"\t{label}"); run.font.size=PT_BODY; run.font.name=FONT_BODY
+    source = _normalize_display_math_source(math_tex)
+    if not source:
+        return
+    # A starred display is intentionally unnumbered.  In particular, do not
+    # advance the counter: references to the next numbered equation must keep
+    # their authored number.
+    display_match = _DISPLAY_ENV_RE.match(source)
+    numbered = not (display_match and display_match.group("star"))
+    context = _context()
+    label = ""
+    if numbered:
+        context.eq_counter += 1
+        label = f"({equation_prefix}{context.eq_counter})"
+    p = doc.add_paragraph()
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.tab_stops.add_tab_stop(Cm(8), WD_TAB_ALIGNMENT.CENTER)
+    p.paragraph_format.tab_stops.add_tab_stop(Cm(16), WD_TAB_ALIGNMENT.RIGHT)
+    run = p.add_run("\t")
+    run.font.size = PT_BODY
+    run.font.name = FONT_BODY
+    # Keep the full TeX display intact.  Pandoc emits the appropriate OMML
+    # structure (m:m/mr for arrays and matrices, m:d for cases, etc.).
+    p._p.append(latex_to_omml(source))
+    if label:
+        run = p.add_run(f"\t{label}")
+        run.font.size = PT_BODY
+        run.font.name = FONT_BODY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1749,13 +1850,20 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             continue
 
         # --- display math: \[ ... \] or \begin{equation} ... \end{equation} ---
-        if line.startswith(r"\[") or re.match(r"\\begin\{equation\*?\}", line):
+        display_match = _DISPLAY_ENV_RE.match(line)
+        if line.startswith(r"\[") or display_match:
             math_block = line
             j = i + 1
-            end_marker = r"\]" if line.startswith(r"\[") else r"\end{equation"
-            while end_marker not in math_block and j < len(lines):
+            if line.startswith(r"\["):
+                end_pattern = re.compile(r"\\\]")
+            else:
+                environment = display_match.group("environment")
+                end_pattern = re.compile(rf"\\end\{{{re.escape(environment)}\*?\}}")
+            while not end_pattern.search(math_block) and j < len(lines):
                 math_block += "\n" + lines[j].strip()
                 j += 1
+            if not end_pattern.search(math_block):
+                raise ValueError(f"Unclosed display equation environment in {tex_path}:{i + 1}")
             add_display_math(doc, math_block, resolver, equation_prefix=float_prefix)
             i = j
             continue
@@ -1999,7 +2107,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             if nl.startswith("%") or _is_invisible_tex_line(nl):
                 j += 1
                 continue
-            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
+            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or _DISPLAY_ENV_RE.match(nl) or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|bibliography\{|end\{)", nl):
                 break
             para_lines.append(nl)
             j += 1
