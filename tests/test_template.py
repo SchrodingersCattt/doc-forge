@@ -852,7 +852,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert "CONTENTS" in text
     contents = next(p for p in document.paragraphs if p.text == "CONTENTS")
     assert contents.style.name == "TOC Heading"
-    assert all(value in text for value in ("METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"))
+    assert all(value in text for value in ("Methods", "Supplementary Tables", "Supplementary Figures"))
     headings = [p for p in document.paragraphs if p._p.find(".//" + qn("w:outlineLvl")) is not None]
     numbered = [p.text for p in headings if p.text[:1].isdigit()]
     assert numbered == ["1. One", "2. Two", "1. Table Section", "1. Figure Section"]
@@ -874,7 +874,7 @@ def test_native_toc_and_heading_number_reset(tmp_path: Path) -> None:
     assert body_indent.get(qn("w:firstLineChars")) == "200"
     assert result.body_first_line_chars == 2
     for paragraph in headings:
-        if paragraph.text in {"METHODS", "SUPPLEMENTARY TABLES", "SUPPLEMENTARY FIGURES"}:
+        if paragraph.text in {"Methods", "Supplementary Tables", "Supplementary Figures"}:
             assert paragraph._p.find(".//" + qn("w:pageBreakBefore")) is not None
     assert result.page_break_before_h1 is True
 
