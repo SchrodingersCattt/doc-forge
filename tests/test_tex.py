@@ -278,6 +278,13 @@ class LabelMapTests(unittest.TestCase):
         self.assertEqual(labels["after-table"], "after-table")
         self.assertEqual(labels["after-equation"], "after-equation")
 
+    def test_orphan_float_prefix_labels_stay_unresolved(self) -> None:
+        source = r"\section{Methods}\label{fig:orphan}\label{tab:orphan}\label{eq:orphan}"
+        labels = _scan_labels(source)
+        self.assertNotIn("fig:orphan", labels)
+        self.assertNotIn("tab:orphan", labels)
+        self.assertNotIn("eq:orphan", labels)
+
 
 if __name__ == "__main__":
     unittest.main()

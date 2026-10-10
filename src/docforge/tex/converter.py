@@ -180,18 +180,26 @@ def _scan_label_refs(text: str, fig_offset: int = 0, tbl_offset: int = 0,
         if env_stack and env_stack[-1][0] == "equation" and env_stack[-1][1] is None:
             continue
         normalized = key[2:] if key.lower().startswith("s-") else key
+        # Semantic float prefixes describe the counter active at the label;
+        # they are not a license to manufacture a value from a prior counter.
+        # In particular, an orphan ``\label{eq:x}`` after equation* (or in
+        # ordinary prose) must stay unresolved instead of becoming equation 0
+        # or reusing the preceding numbered equation.
+        if normalized.startswith(("fig:", "figure:", "tab:", "table:", "alg:", "eq:", "equation:")):
+            if active_ref is None:
+                continue
+            if normalized.startswith(("fig:", "figure:")) and active_ref.kind not in {"figure", "extended_figure"}:
+                continue
+            if normalized.startswith(("tab:", "table:")) and active_ref.kind not in {"table", "extended_table"}:
+                continue
+            if normalized.startswith("alg:") and active_ref.kind != "algorithm":
+                continue
+            if normalized.startswith(("eq:", "equation:")) and active_ref.kind != "equation":
+                continue
+            result[key] = active_ref
+            continue
         prefix_kind = None
-        if normalized.startswith(("fig:", "figure:")):
-            prefix_kind = "extended_figure" if normalized.startswith(("fig:ed_", "figure:ed_")) else "figure"
-            value = str(ed_fig_n) if normalized.startswith(("fig:ed_", "figure:ed_")) else f"{prefix}{fig_n}"
-        elif normalized.startswith(("tab:", "table:")):
-            prefix_kind = "extended_table" if normalized.startswith(("tab:ed_", "table:ed_")) else "table"
-            value = str(ed_tbl_n) if normalized.startswith(("tab:ed_", "table:ed_")) else f"{prefix}{tbl_n}"
-        elif normalized.startswith("alg:"):
-            prefix_kind, value = "algorithm", f"{prefix}{alg_n}"
-        elif normalized.startswith(("eq:", "equation:")):
-            prefix_kind, value = "equation", f"{prefix}{eq_n}"
-        elif normalized.startswith("si:"):
+        if normalized.startswith("si:"):
             prefix_kind = "subsection" if subsec_n > 0 else "section"
             value = f"{prefix}{sec_n}.{subsec_n}" if subsec_n > 0 else f"{prefix}{sec_n}"
         elif normalized.startswith("sn:"):
