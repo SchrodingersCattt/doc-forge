@@ -343,8 +343,17 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
     if not reviewed_path.is_file() or not section_map_path.is_file() or not source_dir.is_dir():
         raise FileNotFoundError("reviewed_docx, section_map, and source_dir must exist")
     mapped = load_section_map(section_map_path)
-    required = ("start_line", "end_line", "hash", "reviewed_start_line", "reviewed_end_line")
-    missing = [str(item.get("file", "<unknown>")) for item in mapped if any(item.get(field) is None for field in required)]
+    missing = [
+        str(item.get("file", "<unknown>"))
+        for item in mapped
+        if (
+            item.get("start_line") is None
+            or item.get("end_line") is None
+            or item.get("hash", item.get("sha256")) is None
+            or item.get("reviewed_start_line") is None
+            or item.get("reviewed_end_line") is None
+        )
+    ]
     if missing:
         raise ValueError("review section map requires source and reviewed line ranges plus hash: " + ", ".join(missing))
     full_md = stage_root / "reviewed" / f"{hashlib.sha1(str(reviewed_path).encode()).hexdigest()}.md"
