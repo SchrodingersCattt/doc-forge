@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -56,6 +57,7 @@ class _PreparedReview:
 
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
 _REVISION_NAMES = frozenset(
     {"ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "sectPrChange", "trPrChange"}
 )
@@ -265,17 +267,174 @@ def _source_map(inputs: Sequence[Path]) -> list[dict[str, Any]]:
 
 
 def _docx_has_revisions(path: Path) -> bool:
-    with zipfile.ZipFile(path, "r") as archive:
-        for name in archive.namelist():
-            if not name.startswith("word/") or not name.endswith(".xml"):
-                continue
-            try:
-                root = etree.fromstring(archive.read(name))
-            except etree.XMLSyntaxError:
-                continue
-            if any(etree.QName(node).localname in _REVISION_NAMES for node in root.iter()):
-                return True
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            for name in archive.namelist():
+                if not name.startswith("word/") or not name.endswith(".xml"):
+                    continue
+                try:
+                    root = etree.fromstring(archive.read(name))
+                except etree.XMLSyntaxError as exc:
+                    raise ValueError(f"invalid XML in reviewed DOCX part {name}") from exc
+                if any(etree.QName(node).localname in _REVISION_NAMES for node in root.iter()):
+                    return True
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ValueError(f"cannot read reviewed DOCX safely: {path}") from exc
     return False
+
+
+def _docx_paragraph_text(paragraph: etree._Element, *, view: str) -> str:
+    """Read the visible text in one DOCX paragraph for a revision view."""
+    pieces: list[str] = []
+
+    def walk(node: etree._Element, hidden: bool = False) -> None:
+        local = etree.QName(node).localname
+        if local in {"del", "moveFrom"}:
+            hidden = view == "accepted"
+        elif local in {"ins", "moveTo"}:
+            hidden = view == "original"
+        if hidden:
+            return
+        if local in {"t", "delText"}:
+            if local == "t" or view == "original":
+                pieces.append(node.text or "")
+            return
+        if local == "tab":
+            pieces.append("\t")
+            return
+        if local in {"br", "cr"}:
+            pieces.append("\n")
+            return
+        for child in node:
+            walk(child, hidden)
+
+    walk(paragraph)
+    return "".join(pieces)
+
+
+def _docx_paragraph_records(path: Path) -> dict[str, dict[str, Any]]:
+    """Return stable ``w14:paraId`` records from the reviewed document."""
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            try:
+                root = etree.fromstring(archive.read("word/document.xml"))
+            except KeyError as exc:
+                raise ValueError("reviewed DOCX has no word/document.xml") from exc
+            except etree.XMLSyntaxError as exc:
+                raise ValueError("invalid XML in reviewed DOCX part word/document.xml") from exc
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ValueError(f"cannot read reviewed DOCX safely: {path}") from exc
+    records: dict[str, dict[str, Any]] = {}
+    body = root.find(f".//{{{_W}}}body")
+    if body is None:
+        raise ValueError("reviewed DOCX has no document body")
+    for ordinal, paragraph in enumerate(body.iter(f"{{{_W}}}p")):
+        identifier = paragraph.get(f"{{{_W14}}}paraId")
+        if not identifier:
+            continue
+        revisions = {
+            etree.QName(node).localname
+            for node in paragraph.iter()
+            if etree.QName(node).localname in {"ins", "del"}
+        }
+        records[str(identifier).casefold()] = {
+            "id": str(identifier),
+            "ordinal": ordinal,
+            "revisions": revisions,
+            "original_text": _docx_paragraph_text(paragraph, view="original"),
+            "accepted_text": _docx_paragraph_text(paragraph, view="accepted"),
+        }
+    return records
+
+
+def _reviewed_identity(item: Mapping[str, Any]) -> str | None:
+    value = item.get("reviewed_paragraph", item.get("reviewed_id"))
+    if isinstance(value, Mapping):
+        value = value.get("id", value.get("paragraph_id", value.get("para_id")))
+    if value is None or not str(value).strip():
+        return None
+    return str(value)
+
+
+def _normalise_edit_text(value: str) -> str:
+    """Compare Markdown and DOCX paragraph text without markup syntax."""
+    value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"[`*_#>~]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _local_media_references(markdown: str) -> list[str]:
+    """Extract local Markdown/HTML image references from a candidate chunk."""
+    references = re.findall(r"!\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))", markdown)
+    values = [first or second for first, second in references]
+    values.extend(re.findall(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", markdown, flags=re.IGNORECASE))
+    result: list[str] = []
+    for value in values:
+        value = value.split("#", 1)[0].split("?", 1)[0].strip()
+        if not value or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value) or value.startswith("//"):
+            continue
+        result.append(value)
+    return result
+
+
+def _stamp_output_paragraph_ids(path: Path, review: _PreparedReview | None) -> dict[tuple[str, int], dict[str, Any]]:
+    """Carry reviewed paragraph IDs into the generated DOCX when possible."""
+    if review is None or not review.source_map:
+        return {}
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        root = etree.fromstring(files["word/document.xml"])
+    except (KeyError, zipfile.BadZipFile, OSError, etree.XMLSyntaxError):
+        # Test doubles and non-DOCX renderers cannot carry package identities;
+        # the source map still contains the reviewed identity in that case.
+        return {}
+    body = root.find(f".//{{{_W}}}body")
+    if body is None:
+        return {}
+    paragraphs = list(body.iter(f"{{{_W}}}p"))
+    available: dict[str, list[dict[str, Any]]] = {}
+    for record in review.source_map:
+        identity = record.get("docx_paragraph_id")
+        if not identity:
+            continue
+        expected = _normalise_edit_text(str(record.get("reviewed_text", "")))
+        if expected:
+            available.setdefault(expected, []).append(record)
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    used: set[int] = set()
+    for ordinal, paragraph in enumerate(paragraphs):
+        text = _normalise_edit_text(_docx_paragraph_text(paragraph, view="accepted"))
+        if not text:
+            continue
+        match = next(
+            (record for expected, records in available.items() if expected in text or text in expected for record in records),
+            None,
+        )
+        if match is None or ordinal in used:
+            continue
+        identity = str(match["docx_paragraph_id"])
+        paragraph.set(f"{{{_W14}}}paraId", identity)
+        used.add(ordinal)
+        result[(str(match["path"]), int(match["start_line"]))] = {
+            "id": identity,
+            "ordinal": ordinal,
+            "start": ordinal + 1,
+            "end": ordinal + 1,
+        }
+    if not result:
+        return {}
+    files["word/document.xml"] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+    temporary = path.with_suffix(path.suffix + ".ids")
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in files.items():
+                archive.writestr(name, payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return result
 
 
 def _confined(path: Path, root: Path, *, label: str) -> Path:
@@ -373,7 +532,7 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
             or item.get("hash", item.get("sha256")) is None
             or item.get("reviewed_start_line") is None
             or item.get("reviewed_end_line") is None
-            or item.get("reviewed_paragraph", item.get("reviewed_id")) is None
+            or _reviewed_identity(item) is None
             or (
                 item.get("reviewed_hash", item.get("accepted_hash")) is None
                 and not (
@@ -389,17 +548,28 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
     full_md.parent.mkdir(parents=True, exist_ok=True)
     docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
     chunks = _review_chunks(full_md.read_text(encoding="utf-8"), mapped)
+    reviewed_paragraphs = _docx_paragraph_records(reviewed_path)
+    matched_paragraphs: set[str] = set()
+    for item, (_name, replacement) in zip(mapped, chunks):
+        identity = _reviewed_identity(item)
+        assert identity is not None
+        record = reviewed_paragraphs.get(identity.casefold())
+        if record is None:
+            raise ValueError(f"reviewed paragraph identity is absent from DOCX: {identity}")
+        if not record["revisions"].intersection({"ins", "del"}):
+            raise ValueError(f"reviewed paragraph has no w:ins/w:del revision: {identity}")
+        if identity.casefold() in matched_paragraphs:
+            raise ValueError(f"reviewed paragraph identity is mapped more than once: {identity}")
+        matched_paragraphs.add(identity.casefold())
+        reviewed_text = item.get("reviewed_text")
+        reviewed_expected = _normalise_edit_text(str(reviewed_text)) if reviewed_text is not None else _normalise_edit_text(replacement)
+        accepted_text = _normalise_edit_text(record["accepted_text"])
+        if reviewed_expected and reviewed_expected not in accepted_text and accepted_text not in reviewed_expected:
+            raise RuntimeError(f"reviewed inserted text does not match mapped paragraph: {identity}")
     # Preserve the source directory layout in staging so relative figures,
     # tables, and media links resolve exactly as they do from the profile.
     staged_root = stage_root / "sources" / hashlib.sha1(str(source_dir).encode()).hexdigest()[:12]
     staged_root.mkdir(parents=True, exist_ok=True)
-    for source_path in source_dir.rglob("*"):
-        if not source_path.is_file() or stage_root in source_path.parents:
-            continue
-        relative = source_path.relative_to(source_dir)
-        destination = staged_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination)
     staged_by_original: dict[Path, Path] = {}
     ranges: dict[Path, list[tuple[int, int]]] = {}
     records: list[dict[str, Any]] = []
@@ -426,6 +596,12 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
         old_segment = "".join(old_lines[start - 1:end])
         if expected is not None and str(expected) != _sha256_text(old_segment):
             raise RuntimeError(f"source map hash mismatch for {target}:{start}-{end}")
+        identity = _reviewed_identity(item)
+        assert identity is not None
+        original_text = _normalise_edit_text(reviewed_paragraphs[identity.casefold()]["original_text"])
+        source_expected = _normalise_edit_text(str(item.get("source_text", old_segment)))
+        if source_expected and source_expected not in original_text and original_text not in source_expected:
+            raise RuntimeError(f"reviewed deleted text does not match source paragraph: {identity}")
         if not replacement.endswith("\n"):
             replacement += "\n"
         reviewed_identity = item.get("reviewed_paragraph", item.get("reviewed_id"))
@@ -438,6 +614,47 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
             staged = staged_root / target.relative_to(source_dir)
             staged_by_original[target] = staged
         plans.append((target, start, end, replacement, dict(item)))
+    if entry.get("inputs") is not None:
+        logical = _resolve_inputs(entry["inputs"], base, label="inputs")
+        for input_path in logical:
+            input_target = _confined(input_path, source_dir, label="delivery input")
+            if input_target not in staged_by_original:
+                raise ValueError(f"delivery input is absent from the revision map: {input_target}")
+    else:
+        logical = list(staged_by_original)
+    # Copy only mapped source files. In particular, do not recurse through a
+    # project checkout and accidentally stage .git, virtualenvs, or unrelated
+    # private files. Every resolved source path remains confined to source_dir.
+    for target, staged in staged_by_original.items():
+        target = _confined(target, source_dir, label="mapped source")
+        if not target.is_file():
+            raise FileNotFoundError(f"mapped Markdown source does not exist: {target}")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, staged)
+    # Preserve local media links from both the source segment and the reviewed
+    # candidate. Candidate media is extracted by docx_to_markdown below its
+    # scratch directory; copy it into the staged source-relative location.
+    for target, staged in staged_by_original.items():
+        source_text = target.read_text(encoding="utf-8-sig")
+        target_media = _local_media_references(source_text)
+        for _map_target, _start, _end, replacement, _item in plans:
+            if _map_target == target:
+                target_media.extend(_local_media_references(replacement))
+        for reference in target_media:
+            relative_ref = Path(reference)
+            if relative_ref.is_absolute() or ".." in relative_ref.parts:
+                raise ValueError(f"local media reference escapes source directory: {reference}")
+            extracted_candidate = full_md.parent / relative_ref
+            source_candidate = target.parent / relative_ref
+            if extracted_candidate.is_file():
+                media_source = _confined(extracted_candidate, full_md.parent, label="extracted media")
+            elif source_candidate.is_file():
+                media_source = _confined(source_candidate, source_dir, label="source media")
+            else:
+                raise FileNotFoundError(f"local media referenced by reviewed Markdown does not exist: {reference}")
+            media_destination = staged_root / target.relative_to(source_dir).parent / relative_ref
+            media_destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(media_source, media_destination)
     # Every range is interpreted against the immutable source snapshot. Apply
     # from the end of each file so replacing a multi-line range cannot shift
     # the coordinates of an earlier range in the same source.
@@ -447,18 +664,36 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
         target_plans = sorted((plan for plan in plans if plan[0] == target), key=lambda plan: plan[1], reverse=True)
         for _target, start, end, replacement, item in target_plans:
             staged_lines[start - 1:end] = [replacement]
+            identity = _reviewed_identity(item)
+            assert identity is not None
+            reviewed_record = reviewed_paragraphs[identity.casefold()]
+            reviewed_value = item.get("reviewed_paragraph", item.get("reviewed_id"))
+            reviewed_hash = item.get("reviewed_hash", item.get("accepted_hash"))
+            if reviewed_hash is None and isinstance(reviewed_value, Mapping):
+                reviewed_hash = reviewed_value.get("hash")
             records.append({
                 "path": str(target), "start_line": start, "end_line": start + replacement.count("\n") - 1,
                 "hash": _sha256_text(replacement), "original_hash": str(item.get("hash", item.get("sha256", ""))),
                 "file": str(item["file"]),
+                "reviewed_start_line": int(item["reviewed_start_line"]),
+                "reviewed_end_line": int(item["reviewed_end_line"]),
+                "reviewed_paragraph": reviewed_value,
+                "reviewed_hash": reviewed_hash,
+                "reviewed_text": replacement,
+                "docx_paragraph_id": reviewed_record["id"],
+                "docx_paragraph_range": {
+                    "start": int(item["reviewed_start_line"]),
+                    "end": int(item["reviewed_end_line"]),
+                },
+                "reviewed_docx_paragraph": {
+                    "id": reviewed_record["id"],
+                    "ordinal": reviewed_record["ordinal"],
+                    "revision_kinds": sorted(reviewed_record["revisions"]),
+                },
             })
         staged.write_text("".join(staged_lines), encoding="utf-8")
     if not staged_by_original:
         raise ValueError("section map produced no source updates")
-    if entry.get("inputs") is not None:
-        logical = _resolve_inputs(entry["inputs"], base, label="inputs")
-    else:
-        logical = list(staged_by_original)
     staged_inputs = [staged_by_original.get(path.resolve(), path) for path in logical]
     return _PreparedReview(tuple(staged_inputs), tuple(logical), tuple(staged_by_original.items()), tuple(records))
 
@@ -473,7 +708,11 @@ def _rewrite_paths(value: Any, replacements: Mapping[str, str]) -> Any:
     return value
 
 
-def _post_review_source_map(review: _PreparedReview) -> list[dict[str, Any]]:
+def _post_review_source_map(
+    review: _PreparedReview,
+    *,
+    output_paragraphs: Mapping[tuple[str, int], Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Describe the staged post-review bytes under their published paths."""
     logical_by_staged = {str(staged.resolve()): logical for logical, staged in review.updates}
     result: list[dict[str, Any]] = []
@@ -490,7 +729,21 @@ def _post_review_source_map(review: _PreparedReview) -> list[dict[str, Any]]:
                     changed.get("path") == str(logical or staged)
                     and changed.get("start_line") == record.get("start_line")
                 ):
-                    record["original_hash"] = changed.get("original_hash")
+                    for key in (
+                        "original_hash", "file", "reviewed_start_line", "reviewed_end_line",
+                        "reviewed_paragraph", "reviewed_hash", "reviewed_text",
+                        "docx_paragraph_id", "docx_paragraph_range", "reviewed_docx_paragraph",
+                    ):
+                        if key in changed:
+                            record[key] = changed[key]
+                    record.setdefault("file", str(logical or staged))
+                    if output_paragraphs:
+                        output = output_paragraphs.get((str(logical or staged), int(record["start_line"])))
+                        if output is not None:
+                            record["docx_paragraph_id"] = output["id"]
+                            record["docx_paragraph_range"] = {
+                                "start": output["start"], "end": output["end"],
+                            }
         result.extend(records)
     return result
 
@@ -628,6 +881,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
             stage_output = stage_delivery / output_rel
             stage_output.parent.mkdir(parents=True, exist_ok=True)
             result: AssemblyResult = assemble_markdown_template(inputs, template_path=template, output=stage_output, metadata_path=metadata, bibliography_path=bibliography, citation_base_path=citation_base, force=True, **options)
+            output_paragraphs = _stamp_output_paragraph_ids(stage_output, review)
             stage_manifest, stage_checksum = write_assembly_sidecars(result, inputs=inputs, template_path=template, metadata_path=metadata, bibliography_path=bibliography, citation_base_path=citation_base, command=["docforge", "deliver", "--profile", source, *( ["--accept-revisions"] if accept_revisions else [] )])
             stage_manifests.append(stage_manifest)
             final_output = delivery_dir / output_rel
@@ -636,7 +890,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
             if review is not None:
                 replacements.update({str(staged.resolve()): str(logical.resolve()) for logical, staged in review.updates})
             built.append(DeliveryArtifact(key, final_output, final_manifest, final_checksum, tuple(review.logical_inputs if review else inputs)))
-            source_records.extend(_post_review_source_map(review) if review is not None else _source_map(inputs))
+            source_records.extend(_post_review_source_map(review, output_paragraphs=output_paragraphs) if review is not None else _source_map(inputs))
             if key == "article":
                 # The supplement needs a readable citation base while both
                 # artifacts are still staged. It is rewritten to the final
@@ -645,7 +899,8 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
         aggregate = stage_delivery / aggregate_rel
         final_aggregate = delivery_dir / aggregate_rel
         validate_output_path(final_aggregate, label="delivery manifest")
-        aggregate.write_text(json.dumps({"schema": "docforge.delivery.v1", "generated_at_utc": datetime.now(timezone.utc).isoformat(), "profile": source, "accept_revisions": accept_revisions, "delivery_dir": str(delivery_dir), "artifacts": [{"name": x.name, "output": str(x.output), "manifest": str(x.manifest), "checksum": str(x.checksum), "inputs": [str(p) for p in x.inputs]} for x in built], "source_paragraph_map": source_records}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        review_sections = [item for item in source_records if item.get("reviewed_paragraph") is not None]
+        aggregate.write_text(json.dumps({"schema": "docforge.delivery.v1", "generated_at_utc": datetime.now(timezone.utc).isoformat(), "profile": source, "accept_revisions": accept_revisions, "delivery_dir": str(delivery_dir), "artifacts": [{"name": x.name, "output": str(x.output), "manifest": str(x.manifest), "checksum": str(x.checksum), "inputs": [str(p) for p in x.inputs]} for x in built], "source_paragraph_map": source_records, "sections": review_sections}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         for manifest in stage_manifests:
             data = json.loads(manifest.read_text(encoding="utf-8"))
             manifest.write_text(json.dumps(_rewrite_paths(data, replacements), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
