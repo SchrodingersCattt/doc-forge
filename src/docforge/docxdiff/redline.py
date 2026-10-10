@@ -219,7 +219,9 @@ def _atomic_signature(root: etree._Element) -> bytes:
             for key in list(node.attrib):
                 if etree.QName(key).namespace == R:
                     del node.attrib[key]
-    return etree.tostring(clone, method="c14n")
+    # Exclusive canonicalization: unused in-scope namespace declarations differ
+    # between packages and are not part of the object.
+    return etree.tostring(clone, method="c14n", exclusive=True)
 
 
 class _AtomicRegistry:
@@ -312,7 +314,10 @@ def _blocks(root: etree._Element) -> tuple[etree._Element, list[Block]]:
     body = root.find(".//w:body", NS)
     if body is None:
         raise ValueError("DOCX has no document body")
-    raw = [element for element in body if element.tag != f"{{{W}}}sectPr"]
+    # Body-level bookmark and proofing markers carry no content; aligning
+    # them as blocks reports their absence as deleted paragraphs.
+    markers = {f"{{{W}}}{name}" for name in ("sectPr", "bookmarkStart", "bookmarkEnd", "proofErr")}
+    raw = [element for element in body if element.tag not in markers]
     blocks: list[Block] = []
     index = 0
     while index < len(raw):
@@ -1979,6 +1984,15 @@ def _accepted_revision_view(root: etree._Element) -> etree._Element:
     return result
 
 
+def _balance_bookmarks(root: etree._Element) -> None:
+    """Drop bookmark starts or ends whose partner did not survive alignment."""
+    starts = {node.get(f"{{{W}}}id"): node for node in root.iter(f"{{{W}}}bookmarkStart")}
+    ends = {node.get(f"{{{W}}}id"): node for node in root.iter(f"{{{W}}}bookmarkEnd")}
+    for key in set(starts) ^ set(ends):
+        node = starts.get(key) if key in starts else ends[key]
+        node.getparent().remove(node)
+
+
 def create_tracked_docx(
     base_path: Path,
     current_path: Path,
@@ -2240,6 +2254,8 @@ def create_tracked_docx(
             previous = visible_text(children[index - 1]).strip()
             if child.tag != f"{{{W}}}p" or not re.match(r"Figure S\d+\.", previous):
                 continue
+            if child.find(".//w:ins", NS) is None and child.find(".//w:del", NS) is None:
+                continue
             props = child.find("./w:pPr", NS)
             if props is None:
                 props = etree.Element(f"{{{W}}}pPr")
@@ -2253,6 +2269,7 @@ def create_tracked_docx(
         current_body.append(child)
     if current_sectpr is not None:
         current_body.append(copy.deepcopy(current_sectpr))
+    _balance_bookmarks(current_root)
     _carry_missing_comment_markers(raw_base_root, current_root)
     original_markers = _comment_counts(raw_base_root)
     final_markers = _comment_counts(current_root)

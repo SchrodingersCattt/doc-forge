@@ -68,6 +68,34 @@ def build_parser() -> argparse.ArgumentParser:
     docx_md.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
     docx_md.add_argument("--force", action="store_true", help="Overwrite existing output files")
 
+    mdx = sub.add_parser("md-export", help="DOCX -> reversible Markdown bundle (docs/docxmd-syntax.md)")
+    mdx.add_argument("input", type=Path, help="Input DOCX path")
+    mdx.add_argument("bundle", type=Path, help="Bundle directory (bundle.json, Markdown parts, media, references)")
+    mdx.add_argument("--id", dest="doc_id", required=True, help="Document id inside the bundle, e.g. main or si")
+    mdx.add_argument("--split", type=Path, help='JSON list of {"file": NAME, "start": REGEX} part boundaries')
+    mdx.add_argument("--bibliography", default="references.json", help="References JSON file name inside the bundle")
+    mdx.add_argument("--bib-style", help="Style key for this document's references (default: the document id)")
+    mdx.add_argument("--no-citations", action="store_true", help="Keep superscript citation numbers as plain text")
+    mdx.add_argument("--force", action="store_true", help="Re-export a document that is already in the bundle")
+
+    mdb = sub.add_parser("md-build", help="Reversible Markdown bundle -> DOCX")
+    mdb.add_argument("bundle", type=Path, help="Bundle directory")
+    mdb.add_argument("--id", dest="doc_id", required=True, help="Document id inside the bundle")
+    mdb.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    mdb.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
+    mdr = sub.add_parser("md-roundtrip", help="Export, rebuild and compare a DOCX with its Markdown bundle")
+    mdr.add_argument("input", type=Path, help="Input DOCX path")
+    mdr.add_argument("bundle", type=Path, help="Bundle directory to (re)write")
+    mdr.add_argument("--id", dest="doc_id", required=True, help="Document id inside the bundle")
+    mdr.add_argument("--split", type=Path, help="Part boundaries JSON (see md-export)")
+    mdr.add_argument("--bibliography", default="references.json", help="References JSON file name inside the bundle")
+    mdr.add_argument("--bib-style", help="Style key for this document's references")
+    mdr.add_argument("-o", "--output", type=Path, help="Rebuilt DOCX path (default: BUNDLE/_roundtrip/ID.docx)")
+    mdr.add_argument("--render", choices=("none", "auto", "word", "libreoffice"), default="none", help="Also render both files and compare pages")
+    mdr.add_argument("--report", type=Path, help="Write the JSON report here")
+    mdr.add_argument("--force", action="store_true", help="Re-export a document that is already in the bundle")
+
     delta = sub.add_parser(
         "apply-delta",
         help="Apply a Markdown paragraph delta onto a source DOCX without redrawing it",
@@ -166,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_md2docx(args)
         if args.command == "docx2md":
             return _cmd_docx2md(args)
+        if args.command == "md-export":
+            return _cmd_md_export(args)
+        if args.command == "md-build":
+            return _cmd_md_build(args)
+        if args.command == "md-roundtrip":
+            return _cmd_md_roundtrip(args)
         if args.command == "apply-delta":
             return _cmd_apply_delta(args)
         if args.command == "redline":
@@ -298,6 +332,61 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
     convert_unicode_scripts_in_docx(args.output)
     print(args.output)
     return 0
+
+
+def _load_split(path: Path | None) -> list[dict] | None:
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path else None
+
+
+def _guard_bundle(args: argparse.Namespace) -> None:
+    manifest = args.bundle / "bundle.json"
+    if manifest.exists() and not args.force:
+        documents = json.loads(manifest.read_text(encoding="utf-8")).get("documents", [])
+        if any(doc.get("id") == args.doc_id for doc in documents):
+            raise FileExistsError(f"Bundle already has document {args.doc_id!r}; pass --force to re-export over its Markdown")
+
+
+def _cmd_md_export(args: argparse.Namespace) -> int:
+    from ..docxmd import ExportOptions, export_docx
+
+    _guard_bundle(args)
+    report = export_docx(args.input, args.bundle, ExportOptions(
+        args.doc_id, _load_split(args.split), args.bibliography, args.bib_style, citations=not args.no_citations,
+    ))
+    print(json.dumps(report, indent=1, ensure_ascii=False, default=str))
+    return 0
+
+
+def _cmd_md_build(args: argparse.Namespace) -> int:
+    from ..docxmd import build_docx
+
+    build_docx(args.bundle, args.doc_id, args.output, overwrite=args.force)
+    print(args.output)
+    return 0
+
+
+def _cmd_md_roundtrip(args: argparse.Namespace) -> int:
+    from ..docxmd import compare_pdfs, render_pdfs, roundtrip
+
+    _guard_bundle(args)
+    report = roundtrip(
+        args.input, args.bundle, args.doc_id, split=_load_split(args.split),
+        bibliography=args.bibliography, bib_style=args.bib_style, output=args.output,
+    )
+    if args.render != "none":
+        out = Path(report["rebuilt"]).parent / "pdf"
+        source_copy = out / f"{args.doc_id}.source.docx"
+        out.mkdir(parents=True, exist_ok=True)
+        source_copy.write_bytes(args.input.read_bytes())
+        left, right = render_pdfs([source_copy, Path(report["rebuilt"])], out, args.render)
+        pages = compare_pdfs(left, right)
+        report["render"] = {"engine": args.render, "pages": pages}
+        report["ok"] = report["ok"] and all(page["same"] for page in pages)
+    text = json.dumps(report, indent=1, ensure_ascii=False, default=str)
+    if args.report:
+        args.report.write_text(text, encoding="utf-8")
+    print(text)
+    return 0 if report["ok"] else 1
 
 
 def _cmd_apply_delta(args: argparse.Namespace) -> int:

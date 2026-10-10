@@ -60,6 +60,12 @@ docforge md2docx 06.supporting-information.md -o si.docx \
 # Word tracked-changes redline against a reviewed DOCX
 docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
 
+# Reversible DOCX <-> Markdown bundle (docs/docxmd-syntax.md): export, edit, rebuild, redline
+docforge md-export reviewed.docx md --id main --split split.json --bibliography 07.references.json
+docforge md-roundtrip reviewed.docx md --id main --split split.json --render word
+docforge md-build md --id main -o revised.docx
+docforge redline reviewed.docx revised.docx -o revised_tracked.docx
+
 # LaTeX manuscript -> DOCX (main + optional SI + bib)
 docforge tex2docx main.tex --si si.tex --bib ref.bib -o main.docx
 
