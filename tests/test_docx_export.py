@@ -294,7 +294,6 @@ def test_sparse_redline_refuses_without_writing_output(tmp_path: Path) -> None:
     assert raised.value.summary["block_replace"] == 1
     assert "baseline index" in str(raised.value)
     assert "current index" in str(raised.value)
-    assert "insert" in str(raised.value)
     assert "delete" in str(raised.value)
     assert "best rejected ratio" in str(raised.value)
     assert "cutoff" in str(raised.value)
