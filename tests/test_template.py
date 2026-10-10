@@ -1228,11 +1228,13 @@ def test_custom_body_alignment_controls_generated_blocks(tmp_path: Path) -> None
     ]
     assert len(paragraphs) == 4
     for paragraph in paragraphs:
-        alignment = paragraph._p.find(".//" + qn("w:jc"))
-        assert alignment is not None and alignment.get(qn("w:val")) == "both"
+        assert paragraph._p.find(".//" + qn("w:jc")) is None
+        assert paragraph.style.style_id == "TA_Main_Text"
+        assert paragraph.style.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
     table_paragraph = rendered.tables[0].cell(1, 0).paragraphs[0]
-    alignment = table_paragraph._p.find(".//" + qn("w:jc"))
-    assert alignment is not None and alignment.get(qn("w:val")) == "both"
+    assert table_paragraph._p.find(".//" + qn("w:jc")) is None
+    assert table_paragraph.style.style_id == "TA_Main_Text"
+    assert table_paragraph.style.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
 
 
 def test_assembly_rejects_missing_used_semantic_role(tmp_path: Path) -> None:

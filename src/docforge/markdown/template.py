@@ -445,48 +445,8 @@ def _style(document: DocumentType, style_id: str):
     raise ValueError(f"Template style is unavailable: {style_id}")
 
 
-def _style_alignment(document: DocumentType, style_id: str) -> str | None:
-    """Return the first explicit alignment in a style's inheritance chain."""
-    style = _style(document, style_id)
-    seen: set[str] = set()
-    while style is not None and style.style_id not in seen:
-        seen.add(style.style_id)
-        properties = style._element.pPr
-        alignment = properties.find(qn("w:jc")) if properties is not None else None
-        if alignment is not None:
-            value = alignment.get(qn("w:val"))
-            if value:
-                return value
-        style = style.base_style
-    return None
-
-
-def _set_paragraph_alignment(element, value: str | None) -> None:
-    properties = element.find(qn("w:pPr"))
-    if properties is None:
-        if value is None:
-            return
-        properties = OxmlElement("w:pPr")
-        element.insert(0, properties)
-    alignment = properties.find(qn("w:jc"))
-    if value is None:
-        if alignment is not None:
-            properties.remove(alignment)
-        return
-    if alignment is None:
-        alignment = OxmlElement("w:jc")
-        properties.append(alignment)
-    alignment.set(qn("w:val"), value)
-
-
-def _apply_style_to_paragraph(
-    element,
-    document: DocumentType,
-    style_id: str,
-    *,
-    keep_generated_alignment: bool = True,
-) -> None:
-    """Apply a semantic style while resolving generated alignment consistently."""
+def _apply_style_to_paragraph(element, document: DocumentType, style_id: str) -> None:
+    """Attach a semantic style and remove competing direct alignment."""
     properties = element.find(qn("w:pPr"))
     if properties is None:
         properties = OxmlElement("w:pPr")
@@ -496,14 +456,12 @@ def _apply_style_to_paragraph(
         style = OxmlElement("w:pStyle")
         properties.insert(0, style)
     style.set(qn("w:val"), style_id)
-    # Explicit alignment on the named semantic style wins over renderer defaults.
-    # When the style leaves alignment inherited, preserve the renderer's value
-    # for block kinds such as quotes and lists.
-    style_alignment = _style_alignment(document, style_id)
-    if style_alignment is not None:
-        _set_paragraph_alignment(element, style_alignment)
-    elif not keep_generated_alignment:
-        _set_paragraph_alignment(element, None)
+    # Alignment belongs to the named style and its base-style chain.  Direct
+    # w:jc values from the temporary renderer or a prototype would compete
+    # with that semantic style, so discard them after grafting the paragraph.
+    alignment = properties.find(qn("w:jc"))
+    if alignment is not None:
+        properties.remove(alignment)
 
 
 def _strip_fonts(element) -> None:
@@ -1558,7 +1516,7 @@ def _clone_rendered_block(
                 source_properties = _clean_paragraph_prototype(p.get("body")) if p.get("body") is not None else None
                 # Keep list indentation and quote offsets from the generated
                 # paragraph while importing the template's font/spacing.
-                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs"), qn("w:jc")}
+                keep = {qn("w:ind"), qn("w:numPr"), qn("w:tabs")}
                 for child_prop in list(old_properties):
                     if child_prop.tag not in keep and child_prop.tag != qn("w:pStyle"):
                         old_properties.remove(child_prop)
