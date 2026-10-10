@@ -180,3 +180,28 @@ def test_comment_ids_follow_markdown(tmp_path):
     assert ids == ["7", "8"]
     refs = {node.get(f"{{{W}}}id") for node in document.iter(f"{{{W}}}commentReference")}
     assert refs == {"7", "8"}
+
+
+def test_redline_follows_moved_comment(tmp_path):
+    source = tmp_path / "source.docx"
+    _sample_docx(source)
+    bundle = tmp_path / "md"
+    export_docx(source, bundle, ExportOptions("main"))
+    original = (bundle / "main.md").read_text(encoding="utf-8")
+    note = '\n::: comment {: id=c3 author=a date=2026-01-01T00:00:00Z}\nCheck\n:::\n'
+    anchored = '<comment-start id="c3"/>**bold**<comment-end id="c3"/>'
+    (bundle / "main.md").write_text(original.replace("**bold**", anchored, 1) + note, encoding="utf-8")
+    base = tmp_path / "base.docx"
+    build_docx(bundle, "main", base)
+    moved = original.replace("Some **bold**", "Some **strong**", 1)
+    moved = moved.replace("in another font.", 'in <comment-start id="c3"/>a new font<comment-end id="c3"/>.', 1)
+    (bundle / "main.md").write_text(moved + note, encoding="utf-8")
+    current = tmp_path / "current.docx"
+    build_docx(bundle, "main", current)
+    create_tracked_docx(base, current, tmp_path / "tracked.docx", author="tester", workers=1)
+    with zipfile.ZipFile(tmp_path / "tracked.docx") as package:
+        document = etree.fromstring(package.read("word/document.xml"))
+    for name in ("commentRangeStart", "commentRangeEnd", "commentReference"):
+        (node,) = document.iter(f"{{{W}}}{name}")
+        paragraph = next(node.iterancestors(f"{{{W}}}p"))
+        assert "a new font" in "".join(paragraph.itertext())

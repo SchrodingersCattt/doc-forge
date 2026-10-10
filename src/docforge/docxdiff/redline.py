@@ -1128,6 +1128,18 @@ def _replace_atomic_tokens(
                     owner.insert(position, replacement)
 
 
+def _comment_event_id(event: Event) -> str | None:
+    element = event.element
+    if element.tag in (f"{{{W}}}commentRangeStart", f"{{{W}}}commentRangeEnd"):
+        return element.get(f"{{{W}}}id")
+    reference = element if element.tag == f"{{{W}}}commentReference" else element.find("./w:commentReference", NS)
+    return reference.get(f"{{{W}}}id") if reference is not None else None
+
+
+def _comment_signature(events: list[Event]) -> list[tuple[str, str | None, int]]:
+    return [(event.kind, _comment_event_id(event), event.offset) for event in events if _comment_event_id(event)]
+
+
 def _merge_paragraph(
     base: etree._Element,
     current: etree._Element,
@@ -1146,11 +1158,19 @@ def _merge_paragraph(
         current, "final", atomic_math=atomic_math, atomic_registry=atomic_registry
     )
     events = _events(base, atomic_math=atomic_math)
+    # The current paragraph decides where its comments are anchored; the
+    # baseline only supplies anchors for comments the current text lacks.
+    current_comments = [
+        event for event in _events(current, atomic_math=atomic_math) if _comment_event_id(event)
+    ]
+    current_ids = {_comment_event_id(event) for event in current_comments}
+    comments_moved = _comment_signature(events) != _comment_signature(current_comments)
+    events = [event for event in events if _comment_event_id(event) not in current_ids]
     base_has_revisions = preserve_base_revisions and _has_revisions(base)
     # Unchanged final text keeps the reviewed w:ins/w:del author, date, and
     # boundaries. Rebuilding the paragraph would drop metadata deletions such
     # as a removed corresponding-author mark or email.
-    if base_has_revisions and base_text == current_text and not (
+    if base_has_revisions and base_text == current_text and not comments_moved and not (
         _needs_passthrough(base) or _needs_passthrough(current)
     ):
         result = copy.deepcopy(base)
@@ -1169,7 +1189,7 @@ def _merge_paragraph(
     # have no w:t representation. Review comments remain available by carrying
     # their anchors onto the preserved paragraph.
     if _needs_passthrough(base) or _needs_passthrough(current):
-        return _carry_comment_markers(base, current) if events else copy.deepcopy(current)
+        return _carry_comment_markers(base, current, current_ids) if events else copy.deepcopy(current)
     # Identical final text is not a content edit. Re-rendered Markdown often
     # splits the same words into different runs (for example around bold
     # figure references, bookmarks, or subscript spans); diffing those runs
@@ -1177,10 +1197,24 @@ def _merge_paragraph(
     # Word's All Markup view. Keep the reviewed baseline paragraph intact so
     # only semantic text changes become revisions. Layout-bearing paragraphs
     # are handled by the passthrough branch above.
-    if base_text == current_text:
+    if base_text == current_text and not comments_moved:
         return copy.deepcopy(base)
     base_tokens = _tokenize(base_text, base_spans, {event.offset for event in events})
-    current_tokens = _tokenize(current_text, current_spans)
+    current_tokens = _tokenize(current_text, current_spans, {event.offset for event in current_comments})
+    current_index = {0: 0}
+    for index, token in enumerate(current_tokens, 1):
+        current_index[token.end] = index
+    cuts = sorted({current_index.get(event.offset, 0) for event in current_comments})
+    current_boundary: dict[int, int] = {}
+
+    def emit_current(j1: int, j2: int, kind: str | None, i1: int | None) -> None:
+        edges = [j1, *(cut for cut in cuts if j1 < cut < j2), j2]
+        for start, end in zip(edges, edges[1:]):
+            current_boundary.setdefault(start, len(nodes))
+            index0 = None if i1 is None else i1 + start - j1
+            _append_tracked(nodes, current_tokens[start:end], kind, context, boundary, index0)
+            current_boundary[end] = len(nodes)
+
     matcher = difflib.SequenceMatcher(
         None, [t.text for t in base_tokens], [t.text for t in current_tokens], autojunk=False
     )
@@ -1191,6 +1225,7 @@ def _merge_paragraph(
         if tag == "equal":
             if base_has_revisions:
                 for offset, token in enumerate(current_tokens[j1:j2], i1):
+                    current_boundary.setdefault(j1 + offset - i1, len(nodes))
                     boundary.setdefault(offset, len(nodes))
                     base_token = base_tokens[offset] if offset < len(base_tokens) else None
                     if base_token is not None:
@@ -1198,15 +1233,17 @@ def _merge_paragraph(
                     else:
                         nodes.append(_run(token))
                     boundary[offset + 1] = len(nodes)
+                    current_boundary[j1 + offset - i1 + 1] = len(nodes)
             else:
-                _append_tracked(nodes, current_tokens[j1:j2], None, context, boundary, i1)
+                emit_current(j1, j2, None, i1)
         elif tag == "delete":
+            current_boundary.setdefault(j1, len(nodes))
             _append_tracked(nodes, base_tokens[i1:i2], "del", context, boundary, i1)
         elif tag == "insert":
-            _append_tracked(nodes, current_tokens[j1:j2], "ins", context, boundary, None)
+            emit_current(j1, j2, "ins", None)
         else:
             _append_tracked(nodes, base_tokens[i1:i2], "del", context, boundary, i1)
-            _append_tracked(nodes, current_tokens[j1:j2], "ins", context, boundary, None)
+            emit_current(j1, j2, "ins", None)
         boundary[i2] = len(nodes)
     offset_map = {0: 0}
     for index, token in enumerate(base_tokens, 1):
@@ -1215,6 +1252,9 @@ def _merge_paragraph(
     for event in events:
         token_boundary = offset_map.get(event.offset, 0)
         placed.setdefault(boundary.get(token_boundary, len(nodes)), []).append(event)
+    for event in current_comments:
+        position = current_boundary.get(current_index.get(event.offset, 0), len(nodes))
+        placed.setdefault(position, []).append(event)
     if base_has_revisions:
         for offset, revision in _hidden_revision_nodes(base):
             token_boundary = offset_map.get(offset, 0)
@@ -1509,11 +1549,11 @@ def _table_is_deleted(table: etree._Element) -> bool:
 
 
 def _carry_comment_markers(
-    base: etree._Element, current: etree._Element
+    base: etree._Element, current: etree._Element, skip: set[str] | frozenset[str] = frozenset()
 ) -> etree._Element:
     """Attach comment anchors from a non-text paragraph to its current drawing."""
     result = copy.deepcopy(current)
-    events = _events(base)
+    events = [event for event in _events(base) if _comment_event_id(event) not in skip]
     if not events:
         return result
     insert_at = 1 if len(result) and result[0].tag == f"{{{W}}}pPr" else 0
@@ -1662,6 +1702,47 @@ def _comment_counts(root: etree._Element) -> dict[str, tuple[int, int, int]]:
         for node in root.findall(f".//w:{name}", NS):
             result.setdefault(node.get(f"{{{W}}}id", ""), [0, 0, 0])[index] += 1
     return {key: tuple(value) for key, value in result.items()}
+
+
+_COMMENT_MARKERS = ("commentRangeStart", "commentRangeEnd", "commentReference")
+
+
+def _comment_anchor_texts(root: etree._Element) -> dict[str, set[str]]:
+    """Final-view text of every paragraph that anchors each comment id."""
+    result: dict[str, set[str]] = {}
+    for paragraph in root.iter(f"{{{W}}}p"):
+        for name in _COMMENT_MARKERS:
+            for node in paragraph.iter(f"{{{W}}}{name}"):
+                result.setdefault(node.get(f"{{{W}}}id", ""), set()).add(_normalize(visible_text(paragraph)))
+    return result
+
+
+def _drop_moved_comment_copies(
+    raw: etree._Element, merged: etree._Element, current_anchors: dict[str, set[str]]
+) -> None:
+    """Keep the current document's anchor for a comment it moved elsewhere.
+
+    Deleted baseline text still carries the old anchor, so a comment the
+    current document re-anchored would otherwise appear twice.
+    """
+    wanted = _comment_counts(raw)
+    for identifier, counts in _comment_counts(merged).items():
+        limit = wanted.get(identifier)
+        if limit is None or identifier not in current_anchors:
+            continue
+        if all(count <= allowed for count, allowed in zip(counts, limit)):
+            continue
+        for paragraph in list(merged.iter(f"{{{W}}}p")):
+            if _normalize(visible_text(paragraph)) in current_anchors[identifier]:
+                continue
+            for name in _COMMENT_MARKERS:
+                for node in list(paragraph.iter(f"{{{W}}}{name}")):
+                    if node.get(f"{{{W}}}id") != identifier:
+                        continue
+                    owner = node.getparent() if name == "commentReference" else node
+                    if name == "commentReference" and owner.tag == f"{{{W}}}r" and len(owner) > 2:
+                        owner = node
+                    owner.getparent().remove(owner)
 
 
 def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) -> None:
@@ -2029,6 +2110,7 @@ def create_tracked_docx(
     # formatting-change markers cannot leak into the new redline.
     raw_current_root = current_package.xml("word/document.xml")
     current_root = _accepted_revision_view(raw_current_root)
+    current_anchors = _comment_anchor_texts(current_root)
     base_body, base_blocks = _blocks(base_root)
     current_body, current_blocks = _blocks(current_root)
     # Converter leftovers such as "suppnote" are not manuscript text. Leaving
@@ -2270,6 +2352,7 @@ def create_tracked_docx(
     if current_sectpr is not None:
         current_body.append(copy.deepcopy(current_sectpr))
     _balance_bookmarks(current_root)
+    _drop_moved_comment_copies(raw_base_root, current_root, current_anchors)
     _carry_missing_comment_markers(raw_base_root, current_root)
     original_markers = _comment_counts(raw_base_root)
     final_markers = _comment_counts(current_root)
