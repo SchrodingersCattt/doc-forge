@@ -53,7 +53,7 @@ from .docx_export import (
     reuse_unchanged_roundtrip_source,
 )
 from .delivery import DeliveryArtifact, DeliveryResult, deliver
-from .source_edit import apply_markdown_delta
+from .source_edit import apply_markdown_delta, export_block_map, export_source_block_map
 
 __all__ = [
     "Block",
@@ -106,4 +106,6 @@ __all__ = [
     "DeliveryResult",
     "deliver",
     "apply_markdown_delta",
+    "export_block_map",
+    "export_source_block_map",
 ]
