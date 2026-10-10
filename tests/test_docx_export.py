@@ -274,16 +274,17 @@ def test_redline_accepts_current_revisions_before_diff(tmp_path: Path) -> None:
 def test_sparse_redline_refuses_without_writing_output(tmp_path: Path) -> None:
     base = tmp_path / "base.docx"
     current = tmp_path / "current.docx"
-    for path, prefix, words in (
-        (base, "baseline", "alpha beta gamma delta epsilon zeta eta theta"),
-        (current, "current", "quartz raven fox maple cedar birch elm"),
-    ):
-        document = Document()
-        for index in range(8):
-            document.add_paragraph(
-                f"{prefix} {words} {index} has no shared manuscript context."
-            )
-        document.save(path)
+    baseline_document = Document()
+    for index in range(8):
+        baseline_document.add_paragraph(
+            f"baseline alpha beta gamma delta epsilon zeta eta theta {index} has no shared manuscript context."
+        )
+    baseline_document.save(base)
+    current_document = Document()
+    current_document.add_paragraph(
+        "current quartz raven fox maple cedar birch elm has no shared manuscript context."
+    )
+    current_document.save(current)
     output = tmp_path / "tracked.docx"
 
     with pytest.raises(SparseRedlineError) as raised:
@@ -302,16 +303,17 @@ def test_sparse_redline_refuses_without_writing_output(tmp_path: Path) -> None:
 def test_sparse_redline_can_explicitly_use_block_replace(tmp_path: Path) -> None:
     base = tmp_path / "base.docx"
     current = tmp_path / "current.docx"
-    for path, prefix, words in (
-        (base, "baseline", "alpha beta gamma delta epsilon zeta eta theta"),
-        (current, "current", "quartz raven fox maple cedar birch elm"),
-    ):
-        document = Document()
-        for index in range(8):
-            document.add_paragraph(
-                f"{prefix} {words} {index} has no shared manuscript context."
-            )
-        document.save(path)
+    baseline_document = Document()
+    for index in range(8):
+        baseline_document.add_paragraph(
+            f"baseline alpha beta gamma delta epsilon zeta eta theta {index} has no shared manuscript context."
+        )
+    baseline_document.save(base)
+    current_document = Document()
+    current_document.add_paragraph(
+        "current quartz raven fox maple cedar birch elm has no shared manuscript context."
+    )
+    current_document.save(current)
     output = tmp_path / "tracked.docx"
 
     summary = create_tracked_docx(
@@ -327,7 +329,7 @@ def test_sparse_redline_can_explicitly_use_block_replace(tmp_path: Path) -> None
         root = __import__("lxml.etree", fromlist=["etree"]).fromstring(
             archive.read("word/document.xml")
         )
-    assert visible_text(root, "final").count("current") == 8
+    assert visible_text(root, "final").count("current") == 1
     assert visible_text(root, "original").count("baseline") == 8
 
 

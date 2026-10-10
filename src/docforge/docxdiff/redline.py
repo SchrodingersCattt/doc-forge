@@ -692,7 +692,7 @@ def _opaque_reasons(block: Block) -> tuple[str, ...]:
             local = etree.QName(node).localname
             if local == "drawing":
                 reasons.add("drawing")
-            elif local == "oMath":
+            elif local in {"oMath", "oMathPara"}:
                 reasons.add("oMath")
             elif local in {"fldChar", "instrText"}:
                 reasons.add("field")
@@ -704,12 +704,14 @@ def _opaque_reasons(block: Block) -> tuple[str, ...]:
 def _best_rejected_ratio(
     block: Block, candidates: list[Block]
 ) -> tuple[float | None, float | None]:
-    """Return the strongest ratio that fell below its pair cutoff.
+    """Return the strongest ratio and its pair cutoff.
 
-    An unmatched block can also be left in a gap by the global alignment even
-    when its best candidate clears the ratio cutoff. In that case there is no
-    rejected ratio to report, which is represented by ``None`` in the table.
+    Prefer candidates that fell below the cutoff. An unmatched block can also
+    be left in a gap by the global alignment even when its best candidate
+    clears the ratio cutoff; retaining that ratio in the diagnostic still
+    tells the reviewer why the paragraph was considered.
     """
+    all_candidates: list[tuple[float, float]] = []
     rejected: list[tuple[float, float]] = []
     for candidate in candidates:
         cutoff = _ratio_cutoff(block, candidate)
@@ -719,11 +721,14 @@ def _best_rejected_ratio(
         if not left or not right:
             continue
         ratio = _pair_ratio((left, right))
+        all_candidates.append((ratio, cutoff))
         if ratio < cutoff:
             rejected.append((ratio, cutoff))
-    if not rejected:
+    if rejected:
+        return max(rejected, key=lambda item: item[0])
+    if not all_candidates:
         return None, None
-    return max(rejected, key=lambda item: item[0])
+    return max(all_candidates, key=lambda item: item[0])
 
 
 def _truncate_diagnostic(text: str, limit: int = 96) -> str:
