@@ -1474,7 +1474,8 @@ def _clone_rendered_block(
         _format_caption_runs(paragraph, caption_font_size or 10)
         return [paragraph]
     if block.kind in {"paragraph", "reference"}:
-        paragraph = _new_paragraph(target, styles["body"], block.text, prototype=p.get("body"))
+        role = "reference" if block.kind == "reference" else "body"
+        paragraph = _new_paragraph(target, styles[role], block.text, prototype=p.get(role))
         if block.kind == "paragraph":
             _override_run_size(paragraph, body_font_size or 11)
         return [paragraph]
@@ -2019,7 +2020,9 @@ def assemble_markdown_template(
         and style.type == WD_STYLE_TYPE.PARAGRAPH
         for style in template.styles
     )
-    required_roles = {"title"}
+    required_roles: set[str] = set()
+    if include_title:
+        required_roles.add("title")
     if body_blocks:
         required_roles.add("body")
     if abstract:
@@ -2030,10 +2033,13 @@ def assemble_markdown_template(
         required_roles.add("affiliations")
     if any(block.kind in {"image", "table_caption"} for block in body_blocks):
         required_roles.add("caption")
-    if used and (
-        resolved_bibliography_scope == "all"
-        or citation_base is None
-        or any(key not in citation_base for key in used)
+    if any(block.kind == "reference" for block in body_blocks) or (
+        used
+        and (
+            resolved_bibliography_scope == "all"
+            or citation_base is None
+            or any(key not in citation_base for key in used)
+        )
     ):
         required_roles.add("reference")
     if custom_template:

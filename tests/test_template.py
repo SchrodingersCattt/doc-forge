@@ -1256,3 +1256,72 @@ def test_assembly_rejects_missing_used_semantic_role(tmp_path: Path) -> None:
         assemble_markdown_template(
             [source], template_path=template, output=tmp_path / "output.docx", metadata_path=metadata
         )
+
+
+def test_excluding_title_does_not_require_a_title_style(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    for name in ("FA_Corresponding_Author_Footnote", "TA_Main_Text", "EndNote Bibliography"):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Body prototype", style="TA_Main_Text")
+    document.add_paragraph("Heading prototype", style="Heading 1")
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nSource title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        include_title=False,
+    )
+    assert "Source title" not in "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
+
+
+def test_literal_reference_uses_reference_semantic_style(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    for name in (
+        "BBAuthorName",
+        "FA_Corresponding_Author_Footnote",
+        "TA_Main_Text",
+        "References",
+    ):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Template title", style="BBAuthorName")
+    document.add_paragraph("Body prototype", style="TA_Main_Text")
+    document.add_paragraph("Reference prototype", style="References")
+    document.add_paragraph("Heading prototype", style="Heading 1")
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("[1] Citation text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    reference = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "[1] Citation text.")
+    assert reference.style.style_id == "References"
+
+
+def test_excluding_title_still_requires_source_title_metadata(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    for name in ("TA_Main_Text",):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Body prototype", style="TA_Main_Text")
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# AUTHOR\n\nAn Author\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Body text.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="requires --title or a TITLE"):
+        assemble_markdown_template(
+            [source],
+            template_path=template,
+            output=tmp_path / "output.docx",
+            metadata_path=metadata,
+            include_title=False,
+        )
