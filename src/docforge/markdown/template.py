@@ -31,6 +31,7 @@ from lxml import etree
 from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
+from .inline import is_caption, is_filename_alt, key as inline_key
 from .blocks import Block
 from .citations import (
     CITATION_RE,
@@ -1334,7 +1335,7 @@ FIGURE_CAPTION_SLOT_RE = re.compile(
     r"\s*\[(?:Figure|Scheme|Chart)\s+Caption\]", re.IGNORECASE
 )
 CAPTION_LABEL_RE = re.compile(
-    r"^\s*(Supplementary\s+Fig\.|Figure|Scheme|Chart)\s+[A-Za-z]*\d+\s*[.:]?\s*",
+    r"^\s*(?:\*{1,3}|_{1,3})?\s*(Supplementary\s+Fig\.|Figure|Scheme|Chart)\s+[A-Za-z]*\d+\s*[.:]?\s*(?:\*{1,3}|_{1,3})?\s*",
     re.IGNORECASE,
 )
 
@@ -1350,15 +1351,16 @@ def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]
 
 def _is_figure_caption_text(text: str) -> bool:
     """Recognize rendered captions and ACS-style placeholder caption slots."""
-    return bool(FIGURE_CAPTION_RE.match(text) or FIGURE_CAPTION_SLOT_RE.match(text))
+    normalized = inline_key(text)
+    return is_caption(text) or bool(FIGURE_CAPTION_RE.match(normalized) or FIGURE_CAPTION_SLOT_RE.match(normalized))
 
 
 def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Block | None, str], ...]:
     """Split Markdown into text runs and image/caption pairs.
 
     A caption immediately following an image is consumed as the caption.  An
-    image alt text remains a usable fallback, so ordinary Markdown image
-    syntax stays sufficient for callers.
+    meaningful image alt text remains a usable fallback; an empty alt or a
+    media filename is not promoted to a generated caption.
     """
     groups: list[tuple[tuple[Block, ...], Block | None, str]] = []
     text: list[Block] = []
@@ -1369,10 +1371,13 @@ def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Bl
             text.append(block)
             index += 1
             continue
-        groups.append((tuple(text), block, block.text.strip()))
+        alt = block.text.strip()
+        if not alt or is_filename_alt(alt):
+            alt = ""
+        groups.append((tuple(text), block, alt))
         text = []
         index += 1
-        if index < len(blocks) and blocks[index].kind == "paragraph" and FIGURE_CAPTION_RE.match(blocks[index].text):
+        if index < len(blocks) and blocks[index].kind == "paragraph" and is_caption(blocks[index].text):
             groups[-1] = (groups[-1][0], block, blocks[index].text.strip())
             index += 1
     groups.append((tuple(text), None, ""))
@@ -1694,6 +1699,8 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
+    if not caption.strip():
+        return [paragraph]
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
     caption_text = re.sub(
         r"^((?:Supplementary Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])",
@@ -2412,7 +2419,7 @@ def assemble_markdown_template(
             _clone_figure(
                 template,
                 image,
-                caption or image.text or f"Figure {figure_index + 1}.",
+                caption,
                 figure_region,
                 prototypes.paragraphs.get("caption"),
                 styles["caption"],
@@ -2433,10 +2440,10 @@ def assemble_markdown_template(
         figures.append(
             {
                 "number": figure_index + 1,
-                "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
+                "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()),
                 "sha256": sha256_file(Path(image.path)),
-                "caption": caption or image.text,
+                "caption": caption,
                 "template_region": figure_region.index if figure_region is not None else None,
                 "placement_after_body_region": selected_body.index,
                 "span": resolved_span,

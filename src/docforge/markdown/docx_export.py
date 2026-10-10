@@ -22,6 +22,7 @@ from PIL import Image
 from lxml import etree, html as lxml_html
 
 from .._pandoc import run_pandoc
+from .inline import display, key as inline_key
 from ..output import validate_output_path
 
 IMAGE_TAG_RE = re.compile(r"<img\b(?P<attrs>[^>]*?)(?:/?)>", re.IGNORECASE)
@@ -265,10 +266,10 @@ def _heading_text(line: str) -> str | None:
     stripped = line.strip()
     match = ATX_HEADING_RE.match(stripped)
     if match:
-        return match.group("text").strip().rstrip(":").strip()
+        return inline_key(match.group("text")).rstrip(":").strip()
     match = BOLD_HEADING_RE.match(stripped)
     if match:
-        return html.unescape(match.group("text")).strip().rstrip(":").strip()
+        return inline_key(match.group("text")).rstrip(":").strip()
     return None
 
 
@@ -295,12 +296,7 @@ def _normalise_section_headings(lines: list[str], *, first_level: int = 1) -> li
 
 
 def _plain_inline(value: str) -> str:
-    value = value.replace(r"\*", "*")
-    value = re.sub(r"<\/?(?:sup|sub)>", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"\*\*|__|(?<!\w)\*(?!\s)|(?<!\s)\*(?!\w)", "", value)
-    if value.startswith("\\"):
-        value = value[1:]
-    return html.unescape(value).strip()
+    return html.unescape("".join(run.text for run in display(value))).strip()
 
 
 def metadata_markdown(front_matter: str) -> str:

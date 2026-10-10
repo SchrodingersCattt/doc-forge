@@ -24,6 +24,7 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 import lxml.etree as etree
 
 from .blocks import Block, SectionSource
+from .inline import key as inline_key
 from ..tex.tokenize import tokenize_tex
 
 __all__ = [
@@ -91,7 +92,7 @@ BOND_HYPHEN_RE = re.compile(r"(?<![A-Za-z])([A-Z][a-z]?)-([A-Z][a-z]?)(?=(?:[0-9
 
 
 def normalize_text(value: str) -> str:
-    return re.sub(r"[\s\u00a0\u3000]+", "", value).rstrip("：:")
+    return inline_key(value).rstrip("：:")
 
 
 def normalize_typography(value: str) -> str:
