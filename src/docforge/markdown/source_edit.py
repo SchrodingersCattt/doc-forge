@@ -250,14 +250,62 @@ def _list_headings(children: list[etree._Element]) -> dict[int, etree._Element]:
     found: dict[int, etree._Element] = {}
     for child in children:
         numbering = child.find(f"{{{W}}}pPr/{{{W}}}numPr")
-        if numbering is None or child.find(f"{{{W}}}r/{{{W}}}rPr/{{{W}}}b") is None:
+        if numbering is None or not _has_direct_bold_run(child):
             continue
-        if child.find(f"{{{W}}}r/{{{W}}}rPr/{{{W}}}highlight") is not None:
+        # List examples frequently start with a tab stop or a field used for
+        # page references.  They describe list mechanics rather than heading
+        # typography and must not become heading anchors.
+        if any(
+            node.tag in {
+                f"{{{W}}}tab",
+                f"{{{W}}}instrText",
+                f"{{{W}}}fldChar",
+                f"{{{W}}}hyperlink",
+            }
+            for node in child.iter()
+        ):
+            continue
+        if any(
+            "PAGEREF" in (node.text or "").upper()
+            or "HYPERLINK" in (node.text or "").upper()
+            for node in child.iter(f"{{{W}}}instrText")
+        ):
+            continue
+        if child.find(f".//{{{W}}}highlight") is not None:
             continue
         level_node = numbering.find(f"{{{W}}}ilvl")
-        level = int(level_node.get(f"{{{W}}}val") or "0") if level_node is not None else 0
+        try:
+            level = int(level_node.get(f"{{{W}}}val") or "0") if level_node is not None else 0
+        except ValueError:
+            continue
         found.setdefault(level, child)
     return found
+
+
+def _has_direct_bold_run(paragraph: etree._Element) -> bool:
+    """Return whether a paragraph has a direct bold text run.
+
+    Restricting this to direct ``w:r`` children avoids treating a bold field
+    result or hyperlink as a heading sample.  Such runs often carry tabs,
+    highlight, or field instructions that are layout markers rather than
+    heading typography.
+    """
+    for run in paragraph.findall(f"{{{W}}}r"):
+        properties = run.find(f"{{{W}}}rPr")
+        bold = properties.find(f"{{{W}}}b") if properties is not None else None
+        if bold is None and properties is not None:
+            bold = properties.find(f"{{{W}}}bCs")
+        if bold is None or (bold.get(f"{{{W}}}val", "true").lower() in {"0", "false", "off", "none"}):
+            continue
+        if run.find(f".//{{{W}}}tab") is not None:
+            continue
+        if run.find(f".//{{{W}}}highlight") is not None:
+            continue
+        if run.find(f".//{{{W}}}instrText") is not None:
+            continue
+        if any(node.text for node in run.iter(f"{{{W}}}t")):
+            return True
+    return False
 
 
 def _apply(root: etree._Element, operations: list[tuple]) -> None:
@@ -323,13 +371,13 @@ def _heading_prototype(raw: str, prototypes: dict) -> etree._Element | None:
     headings = prototypes["headings"]
     if level in headings:
         return headings[level]
-    if 1 in headings:
-        return headings[1]
     lists = prototypes.get("list_headings") or {}
     # Markdown ## is a section; ### is the subsection under it.
     target = 0 if level <= 2 else level - 2
     if target in lists:
         return lists[target]
+    if 1 in headings:
+        return headings[1]
     if lists:
         return lists[min(lists)]
     return None
@@ -340,7 +388,7 @@ def _properties_for(raw: str, prototypes: dict, anchor: etree._Element) -> etree
     if heading:
         level = min(len(heading.group(1)), 6)
         prototype = _heading_prototype(raw, prototypes)
-        if prototype is not None and (level in prototypes["headings"] or 1 in prototypes["headings"]):
+        if prototype is not None and level in prototypes["headings"]:
             return _copy_paragraph_properties(prototype)
         if prototype is not None:
             return _copy_paragraph_properties(prototype, drop_style=True)
@@ -364,11 +412,23 @@ def _copy_paragraph_properties(
     if properties is None:
         return None
     copied = copy.deepcopy(properties)
+    list_indent = False
+    indentation = copied.find(f"{{{W}}}ind")
+    if indentation is not None:
+        for name in ("left", "right", "hanging"):
+            value = indentation.get(f"{{{W}}}{name}")
+            try:
+                list_indent = list_indent or int(value or "0") != 0
+            except ValueError:
+                list_indent = True
     for numbering in copied.findall(f"{{{W}}}numPr"):
         copied.remove(numbering)
-    if drop_style:
-        for style in copied.findall(f"{{{W}}}pStyle"):
-            copied.remove(style)
+    if drop_style or list_indent:
+        for style in list(copied.findall(f"{{{W}}}pStyle")):
+            value = style.get(f"{{{W}}}val", "")
+            semantic_heading = re.fullmatch(r"heading ?[1-9]|h[1-9]", value, re.IGNORECASE)
+            if drop_style or not semantic_heading:
+                copied.remove(style)
     return copied
 
 
@@ -382,7 +442,14 @@ def _run_properties(paragraph: etree._Element | None) -> etree._Element | None:
     if paragraph is None:
         return None
     properties = paragraph.find(f"{{{W}}}r/{{{W}}}rPr")
-    return copy.deepcopy(properties) if properties is not None else None
+    if properties is None:
+        return None
+    copied = copy.deepcopy(properties)
+    # Highlight belongs to the sample marker (and can make inserted text look
+    # like a tracked placeholder).  Typography and emphasis remain intact.
+    for node in list(copied.findall(f"{{{W}}}highlight")):
+        copied.remove(node)
+    return copied
 
 
 def _add_runs(
