@@ -747,7 +747,7 @@ def _format_sparse_diagnostic(
     rate = matched / max(len(aligned), 1)
     lines = [
         (
-            "redline refused: block_replace=1; "
+            "redline refused: sparse alignment (block_replace=1); "
             f"matched={matched}/{len(aligned)} ({rate:.1%}) is below "
             f"the {threshold:.0%} threshold"
         ),
