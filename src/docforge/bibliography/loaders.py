@@ -32,8 +32,8 @@ def load_json(path: Path) -> dict[str, BibliographyEntry]:
     return normalize_entries(payload, source_format="json")
 
 
-def _bib_value(text: str, index: int) -> tuple[str, int]:
-    """Read one BibTeX value and return it with its next cursor position."""
+def _bib_atom(text: str, index: int, macros: dict[str, str] | None = None) -> tuple[str, int]:
+    """Read one BibTeX value atom and return it with its next cursor."""
     length = len(text)
     while index < length and text[index].isspace():
         index += 1
@@ -62,7 +62,7 @@ def _bib_value(text: str, index: int) -> tuple[str, int]:
             index += 1
         if depth:
             raise ValueError("Unclosed BibTeX field value")
-        return "".join(pieces).strip(), index + 1
+        return "".join(pieces), index + 1
     if text[index] == '"':
         index += 1
         pieces: list[str] = []
@@ -73,19 +73,49 @@ def _bib_value(text: str, index: int) -> tuple[str, int]:
                 index += 2
                 continue
             if character == '"':
-                return "".join(pieces).strip(), index + 1
+                return "".join(pieces), index + 1
             pieces.append(character)
             index += 1
         raise ValueError("Unclosed BibTeX quoted field value")
     begin = index
-    while index < length and text[index] not in ",}\n":
+    while index < length and text[index] not in ",}\n#":
         index += 1
-    return text[begin:index].strip(), index
+    atom = text[begin:index].strip()
+    if macros is not None:
+        atom = macros.get(atom.lower(), atom)
+    return atom, index
+
+
+def _bib_value(text: str, index: int, macros: dict[str, str] | None = None) -> tuple[str, int]:
+    """Read a BibTeX value, including ``#``-concatenated atoms.
+
+    A braced or quoted atom may itself contain ``#``.  Only a hash outside an
+    atom starts BibTeX concatenation, and a trailing hash is retained as
+    literal text so malformed or legacy unbraced values are not silently
+    truncated.
+    """
+    first, index = _bib_atom(text, index, macros)
+    pieces = [first]
+    while True:
+        probe = index
+        while probe < len(text) and text[probe].isspace():
+            probe += 1
+        if probe >= len(text) or text[probe] != "#":
+            return "".join(pieces).strip(), index
+        atom_start = probe + 1
+        atom, next_index = _bib_atom(text, atom_start, macros)
+        # A hash without a following atom is literal.  This keeps values such
+        # as an unbraced ``C#`` field intact instead of dropping the suffix.
+        if not atom and next_index == atom_start:
+            return ("".join(pieces) + text[index:next_index]).strip(), next_index
+        pieces.append(atom)
+        index = next_index
 
 
 def _bib_records(text: str) -> list[tuple[str, str, dict[str, str]]]:
     """Parse BibTeX entries with balanced braces and quoted values."""
     records: list[tuple[str, str, dict[str, str]]] = []
+    macros: dict[str, str] = {}
     cursor = 0
     while True:
         marker = text.find("@", cursor)
@@ -103,6 +133,26 @@ def _bib_records(text: str) -> list[tuple[str, str, dict[str, str]]]:
         opener = text[cursor]
         closer = "}" if opener == "{" else ")"
         cursor += 1
+        if entry_type.lower() == "string":
+            # String declarations are definitions, not bibliography records.
+            # Parse them before ordinary entry-key handling so a later value
+            # such as ``journal # \" Letters\"`` is resolved in one pass.
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            name_start = cursor
+            while cursor < len(text) and (text[cursor].isalnum() or text[cursor] in "_:-"):
+                cursor += 1
+            macro_name = text[name_start:cursor].strip().lower()
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            if macro_name and cursor < len(text) and text[cursor] == "=":
+                value, cursor = _bib_value(text, cursor + 1, macros)
+                macros[macro_name] = re.sub(r"\s+", " ", value).strip()
+            while cursor < len(text) and text[cursor] != closer:
+                cursor += 1
+            if cursor < len(text):
+                cursor += 1
+            continue
         key_start = cursor
         while cursor < len(text) and text[cursor] not in "," + closer:
             cursor += 1
@@ -128,7 +178,7 @@ def _bib_records(text: str) -> list[tuple[str, str, dict[str, str]]]:
                 while cursor < len(text) and text[cursor] not in "," + closer:
                     cursor += 1
                 continue
-            value, cursor = _bib_value(text, cursor + 1)
+            value, cursor = _bib_value(text, cursor + 1, macros)
             fields[name] = re.sub(r"\s+", " ", value).strip()
             while cursor < len(text) and text[cursor].isspace():
                 cursor += 1

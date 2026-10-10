@@ -4,7 +4,14 @@ from types import MappingProxyType
 
 import pytest
 
-from docforge.bibliography import BibliographyEntry, CitationResolver, format_entry, load_bib, load_json
+from docforge.bibliography import (
+    BibliographyEntry,
+    CitationResolver,
+    format_entry,
+    load_bib,
+    load_json,
+    parse_bib_text,
+)
 
 
 def test_json_and_bib_loaders_preserve_entry_type_and_fields(tmp_path: Path) -> None:
@@ -75,6 +82,39 @@ def test_bib_loader_balances_nested_braces_and_non_journal_venues(tmp_path: Path
     assert entry.get("title") == "A {Nested} title, with commas"
     assert entry.get("booktitle") == "Proceedings of the {ACM} Symposium"
     assert "Proceedings" in format_entry(entry, profile="plain")
+
+
+def test_bib_loader_concatenates_hash_atoms_without_truncating_fields(tmp_path: Path) -> None:
+    path = tmp_path / "concat.bib"
+    path.write_text(
+        """@article{concat,
+ title = {Part A} # "Part B" # { C# },
+ journal = {Journal},
+ year = {2024}
+}
+""",
+        encoding="utf-8",
+    )
+    entry = load_bib(path)["concat"]
+    assert entry.get("title") == "Part APart B C#"
+    assert entry.get("journal") == "Journal"
+    assert entry.get("year") == 2024
+
+
+def test_bib_loader_preserves_hash_inside_a_single_atom(tmp_path: Path) -> None:
+    path = tmp_path / "literal-hash.bib"
+    path.write_text("@misc{hash, title = {C# guide}}\n", encoding="utf-8")
+    assert load_bib(path)["hash"].get("title") == "C# guide"
+
+
+def test_bib_loader_resolves_string_macros_in_hash_concatenations() -> None:
+    entries = parse_bib_text(
+        '@string{journal = "Journal of"}\n'
+        '@article{macro, title = "A" # " title", journal = journal # " Letters", year = {2024}}\n'
+    )
+    assert set(entries) == {"macro"}
+    assert entries["macro"].get("title") == "A title"
+    assert entries["macro"].get("journal") == "Journal of Letters"
 
 
 def test_markdown_formatter_accepts_publisher_venue() -> None:
