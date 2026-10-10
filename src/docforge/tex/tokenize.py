@@ -147,13 +147,84 @@ def _find_matching_brace(s: str, start: int) -> int:
     return pos
 
 
-def tokenize_tex(raw: str, resolve_ref: Callable[[str], str] | None = None) -> list[Span]:
+def _replace_display_argument(
+    text: str,
+    command: str,
+    *,
+    argument_count: int = 2,
+    optional_prefix: bool = False,
+    keep_index: int = -1,
+) -> str:
+    r"""Replace a metadata-bearing macro with its displayed argument.
+
+    A regular expression such as ``\\href\{[^}]*\}\{([^}]*)\}`` only works
+    for flat arguments.  TeX arguments commonly contain another command (for
+    example ``\\href{url}{\\textbf{link}}``), so use the same balanced-brace
+    reader as the main tokenizer.  ``optional_prefix`` handles commands such
+    as ``\\hyperref[label]{visible text}``, whose optional label is metadata.
+    Commands with no complete argument list are left untouched for the normal
+    parser to handle.
+    """
+    pattern = re.compile(r"\\" + re.escape(command) + r"(?![A-Za-z])")
+    cursor = 0
+    pieces: list[str] = []
+    while True:
+        match = pattern.search(text, cursor)
+        if match is None:
+            pieces.append(text[cursor:])
+            break
+        pos = match.end()
+        had_optional = False
+        if optional_prefix:
+            while pos < len(text) and text[pos] in " \t\r\n":
+                pos += 1
+            if pos < len(text) and text[pos] == "[":
+                end = text.find("]", pos + 1)
+                if end < 0:
+                    pieces.append(text[cursor:])
+                    break
+                pos = end + 1
+                had_optional = True
+        args: list[str] = []
+        probe = pos
+        valid = True
+        expected_args = 1 if had_optional else argument_count
+        for _ in range(expected_args):
+            while probe < len(text) and text[probe] in " \t\r\n":
+                probe += 1
+            if probe >= len(text) or text[probe] != "{":
+                valid = False
+                break
+            end = _find_matching_brace(text, probe)
+            if end <= probe or end > len(text) or text[end - 1] != "}":
+                valid = False
+                break
+            args.append(text[probe + 1 : end - 1])
+            probe = end
+        if not valid:
+            # Do not consume a malformed invocation.  Continue searching after
+            # the command so a later valid invocation can still be normalized.
+            pieces.append(text[cursor : match.end()])
+            cursor = match.end()
+            continue
+        pieces.append(text[cursor : match.start()])
+        pieces.append(args[keep_index])
+        cursor = probe
+    return "".join(pieces)
+
+
+def tokenize_tex(
+    raw: str,
+    resolve_ref: Callable[[str], str] | None = None,
+    resolve_ref_kind: Callable[[str], str | None] | None = None,
+) -> list[Span]:
+
     """Parse LaTeX-ish text into a flat list of Span objects.
 
     *resolve_ref* maps ``\\ref{key}``/``\\eqref{key}`` labels to display
     strings; when omitted the label text is kept as-is.
     """
-    s = _preprocess(raw, resolve_ref)
+    s = _preprocess(raw, resolve_ref, resolve_ref_kind)
     spans: list[Span] = []
 
     def _emit(text: str, **kw) -> None:
@@ -755,7 +826,11 @@ def _collapse_consecutive_number_lists(text: str) -> str:
     return "".join(pieces)
 
 
-def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
+def _preprocess(
+    s: str,
+    resolve_ref: Callable[[str], str] | None = None,
+    resolve_ref_kind: Callable[[str], str | None] | None = None,
+) -> str:
     s = s.replace("~", "\u00A0")
     s = re.sub(r"\\bar\{\\mathbf\s+([A-Za-z])\}", lambda m: r"\mathbf{" + m.group(1) + "\u0305}", s)
     s = re.sub(r"\\bar\{([^{}]*)\}", lambda m: "".join(ch + "\u0305" for ch in m.group(1)), s)
@@ -780,14 +855,63 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = re.sub(r"\\protect\s*", "", s)
     s = re.sub(r"\\label\{[^}]*\}", "", s)
 
-    def _resolve_ref(m: re.Match) -> str:
-        key = m.group(1)
-        return resolve_ref(key) if resolve_ref else key
+    def _reference_kind(key: str) -> str | None:
+        normalized = key.strip().lower()
+        if normalized.startswith("s-"):
+            normalized = normalized[2:]
+        prefix, _, suffix = normalized.partition(":")
+        extended = suffix.startswith("ed_")
+        return {
+            "fig": "Extended Data Fig." if extended else "Figure",
+            "figure": "Extended Data Fig." if extended else "Figure",
+            "tab": "Extended Data Table" if extended else "Table",
+            "table": "Extended Data Table" if extended else "Table",
+            "alg": "Algorithm",
+            "algorithm": "Algorithm",
+            "eq": "Equation",
+            "equation": "Equation",
+        }.get(prefix)
 
-    s = re.sub(r"\\ref\*?\{([^}]*)\}", _resolve_ref, s)
-    s = re.sub(r"\\eqref\*?\{([^}]*)\}", _resolve_ref, s)
+    def _resolve_reference(m: re.Match) -> str:
+        command = m.group(1).lower()
+        raw_keys = m.group(2)
+        keys = [part.strip() for part in raw_keys.split(",") if part.strip()]
+        values = [resolve_ref(key) if resolve_ref else key for key in keys]
+        if command in {"ref", "eqref"}:
+            return ",".join(values)
+        rendered = []
+        for key, value in zip(keys, values):
+            kind = resolve_ref_kind(key) if resolve_ref_kind else None
+            kind = kind or _reference_kind(key)
+            kind = {
+                "figure": "Figure",
+                "extended_figure": "Extended Data Fig.",
+                "table": "Table",
+                "extended_table": "Extended Data Table",
+                "algorithm": "Algorithm",
+                "equation": "Equation",
+                "section": "Section",
+                "subsection": "Section",
+            }.get(kind, kind)
+            rendered.append(f"{kind} {value}" if kind else value)
+        return ", ".join(rendered)
+
+    s = re.sub(
+        r"\\(autoref|Autoref|cref|Cref|ref|eqref)\*?\{([^}]*)\}",
+        _resolve_reference,
+        s,
+    )
     s = _collapse_consecutive_number_lists(s)
-    s = re.sub(r"\\href\{[^}]*\}\{([^}]*)\}", r"\1", s)
+    # Link targets and bookmark labels are metadata.  Keep the displayed
+    # argument even when it contains nested TeX commands; flat regular
+    # expressions would leave the target (or fallback text) in the output.
+    s = _replace_display_argument(s, "href")
+    s = _replace_display_argument(s, "hyperlink")
+    s = _replace_display_argument(s, "hyperref", optional_prefix=True)
+    # ``texorpdfstring`` receives the typeset form first and a PDF bookmark
+    # fallback second.  DOCX has no bookmark-text rendering mode, so retain
+    # only the first argument (including nested formatting commands).
+    s = _replace_display_argument(s, "texorpdfstring", keep_index=0)
     s = re.sub(r"\\url\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\\\\s*(?:\[[\d.]+em\])?", " ", s)
     s = s.replace(r"\,", "\u2009")

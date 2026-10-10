@@ -394,6 +394,203 @@ def test_redline_ignores_equivalent_run_splits_inside_unchanged_words(tmp_path: 
     assert "old" in deleted
     assert "new" in inserted
 
+def test_redline_keeps_low_similarity_same_slot_as_word_diff(tmp_path: Path) -> None:
+    base = tmp_path / "base-rewrite.docx"
+    current = tmp_path / "current-rewrite.docx"
+    old = Document()
+    old.add_paragraph(
+        "The catalyst was prepared under an inert atmosphere and stored at room temperature."
+    )
+    old.save(base)
+    new = Document()
+    new.add_paragraph(
+        "Quantum simulations established a reproducible transition state for the reaction."
+    )
+    new.save(current)
+    tracked = tmp_path / "tracked-rewrite.docx"
+    create_tracked_docx(base, current, tracked, overwrite=True)
+    from lxml import etree
+
+    root = etree.fromstring(zipfile.ZipFile(tracked).read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    assert len(root.xpath(".//w:body/w:p", namespaces=ns)) == 1
+    assert root.xpath(".//w:body/w:p//w:del", namespaces=ns)
+    assert root.xpath(".//w:body/w:p//w:ins", namespaces=ns)
+    assert not root.xpath(".//w:body/w:p[w:pPr/w:rPr/w:del]", namespaces=ns)
+    assert visible_text(root, "final").strip().startswith("Quantum simulations")
+
+
+def test_redline_keeps_omml_atomic_while_diffing_surrounding_words() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Context, M, W, _accepted_revision_view, _merge_paragraph
+
+    def paragraph(prefix: str, equation: str, suffix: str) -> etree._Element:
+        result = etree.Element(f"{{{W}}}p", nsmap={"w": W, "m": M})
+        run = etree.SubElement(result, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = prefix
+        math = etree.SubElement(result, f"{{{M}}}oMath")
+        math_run = etree.SubElement(math, f"{{{M}}}r")
+        etree.SubElement(math_run, f"{{{M}}}t").text = equation
+        run = etree.SubElement(result, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = suffix
+        return result
+
+    base = paragraph("Before ", "x", " after.")
+    current = paragraph("Changed ", "x", " after.")
+    merged = _merge_paragraph(base, current, Context("tester", 1))
+    ns = {"w": W, "m": M}
+    assert len(merged.xpath("./m:oMath", namespaces=ns)) == 1
+    assert merged.xpath("./w:del", namespaces=ns)
+    assert merged.xpath("./w:ins", namespaces=ns)
+    assert not merged.xpath("./w:pPr/w:rPr/w:del", namespaces=ns)
+    accepted = _accepted_revision_view(merged)
+    assert etree.tostring(accepted.find("./m:oMath", ns), method="c14n") == etree.tostring(
+        current.find("./m:oMath", ns), method="c14n"
+    )
+
+
+def test_redline_atomic_registry_keeps_distinct_math_signatures_distinct() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import M, _AtomicRegistry, _atomic_token
+
+    def equation(text: str) -> etree._Element:
+        root = etree.Element(f"{{{M}}}oMath", nsmap={"m": M})
+        etree.SubElement(root, f"{{{M}}}t").text = text
+        return root
+
+    registry = _AtomicRegistry()
+    first, second = equation("first"), equation("second")
+    assert _atomic_token(first, registry) != _atomic_token(second, registry)
+    assert _atomic_token(first, registry) == _atomic_token(first, registry)
+    assert _atomic_token(first) != _atomic_token(second)
+
+
+def test_redline_keeps_unchanged_drawing_atomic_with_word_revisions(tmp_path: Path) -> None:
+    image = tmp_path / "figure.png"
+    Image.new("RGB", (12, 12), "purple").save(image)
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+
+    def write(path: Path, prefix: str) -> None:
+        document = Document()
+        paragraph = document.add_paragraph()
+        paragraph.add_run(prefix)
+        paragraph.add_run().add_picture(str(image))
+        paragraph.add_run(" after.")
+        document.save(path)
+
+    write(base, "Before ")
+    write(current, "Changed ")
+    tracked = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, tracked, overwrite=True)
+
+    from lxml import etree
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(tracked) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+        output_media = {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("word/media/")
+        }
+        assert archive.testzip() is None
+    with zipfile.ZipFile(current) as archive:
+        current_media = {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("word/media/")
+        }
+    paragraphs = root.xpath(".//w:body/w:p", namespaces=ns)
+    assert len(paragraphs) == 1
+    paragraph = paragraphs[0]
+    assert len(paragraph.xpath(".//w:drawing", namespaces=ns)) == 1
+    assert paragraph.xpath(".//w:del", namespaces=ns)
+    assert paragraph.xpath(".//w:ins", namespaces=ns)
+    assert paragraph.find("w:pPr/w:rPr/w:del", ns) is None
+    assert set(output_media.values()) == set(current_media.values())
+    assert visible_text(paragraph, "final") == "Changed  after."
+
+
+def test_redline_stable_bibliography_bracket_labels_and_report(tmp_path: Path) -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _reference_content, _stable_block_label
+
+    paragraph = etree.fromstring(
+        f'<w:p xmlns:w="{W}"><w:r><w:t>[1] Doe et al.</w:t></w:r></w:p>'
+    )
+    block = Block(paragraph, "p", "[1] Doe et al.", "Bibliography", False)
+    assert _stable_block_label(block) is None
+    assert _reference_content(block) == "Doe et al."
+    base_path = tmp_path / "base.docx"
+    current_path = tmp_path / "current.docx"
+    base_doc = Document()
+    base_doc.add_paragraph("Before")
+    base_doc.save(base_path)
+    current_doc = Document()
+    current_doc.add_paragraph("After")
+    current_doc.save(current_path)
+    summary = create_tracked_docx(
+        base_path,
+        current_path,
+        tmp_path / "tracked.docx",
+        overwrite=True,
+        report_path=tmp_path / "alignment.json",
+    )
+    assert all(isinstance(value, int) for value in summary.values())
+    report = json.loads((tmp_path / "alignment.json").read_text(encoding="utf-8"))
+    assert report["schema"] == "docforge.redline.v1"
+    assert report["actions"]
+    assert report["summary"] == summary
+    assert {
+        key: sum(item.get("summary_key") == key for item in report["actions"])
+        for key in summary
+    } == summary
+
+
+def test_redline_matches_renumbered_references_by_content() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _align, _score
+
+    def block(text: str) -> Block:
+        paragraph = etree.fromstring(
+            f'<w:p xmlns:w="{W}"><w:r><w:t>{text}</w:t></w:r></w:p>'
+        )
+        return Block(paragraph, "p", text, "Bibliography", False)
+
+    first = block("[1] Doe et al. Paper A.")
+    second = block("[2] Doe et al. Paper B.")
+    renumbered_first = block("[2] Doe et al. Paper A.")
+    renumbered_second = block("[3] Doe et al. Paper B.")
+    assert _score(first, renumbered_first) > 0
+    assert _score(second, renumbered_second) > 0
+    assert _score(first, renumbered_second) < 0
+    assert _align([first, second], [renumbered_first, renumbered_second]) == [
+        ("match", 0, 0),
+        ("match", 1, 1),
+    ]
+
+
+def test_redline_prefers_stable_bibliography_bookmark_over_body_similarity() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _score
+
+    def block(text: str) -> Block:
+        paragraph = etree.Element(f"{{{W}}}p", nsmap={"w": W})
+        bookmark = etree.SubElement(paragraph, f"{{{W}}}bookmarkStart")
+        bookmark.set(f"{{{W}}}name", "ref_same-key")
+        run = etree.SubElement(paragraph, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = text
+        return Block(paragraph, "p", text, "Bibliography", False)
+
+    assert _score(block("[1] Completely old title."), block("[9] Rewritten title.")) > 0
+
+
 def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:
     from lxml import etree
 
@@ -572,12 +769,18 @@ b &= 2
         "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
     }
     assert len(root.xpath(".//w:br[@w:type='page']", namespaces=ns)) == 1
-    arrays = root.xpath(".//m:eqArr", namespaces=ns)
+    # Pandoc 2.9 emits an OMML matrix (m:m) for aligned rows, while newer
+    # supported releases may use the equivalent equation-array (m:eqArr).
+    arrays = root.xpath(".//m:eqArr | .//m:m", namespaces=ns)
+    arrays = [array for array in arrays if len(array) == 2 or len(array.xpath("./m:mr", namespaces=ns)) == 2]
     assert len(arrays) == 1
-    assert len(arrays[0].xpath("./m:e", namespaces=ns)) == 2
-    equation = arrays[0].getparent().getparent()
-    assert "(1)" in visible_text(equation)
-    assert len(root.xpath(".//m:eqArr/ancestor::w:p", namespaces=ns)) == 1
+    if arrays[0].tag.endswith("eqArr"):
+        assert len(arrays[0].xpath("./m:e", namespaces=ns)) == 2
+    else:
+        assert len(arrays[0].xpath("./m:mr", namespaces=ns)) == 2
+    paragraph = arrays[0].xpath("ancestor::w:p", namespaces=ns)[0]
+    assert "(1)" in visible_text(paragraph)
+    assert len(arrays[0].xpath("ancestor::w:p", namespaces=ns)) == 1
 
 
 def test_ratio_cache_keeps_tracked_output_and_is_reused(tmp_path: Path) -> None:

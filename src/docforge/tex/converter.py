@@ -11,7 +11,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import OxmlElement, parse_xml
-from lxml import etree
 from ..docxdiff import Package
 from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_view, _blocks, visible_text
 from ..math import latex_to_omml
@@ -25,6 +24,18 @@ PT_BODY=Pt(10)
 PT_CAPTION=Pt(9)
 PT_REF=Pt(10)
 PT_HALF_LINE=Pt(5)
+
+# Display environments share the equation counter.  The aligned/gathered
+# variants are nested in a numbered display in common TeX, but are also valid
+# top-level displays; the scanner below distinguishes the outer scope.
+_MATH_ENVS = frozenset({
+    "equation", "align", "aligned", "gather", "gathered", "multline",
+    "split", "cases", "alignat", "alignedat",
+})
+_DISPLAY_ENV_RE = re.compile(
+    r"^\\begin\{(?P<environment>equation|align|aligned|gather|gathered|multline|"
+    r"split|cases|alignat|alignedat)(?P<star>\*)?\}"
+)
 
 
 def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> None:
@@ -41,34 +52,62 @@ def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> 
             function.__defaults__ = tuple(swaps.get(id(d), d) for d in function.__defaults__)
 DOCX_NBSP="\u00A0"
 
-def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
-                  prefix: str = "") -> dict[str, str]:
-    """Scan text for labels and return a key->display map."""
+@dataclass(frozen=True)
+class _LabelRef:
+    """The value and TeX counter kind captured by a label."""
+
+    value: str
+    kind: str | None = None
+
+
+def _scan_label_refs(text: str, fig_offset: int = 0, tbl_offset: int = 0,
+                     prefix: str = "") -> dict[str, _LabelRef]:
+    """Scan labels while retaining the counter kind used by ``autoref``.
+
+    A label has a scope: an unprefixed label inside a numbered environment
+    refers to that environment's counter.  The scope ends at the matching
+    ``\\end``.  Section and subsection headings establish their own last
+    ref-stepped counter; ending a float clears it so prose cannot accidentally
+    inherit a stale figure/table/equation number.
+    """
     body_m = re.search(r"\\begin\{document\}", text)
     body = text[body_m.end():] if body_m else text
-    result: dict[str, str] = {}
+    result: dict[str, _LabelRef] = {}
     fig_n = fig_offset
     tbl_n = tbl_offset
     alg_n = 0
     ed_fig_n = 0
     ed_tbl_n = 0
+    eq_n = 0
     sec_n = 0
     subsec_n = 0
     suppnote_n = 0
     supprecord_n = 0
     in_extended_data = False
+    active_ref: _LabelRef | None = None
+    env_stack: list[tuple[str, _LabelRef | None]] = []
+    math_stack: list[tuple[str, _LabelRef | None]] = []
+    last_ref: _LabelRef | None = None
     for m in re.finditer(
-        r"\\refstepcounter\{(suppnote|supprecord)\}|\\section\*?\{([^}]*)\}|\\subsection\*?\{([^}]*)\}|\\begin\{(figure|table|longtable|algorithm)\b|\\label\{([^}]*)\}",
+        r"\\refstepcounter\{(?P<refstep>suppnote|supprecord)\}"
+        r"|\\section(?P<section_star>\*)?\{(?P<section>[^}]*)\}"
+        r"|\\subsection(?P<subsection_star>\*)?\{(?P<subsection>[^}]*)\}"
+        r"|\\begin\{(?P<begin>figure|table|longtable|algorithm|equation|align|aligned|gather|gathered|multline|split|cases|alignat|alignedat)(?P<begin_star>\*)?\}"
+        r"|\\end\{(?P<end>figure|table|longtable|algorithm|equation|align|aligned|gather|gathered|multline|split|cases|alignat|alignedat)(?:\*)?\}"
+        r"|\\label\{(?P<label>[^}]*)\}",
         body
     ):
-        if m.group(1):
-            if m.group(1) == "suppnote":
+        if m.group("refstep"):
+            if m.group("refstep") == "suppnote":
                 suppnote_n += 1
+                last_ref = _LabelRef(str(suppnote_n), "suppnote")
             else:
                 supprecord_n += 1
+                last_ref = _LabelRef(str(supprecord_n), "supprecord")
             continue
-        if m.group(2):  # section
-            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group(2)).strip()
+        if m.group("section") is not None:  # section
+            active_ref = None
+            heading = re.sub(r"\\[a-zA-Z]+\*?", "", m.group("section")).strip()
             note_match = re.match(r"Supplementary Note\s+(\d+)", heading)
             record_match = re.match(r"Supplementary Record\s+(\d+)", heading)
             if note_match:
@@ -77,63 +116,166 @@ def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
                 supprecord_n = int(record_match.group(1))
             if heading == "Extended Data":
                 in_extended_data = True
-            else:
+                active_ref = None
+                last_ref = None
+            elif not m.group("section_star"):
                 sec_n += 1
                 subsec_n = 0
+                active_ref = _LabelRef(f"{prefix}{sec_n}", "section")
+                last_ref = active_ref
+            else:
+                active_ref = None
+                last_ref = None
             continue
-        if m.group(3):  # subsection
-            subsec_n += 1
+        if m.group("subsection") is not None:  # subsection
+            active_ref = None
+            if not m.group("subsection_star"):
+                subsec_n += 1
+                active_ref = _LabelRef(f"{prefix}{sec_n}.{subsec_n}", "subsection")
+                last_ref = active_ref
+            else:
+                active_ref = None
+                last_ref = None
             continue
-        env = m.group(4)
-        if env == "figure":
-            if in_extended_data:
-                ed_fig_n += 1
-            else:
-                fig_n += 1
-        elif env in ("table", "longtable"):
-            if in_extended_data:
-                ed_tbl_n += 1
-            else:
-                tbl_n += 1
-        elif env == "algorithm":
-            alg_n += 1
-        elif m.group(5):
-            key = m.group(5)
-            if key.startswith("fig:"):
-                result[key] = f"{ed_fig_n}" if key.startswith("fig:ed_") else f"{prefix}{fig_n}"
-            elif key.startswith("tab:"):
-                result[key] = f"{ed_tbl_n}" if key.startswith("tab:ed_") else f"{prefix}{tbl_n}"
-            elif key.startswith("alg:"):
-                result[key] = f"{prefix}{alg_n}"
-            elif key.startswith("si:"):
-                # SI labels: use section/subsection numbering
-                if subsec_n > 0:
-                    result[key] = f"{prefix}{sec_n}.{subsec_n}"
+        env = m.group("begin")
+        if env is not None:
+            if env in _MATH_ENVS:
+                # Only an outer display advances the equation counter.  Any
+                # nested aligned/cases/gathered structure inherits its outer
+                # label, including labels attached to individual rows.
+                if not math_stack:
+                    if m.group("begin_star"):
+                        math_ref = None
+                    else:
+                        eq_n += 1
+                        math_ref = _LabelRef(f"{prefix}{eq_n}", "equation")
+                        last_ref = math_ref
                 else:
-                    result[key] = f"{prefix}{sec_n}"
-            elif key.startswith("sn:"):
-                if supprecord_n:
-                    result[key] = f"{supprecord_n}"
-                elif suppnote_n:
-                    result[key] = f"{suppnote_n}"
+                    math_ref = math_stack[0][1]
+                math_stack.append((env, math_ref))
+                env_stack.append((env, math_ref))
+                active_ref = math_ref
+                continue
+            env_stack.append((env, None))
+            if env == "figure":
+                if in_extended_data:
+                    ed_fig_n += 1
+                    value = str(ed_fig_n)
                 else:
-                    result[key] = f"{sec_n}"
-            elif key.startswith("sec:"):
-                result[key] = f"{prefix}{sec_n}"
-            else:
-                result[key] = key
+                    fig_n += 1
+                    value = f"{prefix}{fig_n}"
+                active_ref = _LabelRef(value, "extended_figure" if in_extended_data else "figure")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            elif env in ("table", "longtable"):
+                if in_extended_data:
+                    ed_tbl_n += 1
+                    value = str(ed_tbl_n)
+                else:
+                    tbl_n += 1
+                    value = f"{prefix}{tbl_n}"
+                active_ref = _LabelRef(value, "extended_table" if in_extended_data else "table")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            elif env == "algorithm":
+                alg_n += 1
+                active_ref = _LabelRef(f"{prefix}{alg_n}", "algorithm")
+                env_stack[-1] = (env, active_ref)
+                last_ref = active_ref
+            continue
+        if m.group("end") is not None:
+            ending = m.group("end")
+            if ending in _MATH_ENVS:
+                if math_stack and math_stack[-1][0] == ending:
+                    _, ended_ref = math_stack.pop()
+                    if env_stack and env_stack[-1][0] == ending:
+                        env_stack.pop()
+                    active_ref = env_stack[-1][1] if env_stack else None
+                    if ended_ref is not None and not math_stack:
+                        last_ref = None
+                continue
+            if env_stack and env_stack[-1][0] == ending:
+                _, ended_ref = env_stack.pop()
+                active_ref = env_stack[-1][1] if env_stack else None
+                if ended_ref is not None and ended_ref.kind in {
+                    "figure", "extended_figure", "table", "extended_table",
+                    "algorithm", "equation",
+                }:
+                    last_ref = None
+            continue
+        key = m.group("label")
+        if key is None:
+            continue
+        # A label inside equation* has no ref-stepped counter.  Do not add
+        # even a textual fallback for it: otherwise the tokenizer would treat
+        # ``\ref{eq:star}`` as a seemingly valid (but fabricated) target,
+        # while a later numbered equation still starts at one.
+        if math_stack and math_stack[-1][1] is None:
+            continue
+        normalized = key[2:] if key.lower().startswith("s-") else key
+        # Semantic float prefixes describe the counter active at the label;
+        # they are not a license to manufacture a value from a prior counter.
+        # In particular, an orphan ``\label{eq:x}`` after equation* (or in
+        # ordinary prose) must stay unresolved instead of becoming equation 0
+        # or reusing the preceding numbered equation.
+        if normalized.startswith(("fig:", "figure:", "tab:", "table:", "alg:", "eq:", "equation:")):
+            if active_ref is None:
+                continue
+            if normalized.startswith(("fig:", "figure:")) and active_ref.kind not in {"figure", "extended_figure"}:
+                continue
+            if normalized.startswith(("tab:", "table:")) and active_ref.kind not in {"table", "extended_table"}:
+                continue
+            if normalized.startswith("alg:") and active_ref.kind != "algorithm":
+                continue
+            if normalized.startswith(("eq:", "equation:")) and active_ref.kind != "equation":
+                continue
+            result[key] = active_ref
+            continue
+        prefix_kind = None
+        if normalized.startswith("si:"):
+            prefix_kind = "subsection" if subsec_n > 0 else "section"
+            value = f"{prefix}{sec_n}.{subsec_n}" if subsec_n > 0 else f"{prefix}{sec_n}"
+        elif normalized.startswith("sn:"):
+            prefix_kind = "supprecord" if supprecord_n else "suppnote"
+            value = str(supprecord_n or suppnote_n or sec_n)
+        elif normalized.startswith("sec:"):
+            if active_ref is None or active_ref.kind not in {"section", "subsection"}:
+                continue
+            result[key] = active_ref
+            continue
+        elif active_ref is not None:
+            prefix_kind, value = active_ref.kind, active_ref.value
+        elif last_ref is not None and last_ref.kind in {"section", "subsection", "suppnote", "supprecord"}:
+            prefix_kind, value = last_ref.kind, last_ref.value
+        else:
+            # Preserve the historical public map behavior for labels outside
+            # any ref-stepped scope; they remain resolvable by their own text.
+            value = key
+        result[key] = _LabelRef(value, prefix_kind)
     return result
+
+
+def _scan_labels(text: str, fig_offset: int = 0, tbl_offset: int = 0,
+                 prefix: str = "") -> dict[str, str]:
+    """Compatibility wrapper returning only label display values."""
+    return {key: ref.value for key, ref in _scan_label_refs(text, fig_offset, tbl_offset, prefix).items()}
+
+
+def _build_label_index(full_text: str, aux_text: str | None = None,
+                       current_prefix: str = "", aux_prefix: str = "") -> tuple[dict[str, str], dict[str, str]]:
+    labels = _scan_label_refs(full_text, prefix=current_prefix)
+    if aux_text:
+        for key, ref in _scan_label_refs(aux_text, prefix=aux_prefix).items():
+            labels.setdefault(key, ref)
+            labels.setdefault(f"S-{key}", ref)
+    return ({key: ref.value for key, ref in labels.items()},
+            {key: ref.kind for key, ref in labels.items() if ref.kind})
 
 
 def _build_label_map(full_text: str, aux_text: str | None = None,
                      current_prefix: str = "", aux_prefix: str = "S") -> dict[str,str]:
-    labels=_scan_labels(full_text, prefix=current_prefix)
-    if aux_text:
-        for key, value in _scan_labels(aux_text, prefix=aux_prefix).items():
-            labels.setdefault(key, value)
-            # xr-hyper \externaldocument[S-]{si} cites the other file as S-<label>.
-            labels.setdefault(f"S-{key}", value)
-    return labels
+    values, _ = _build_label_index(full_text, aux_text, current_prefix, aux_prefix)
+    return values
 
 
 def _normalize_docx_whitespace(text: str) -> str:
@@ -328,8 +470,25 @@ def add_rich_text(paragraph, tex: str, resolver: CitationResolver | None = None,
                   font_size=PT_BODY, font_name=FONT_BODY,
                   citations_superscript: bool = True):
     """Tokenize *tex* and append formatted runs to *paragraph*."""
+    def resolve_label(key: str) -> str:
+        context = _context()
+        value = context.label_map.get(key)
+        if value is None:
+            # A placeholder such as ``??`` can make a generated document look
+            # valid while silently severing a cross-reference.  Fail at the
+            # source label so callers can fix the exact id in their TeX.
+            raise ValueError(f"Unresolved reference label: {key}")
+        return value
+
+    def resolve_label_kind(key: str) -> str | None:
+        return _context().label_kinds.get(key)
+
     def append_tex(chunk: str):
-        spans = tokenize_tex(chunk, resolve_ref=lambda key:_context().label_map.get(key,"??"))
+        spans = tokenize_tex(
+            chunk,
+            resolve_ref=resolve_label,
+            resolve_ref_kind=resolve_label_kind,
+        )
         for sp in spans:
             run = paragraph.add_run()
             _apply_span(run, sp, font_size=font_size, font_name=font_name)
@@ -436,6 +595,7 @@ class ConversionContext:
     figure_dir: Path
     project_root: Path
     label_map: dict[str,str] = field(default_factory=dict)
+    label_kinds: dict[str,str] = field(default_factory=dict)
     fig_counter: int=0
     tbl_counter: int=0
     ed_fig_counter: int=0
@@ -735,18 +895,59 @@ def add_algorithm(doc: Document, block: str, resolver: CitationResolver,
         _set_paragraph_border(last_para, bottom=True)
 
 
+_DISPLAY_DELIMITER_RE = re.compile(
+    r"\\(?P<side>left|right)\s*"
+    r"(?P<delimiter>\\(?:[{}]|[A-Za-z]+)|[()\[\]|.])"
+)
+
+
+def _normalize_display_delimiters(source: str) -> str:
+    """Normalize paired size delimiters without breaking invisible rights."""
+    tokens = list(_DISPLAY_DELIMITER_RE.finditer(source))
+    if not tokens:
+        return source
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        if token.group("side") == "left":
+            stack.append(index)
+        elif stack:
+            pairs.append((stack.pop(), index))
+    replacements: dict[tuple[int, int], str] = {}
+    for left_index, right_index in pairs:
+        left = tokens[left_index]
+        right = tokens[right_index]
+        left_delimiter = left.group("delimiter")
+        right_delimiter = right.group("delimiter")
+        if (
+            left_delimiter == "."
+            or right_delimiter == "."
+            or left_delimiter.startswith("\\")
+            or right_delimiter.startswith("\\")
+        ):
+            continue
+        replacements[left.span()] = left_delimiter
+        replacements[right.span()] = right_delimiter
+    if not replacements:
+        return source
+    chunks: list[str] = []
+    cursor = 0
+    for start, end in sorted(replacements):
+        chunks.append(source[cursor:start])
+        chunks.append(replacements[(start, end)])
+        cursor = end
+    chunks.append(source[cursor:])
+    return "".join(chunks)
+
+
 def _normalize_display_math_source(s: str) -> str:
+    """Remove only outer display delimiters while preserving TeX structure."""
     s = s.strip()
     if s.startswith(r"\["):
         s = s[2:]
     if s.endswith(r"\]"):
         s = s[:-2]
-    s = re.sub(r"\\begin\{equation\*?\}", "", s)
-    s = re.sub(r"\\end\{equation\*?\}", "", s)
-    s = re.sub(r"\\begin\{(?:array|aligned|align)\}(?:\{[^}]*\})?", "", s)
-    s = re.sub(r"\\end\{(?:array|aligned|align)\}", "", s)
-    s = re.sub(r"\\left\s*([(\[|.])", r"\1", s)
-    s = re.sub(r"\\right\s*([)\]|.])", r"\1", s)
+    s = _normalize_display_delimiters(s)
     s = re.sub(r"\\vdet\b", lambda _: r"V_{\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: r"\eta^{2}", s)
     s = s.replace(r"\,", " ")
@@ -755,64 +956,34 @@ def _normalize_display_math_source(s: str) -> str:
     return s.strip()
 
 
-def _display_math_rows(math_tex: str) -> list[str]:
-    s = _normalize_display_math_source(math_tex)
-    rows = re.split(r"\\\\", s)
-    clean_rows = []
-    for row in rows:
-        row = re.sub(r"\s*&\s*=\s*&\s*", " \u2009=\u2009 ", row)
-        row = row.replace("&", " ")
-        row = re.sub(r"\s+", " ", row).strip(" ,;")
-        if row:
-            clean_rows.append(row)
-    return clean_rows
-
-
 def _starts_lowercase_continuation(text: str) -> bool:
     match=re.search(r"[A-Za-z]",text)
     return bool(match and match.group(0).islower())
 
 
-_MATH_NS="http://schemas.openxmlformats.org/officeDocument/2006/math"
-
-
-def _omath_element(omml: etree._Element) -> etree._Element:
-    for child in omml:
-        if etree.QName(child).localname=="oMath":
-            return child
-    raise RuntimeError("display math conversion did not return an oMath element")
-
-
-def _stacked_display_math(rows: list[str]) -> etree._Element:
-    """One OMML equation array, so a multi-row display keeps a single number."""
-    omath=etree.Element(f"{{{_MATH_NS}}}oMath")
-    array=etree.SubElement(omath,f"{{{_MATH_NS}}}eqArr")
-    props=etree.SubElement(array,f"{{{_MATH_NS}}}eqArrPr")
-    for name in ("maxDist","objDist"):
-        node=etree.SubElement(props,f"{{{_MATH_NS}}}{name}")
-        node.set(f"{{{_MATH_NS}}}val","0")
-    for row in rows:
-        slot=etree.SubElement(array,f"{{{_MATH_NS}}}e")
-        inner=_omath_element(latex_to_omml(row))
-        for child in list(inner):
-            slot.append(child)
-    return omath
-
 
 def add_display_math(doc: Document, math_tex: str, resolver: CitationResolver, equation_prefix: str=""):
-    rows=_display_math_rows(math_tex)
-    if not rows: return
-    context=_context(); context.eq_counter+=1
-    label=f"({equation_prefix}{context.eq_counter})"
+    source = _normalize_display_math_source(math_tex)
+    if not source:
+        return
+    # Starred displays are deliberately unnumbered and must not consume a
+    # counter step used by a later numbered equation.
+    display_match = _DISPLAY_ENV_RE.match(source)
+    numbered = not (display_match and display_match.group("star"))
+    context = _context()
+    label = ""
+    if numbered:
+        context.eq_counter += 1
+        label = f"({equation_prefix}{context.eq_counter})"
     p=doc.add_paragraph(); p.paragraph_format.first_line_indent=Cm(0)
     p.paragraph_format.tab_stops.add_tab_stop(Cm(8),WD_TAB_ALIGNMENT.CENTER)
     p.paragraph_format.tab_stops.add_tab_stop(Cm(16),WD_TAB_ALIGNMENT.RIGHT)
     run=p.add_run("\t"); run.font.size=PT_BODY; run.font.name=FONT_BODY
-    if len(rows)==1:
-        p._p.append(latex_to_omml(rows[0]))
-    else:
-        p._p.append(_stacked_display_math(rows))
-    run=p.add_run(f"\t{label}"); run.font.size=PT_BODY; run.font.name=FONT_BODY
+    # Keep alignment, cases, arrays, and nested math in the source sent to
+    # Pandoc. Rebuilding rows as an eqArr loses their structure.
+    p._p.append(latex_to_omml(source))
+    if label:
+        run=p.add_run(f"\t{label}"); run.font.size=PT_BODY; run.font.name=FONT_BODY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -840,7 +1011,8 @@ def _find_figure(name: str) -> Path | None:
 
 def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
                resolver: CitationResolver, width_inches: float = 6.0,
-               extended: bool = False, float_prefix: str = ""):
+               extended: bool = False, float_prefix: str = "",
+               labels: list[str] | None = None):
     context=_context()
     if extended:
         context.ed_fig_counter+=1
@@ -876,6 +1048,12 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
         caption_tex = re.sub(r"\n\s*", " ", caption_tex)
         caption_tex = re.sub(r"  +", " ", caption_tex).strip()
         add_rich_text(cp, caption_tex, resolver, font_size=PT_CAPTION)
+    # A float's label is its stable identity.  Keep it on the caption so
+    # references and review tools can target the same object that receives the
+    # generated number.  Multiple labels on one float are legal TeX and all
+    # resolve to this single caption.
+    for label in labels or []:
+        add_bookmark(cp, _reference_bookmark_name(label))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1393,7 +1571,7 @@ def _set_table_column_widths(tbl, ncols: int, rows: list[list[TableCell]]):
 
 def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | None,
               resolver: CitationResolver, extended: bool = False,
-              float_prefix: str = ""):
+              float_prefix: str = "", labels: list[str] | None = None):
     context=_context()
     if extended:
         context.ed_tbl_counter+=1
@@ -1414,6 +1592,8 @@ def add_table(doc: Document, rows: list[list[TableCell]], caption_tex: str | Non
         caption_tex = re.sub(r"\n\s*", " ", caption_tex)
         caption_tex = re.sub(r"  +", " ", caption_tex).strip()
         add_rich_text(cp, caption_tex, resolver, font_size=PT_CAPTION)
+    for label in labels or []:
+        add_bookmark(cp, _reference_bookmark_name(label))
 
     if not rows:
         return
@@ -1685,10 +1865,14 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
         )
         if aux_path and aux_path.exists() else None
     )
-    _context().label_map=_build_label_map(
-        full_text,aux_text,current_prefix=float_prefix,
+    label_map, label_kinds = _build_label_index(
+        full_text,
+        aux_text,
+        current_prefix=float_prefix,
         aux_prefix="" if float_prefix else "S",
     )
+    _context().label_map = label_map
+    _context().label_kinds = label_kinds
     preamble = _extract_preamble(full_text)
     body = _body_from_text(full_text)
 
@@ -1748,14 +1932,21 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             i += 1
             continue
 
-        # --- display math: \[ ... \] or \begin{equation} ... \end{equation} ---
-        if line.startswith(r"\[") or re.match(r"\\begin\{equation\*?\}", line):
+        # --- display math: \[ ... \] or a supported display environment ---
+        display_match = _DISPLAY_ENV_RE.match(line)
+        if line.startswith(r"\[") or display_match:
             math_block = line
             j = i + 1
-            end_marker = r"\]" if line.startswith(r"\[") else r"\end{equation"
-            while end_marker not in math_block and j < len(lines):
+            if line.startswith(r"\["):
+                end_pattern = re.compile(r"\\\]")
+            else:
+                environment = display_match.group("environment")
+                end_pattern = re.compile(rf"\\end\{{{re.escape(environment)}\*?\}}")
+            while not end_pattern.search(math_block) and j < len(lines):
                 math_block += "\n" + lines[j].strip()
                 j += 1
+            if not end_pattern.search(math_block):
+                raise ValueError(f"Unclosed display equation environment in {tex_path}:{i + 1}")
             add_display_math(doc, math_block, resolver, equation_prefix=float_prefix)
             i = j
             continue
@@ -1895,6 +2086,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             fig_names = re.findall(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", fig_block)
             fig_name = fig_names if len(fig_names) > 1 else (fig_names[0] if fig_names else "")
             caption_raw = _extract_braced_arg(fig_block, r"\caption")
+            figure_labels = re.findall(r"\\label\{([^}]+)\}", fig_block)
             add_figure(
                 doc,
                 fig_name,
@@ -1902,6 +2094,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 resolver,
                 extended=in_extended_data,
                 float_prefix=float_prefix,
+                labels=figure_labels,
             )
             i = j
             continue
@@ -1917,6 +2110,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 j += 1
             caption_raw = _extract_braced_arg(blk, r"\caption")
             rows = _parse_longtable_rows(blk) if is_lt else _parse_tabular_rows(blk)
+            table_labels = re.findall(r"\\label\{([^}]+)\}", blk)
             add_table(
                 doc,
                 rows,
@@ -1924,6 +2118,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 resolver,
                 extended=in_extended_data,
                 float_prefix=float_prefix,
+                labels=table_labels,
             )
             i = j
             continue
@@ -1999,7 +2194,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             if nl.startswith("%") or _is_invisible_tex_line(nl):
                 j += 1
                 continue
-            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|begin\{equation\*?\}|bibliography\{|end\{)", nl):
+            if nl.startswith(r"\[") or nl == r"\docxpagebreak" or nl.startswith(r"\lstinputlisting") or _DISPLAY_ENV_RE.match(nl) or re.match(r"\\(section|subsection|subsubsection|paragraph|begin\{figure|begin\{table|begin\{longtable|begin\{algorithm|begin\{itemize\}|begin\{enumerate\}|bibliography\{|end\{)", nl):
                 break
             para_lines.append(nl)
             j += 1
