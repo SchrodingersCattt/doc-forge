@@ -737,6 +737,7 @@ def _post_review_source_map(
                         "original_hash", "file", "reviewed_start_line", "reviewed_end_line",
                         "reviewed_paragraph", "reviewed_hash", "reviewed_text",
                         "docx_paragraph_id", "docx_paragraph_range", "reviewed_docx_paragraph",
+                        "output_docx_paragraph",
                     ):
                         if key in changed:
                             record[key] = changed[key]
@@ -748,6 +749,7 @@ def _post_review_source_map(
                             record["docx_paragraph_range"] = {
                                 "start": output["start"], "end": output["end"],
                             }
+                            record["output_docx_paragraph"] = dict(output)
         result.extend(records)
     return result
 
