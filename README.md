@@ -98,6 +98,10 @@ docforge sourcepack . --allow main.tex --allow si.tex --glob-dir figures -o dist
 # Validate a generated DOCX
 docforge check output.docx --verify-clean
 
+# One-pass semantic DOCX contract (atomic output + audit manifest)
+docforge contract 01.main.md -o main.docx --template template.docx \
+  --metadata 00.metadata.md --bibliography references.json --force
+
 # Project-neutral source gates
 docforge gate abbr main.tex SI.tex --config gates.json --project paper
 docforge gate references --root . --config reference-gate.json
