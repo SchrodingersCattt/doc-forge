@@ -1285,10 +1285,9 @@ def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) 
 
     A paragraph can disappear while accepting an earlier review pass.  Word's
     comment part still contains that thread, so dropping its XML anchors makes
-    the comment look orphaned.  Match the old paragraph text first; when the
-    text was deleted, attach the anchor to the nearest surviving paragraph in
-    document order.  The old implementation used the first paragraph for all
-    misses, which visibly moved unrelated comments to the document cover.
+    the comment look orphaned. Match the old paragraph text first; if no
+    corresponding visible text survives, fail closed instead of attaching the
+    comment to an arbitrary paragraph (which can move it to the document cover).
     """
     wanted = _comment_counts(raw)
     present = _comment_counts(merged)
@@ -1298,10 +1297,11 @@ def _carry_missing_comment_markers(raw: etree._Element, merged: etree._Element) 
     }
     if not missing_ids:
         return
-    raw_paragraphs = raw.findall(".//w:body/w:p", NS)
+    raw_body = raw.find(".//w:body", NS)
     current_body = merged.find(".//w:body", NS)
-    if current_body is None:
-        return
+    if raw_body is None or current_body is None:
+        raise AssertionError(f"Unmatched comment anchors: {sorted(missing_ids)}")
+    raw_paragraphs = list(raw_body.iter(f"{{{W}}}p"))
     # Include paragraphs nested in table cells. Comments on REF/HYPERLINK
     # fields frequently live inside a table and must follow that field's text.
     current_paragraphs = list(current_body.iter(f"{{{W}}}p"))
