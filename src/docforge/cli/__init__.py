@@ -8,6 +8,7 @@ are absent.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -77,11 +78,23 @@ def build_parser() -> argparse.ArgumentParser:
     delta.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
     delta.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
+    delivery = sub.add_parser("deliver", help="Build named article/supplement DOCX files from a JSON profile")
+    delivery.add_argument("--profile", type=Path, required=True, help="Delivery profile JSON")
+    delivery.add_argument("--accept-revisions", action="store_true", help="Apply reviewed DOCX revisions to mapped Markdown sources before building")
+    delivery.add_argument("--force", action="store_true", help="Overwrite delivery outputs and converted sources")
+
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
-    md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
-    md2.add_argument("current", type=Path, help="Freshly generated DOCX")
-    md2.add_argument("-o", "--output", type=Path, required=True, help="Output tracked DOCX path")
+    # Positional paths remain supported for existing scripts.  The explicit
+    # flags make the review operation self-documenting and are convenient in
+    # CI: ``redline --baseline REVIEWED --current CURRENT --output TRACKED``.
+    md2.add_argument("base", nargs="?", type=Path, help="Reviewed DOCX baseline (or use --baseline)")
+    md2.add_argument("current", nargs="?", type=Path, help="Freshly generated DOCX (or use --current)")
+    md2.add_argument("-o", "--output", dest="output", type=Path, help="Output tracked DOCX path")
+    md2.add_argument("--baseline", dest="baseline", type=Path, help="Reviewed DOCX baseline")
+    md2.add_argument("--current", dest="current_option", type=Path, help="Freshly generated DOCX")
     md2.add_argument("--revision-author", default="M.Y.G.", help="Author recorded for revisions")
+    md2.add_argument("--accept-baseline", action="store_true", help="Accept earlier baseline revisions before creating this redline")
+    md2.add_argument("--report", dest="report_path", type=Path, help="Write a JSON action/reason/ratio alignment report")
     md2.add_argument("--force", action="store_true", help="Overwrite an existing output file")
     md2.add_argument("--ratio-cache", type=Path, help="JSON file that keeps paragraph similarity ratios between runs")
     md2.add_argument("--workers", type=int, help="Processes for uncached ratios; 1 disables the process pool")
@@ -157,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_apply_delta(args)
         if args.command == "redline":
             return _cmd_redline(args)
+        if args.command == "deliver":
+            return _cmd_deliver(args)
         if args.command == "tex2docx":
             return _cmd_tex2docx(args)
         if args.command == "docx2tex":
@@ -174,21 +189,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser.error(f"Unknown command: {args.command}")
     return 2
-
-
-def _cmd_apply_delta(args: argparse.Namespace) -> int:
-    from ..markdown.source_edit import apply_markdown_delta
-
-    summary = apply_markdown_delta(
-        args.source,
-        args.baseline,
-        args.edited,
-        args.output,
-        overwrite=args.force,
-    )
-    print("markdown delta: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
-    print(args.output)
-    return 0
 
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
@@ -300,23 +300,63 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_apply_delta(args: argparse.Namespace) -> int:
+    from ..markdown.source_edit import apply_markdown_delta
+
+    summary = apply_markdown_delta(
+        args.source,
+        args.baseline,
+        args.edited,
+        args.output,
+        overwrite=args.force,
+    )
+    print("markdown delta: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
+    print(args.output)
+    return 0
+
+
+def _cmd_deliver(args: argparse.Namespace) -> int:
+    from ..markdown import deliver
+
+    result = deliver(args.profile, accept_revisions=args.accept_revisions, force=args.force)
+    for artifact in result.artifacts:
+        print(artifact.output)
+        print(artifact.manifest)
+        print(artifact.checksum)
+    print(result.manifest)
+    return 0
+
+
 def _cmd_redline(args: argparse.Namespace) -> int:
     from ..docxdiff import create_tracked_docx
     from ..output import validate_output_path
 
+    baseline = args.baseline or args.base
+    current = args.current_option or args.current
+    if baseline is None or current is None:
+        raise ValueError("redline requires a baseline and current DOCX (use positional paths or --baseline/--current)")
+    if args.output is None:
+        raise ValueError("redline requires --output/-o")
     validate_output_path(args.output)
+    if args.report_path is not None:
+        validate_output_path(args.report_path, label="report")
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     summary = create_tracked_docx(
-        args.base,
-        args.current,
+        baseline,
+        current,
         args.output,
         author=args.revision_author,
         overwrite=args.force,
+        preserve_base_revisions=not args.accept_baseline,
+        accept_baseline=args.accept_baseline,
+        report_path=args.report_path,
         ratio_cache=args.ratio_cache,
         workers=args.workers,
     )
     print("tracked revisions: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
+    if args.report_path is not None:
+        print(args.report_path)
     print(args.output)
     return 0
 

@@ -344,9 +344,16 @@ def load_section_map(path: Path) -> list[dict[str, Any]]:
         raise ValueError("section map must contain a non-empty 'sections' list")
     result: list[dict[str, Any]] = []
     for item in sections:
-        if not isinstance(item, Mapping) or not item.get("file"):
+        if not isinstance(item, Mapping):
             raise ValueError("each section map entry requires a file")
-        result.append(dict(item))
+        value = dict(item)
+        # ``path`` is the provenance-map spelling; retain ``file`` as the
+        # canonical split-output key for compatibility with older callers.
+        if not value.get("file") and value.get("path"):
+            value["file"] = value["path"]
+        if not value.get("file"):
+            raise ValueError("each section map entry requires a file/path")
+        result.append(value)
     return result
 
 

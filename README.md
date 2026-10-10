@@ -99,6 +99,28 @@ docforge gate references --root . --config reference-gate.json
 
 All paths are explicit; nothing is inferred from the current directory.
 
+The delivery command accepts a versioned `docforge.delivery.v1` profile whose
+canonical shape is an `artifacts` list. Each artifact provides `id`, `inputs`,
+`template`, optional `metadata` and `bibliography`, and an `output` name. The
+older `article`/`supplement` keys, `si`, `supporting_information`,
+`sources`/`markdown`, `delivery_names`, and `review`/`reviewed` fields remain
+supported as compatibility aliases and are normalized before building.
+`--accept-revisions` requires a reviewed DOCX, `section_map`, confined
+`source_dir`, and a `source_paragraph_map` (the compatibility alias
+`revision_map` is also accepted). Each map entry must identify the source
+`path`/`file`, source `start_line`/`end_line` and hash, plus the reviewed
+`start_line`/`end_line` and `reviewed_paragraph` identity and hash. Conversion
+happens in a scratch directory only as a candidate for those mapped ranges;
+unmapped reviewed paragraphs, identity/hash mismatches, and path mismatches
+abort before publishing. Outputs and source updates are committed together,
+and all document, sidecar, aggregate-manifest, and source destinations are
+checked for collisions first. The aggregate manifest records each source
+paragraph's `path`, `start_line`, `end_line`, and `hash`. An `output_pattern`
+may use `{role}` and UTC `{timestamp}` and is confined to the delivery
+directory. Source files are snapshotted with their relative media tree while
+staging, and multiple ranges in one file are applied from the end of the file
+so their original coordinates remain valid.
+
 Template assembly replaces sample body content while retaining the supplied
 template's styles, section geometry, headers, footers, numbering, and embedded assets.
 
