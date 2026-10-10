@@ -112,7 +112,9 @@ copies; any hash or path mismatch aborts before publishing. Outputs and source
 updates are committed together. The aggregate manifest records each source
 paragraph's `path`, `start_line`, `end_line`, and `hash`. An `output_pattern`
 may use `{role}` and UTC `{timestamp}` and is confined to the delivery
-directory.
+directory. Source files are snapshotted with their relative media tree while
+staging, and multiple ranges in one file are applied from the end of the file
+so their original coordinates remain valid.
 
 Template assembly replaces sample body content while retaining the supplied
 template's styles, section geometry, headers, footers, numbering, and embedded assets.

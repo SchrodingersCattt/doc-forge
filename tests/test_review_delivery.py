@@ -144,3 +144,26 @@ def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkey
     with pytest.raises(RuntimeError, match="hash mismatch"):
         deliver(profile_path, accept_revisions=True, force=True)
     assert source.read_text(encoding="utf-8") == "changed\nkeep\n"
+
+
+def test_review_ranges_use_immutable_coordinates_for_one_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    source = source_dir / "body.md"
+    source.write_text("a\nb\nc\nd\n", encoding="utf-8")
+    section_map = {
+        "sections": [
+            {"file": "body.md", "start_line": 1, "end_line": 1, "reviewed_start_line": 1, "reviewed_end_line": 1, "hash": delivery_module._sha256_text("a\n")},
+            {"file": "body.md", "start_line": 3, "end_line": 3, "reviewed_start_line": 2, "reviewed_end_line": 2, "hash": delivery_module._sha256_text("c\n")},
+        ],
+    }
+    (tmp_path / "map.json").write_text(json.dumps(section_map), encoding="utf-8")
+    reviewed = tmp_path / "reviewed.docx"
+    Document().save(reviewed)
+    monkeypatch.setattr(delivery_module, "docx_to_markdown", lambda _input, *, output, **_kwargs: output.write_text("A\nC\n", encoding="utf-8"))
+    prepared = delivery_module._prepare_review(
+        {"reviewed_docx": "reviewed.docx", "section_map": "map.json", "source_dir": "sources"},
+        tmp_path,
+        tmp_path / "stage",
+    )
+    assert prepared.inputs[0].read_text(encoding="utf-8") == "A\nb\nC\nd\n"

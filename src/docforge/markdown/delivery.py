@@ -348,11 +348,21 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
     full_md.parent.mkdir(parents=True, exist_ok=True)
     docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
     chunks = _review_chunks(full_md.read_text(encoding="utf-8"), mapped)
-    staged_root = stage_root / "sources"
+    # Preserve the source directory layout in staging so relative figures,
+    # tables, and media links resolve exactly as they do from the profile.
+    staged_root = stage_root / "sources" / hashlib.sha1(str(source_dir).encode()).hexdigest()[:12]
     staged_root.mkdir(parents=True, exist_ok=True)
+    for source_path in source_dir.rglob("*"):
+        if not source_path.is_file() or stage_root in source_path.parents:
+            continue
+        relative = source_path.relative_to(source_dir)
+        destination = staged_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
     staged_by_original: dict[Path, Path] = {}
     ranges: dict[Path, list[tuple[int, int]]] = {}
     records: list[dict[str, Any]] = []
+    plans: list[tuple[Path, int, int, str, dict[str, Any]]] = []
     for map_index, (item, (_name, replacement)) in enumerate(zip(mapped, chunks)):
         target = _confined(source_dir / str(item["file"]), source_dir, label="source map file")
         if not target.is_file():
@@ -377,15 +387,28 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
             raise RuntimeError(f"source map hash mismatch for {target}:{start}-{end}")
         if not replacement.endswith("\n"):
             replacement += "\n"
+        reviewed_hash = item.get("reviewed_hash", item.get("accepted_hash"))
+        if reviewed_hash is not None and str(reviewed_hash) != _sha256_text(replacement):
+            raise RuntimeError(f"reviewed section hash mismatch for {target}:{start}-{end}")
         if target not in staged_by_original:
-            staged = staged_root / f"{len(staged_by_original):04d}_{target.name}"
-            shutil.copy2(target, staged)
+            staged = staged_root / target.relative_to(source_dir)
             staged_by_original[target] = staged
+        plans.append((target, start, end, replacement, dict(item)))
+    # Every range is interpreted against the immutable source snapshot. Apply
+    # from the end of each file so replacing a multi-line range cannot shift
+    # the coordinates of an earlier range in the same source.
+    for target in sorted({plan[0] for plan in plans}, key=str):
         staged = staged_by_original[target]
         staged_lines = staged.read_text(encoding="utf-8-sig").splitlines(keepends=True)
-        staged_lines[start - 1:end] = [replacement]
+        target_plans = sorted((plan for plan in plans if plan[0] == target), key=lambda plan: plan[1], reverse=True)
+        for _target, start, end, replacement, item in target_plans:
+            staged_lines[start - 1:end] = [replacement]
+            records.append({
+                "path": str(target), "start_line": start, "end_line": start + replacement.count("\n") - 1,
+                "hash": _sha256_text(replacement), "original_hash": str(item.get("hash", item.get("sha256", ""))),
+                "file": str(item["file"]),
+            })
         staged.write_text("".join(staged_lines), encoding="utf-8")
-        records.append({"path": str(target), "start_line": start, "end_line": end, "hash": _sha256_text(replacement), "file": str(item["file"])})
     if not staged_by_original:
         raise ValueError("section map produced no source updates")
     if entry.get("inputs") is not None:
@@ -404,6 +427,22 @@ def _rewrite_paths(value: Any, replacements: Mapping[str, str]) -> Any:
     if isinstance(value, dict):
         return {key: _rewrite_paths(item, replacements) for key, item in value.items()}
     return value
+
+
+def _post_review_source_map(review: _PreparedReview) -> list[dict[str, Any]]:
+    """Describe the staged post-review bytes under their published paths."""
+    logical_by_staged = {str(staged.resolve()): logical for logical, staged in review.updates}
+    result: list[dict[str, Any]] = []
+    for staged in review.inputs:
+        records = _source_map([staged])
+        logical = logical_by_staged.get(str(staged.resolve()))
+        for record in records:
+            if logical is not None:
+                record["path"] = str(logical.resolve())
+                record["source"] = str(logical)
+            record["provenance"] = "reviewed-docx-accepted"
+        result.extend(records)
+    return result
 
 
 def _commit_transaction(pairs: Sequence[tuple[Path, Path]], *, force: bool) -> None:
@@ -525,7 +564,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
             if review is not None:
                 replacements.update({str(staged.resolve()): str(logical.resolve()) for logical, staged in review.updates})
             built.append(DeliveryArtifact(key, final_output, final_manifest, final_checksum, tuple(review.logical_inputs if review else inputs)))
-            source_records.extend(_source_map(review.logical_inputs if review else inputs))
+            source_records.extend(_post_review_source_map(review) if review is not None else _source_map(inputs))
             if key == "article":
                 # The supplement needs a readable citation base while both
                 # artifacts are still staged. It is rewritten to the final
