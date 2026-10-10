@@ -25,6 +25,29 @@ class BlockTests(unittest.TestCase):
         self.assertEqual(block.rows, ())
         self.assertEqual(block.path, "")
 
+    def test_table_row_width_mismatch_fails_with_source_location(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("| A | B |\n|---|---|\n| one |\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"Malformed Markdown table.*:3; row has 1 cells, expected 2"):
+                parse_markdown(path)
+
+    def test_table_rows_keep_pipes_inside_math_code_and_escapes(self) -> None:
+        from docforge.markdown.launcher import split_table_row
+
+        row = r"| label | `$x|y$` | $x|y$ | escaped \| pipe |"
+        assert split_table_row(row) == (
+            "label",
+            "`$x|y$`",
+            "$x|y$",
+            "escaped | pipe",
+        )
+
+        # Backtick spans may use more than one delimiter character.
+        assert split_table_row("| one | ``a|b`` | three |") == (
+            "one", "``a|b``", "three"
+        )
+
     def test_bang_comments_are_ignored_and_image_options_are_parsed(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "source.md"
@@ -177,6 +200,28 @@ class OmmlTests(unittest.TestCase):
         self.assertEqual(split_math.paragraphs[0].text, "61.3 ± 1.1% and mean ± S.E.")
         self.assertNotIn("  ", split_math.paragraphs[0].text)
 
+    def test_doubled_dollar_inside_prose_stays_literal(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", "Keep $$broken x + y$$ spaces after.")]
+        )
+        self.assertEqual(document.paragraphs[0].text, "Keep $$broken x + y$$ spaces after.")
+        self.assertEqual(len(document.paragraphs[0].runs), 1)
+
+    def test_doubled_dollar_inside_source_paragraph_reports_location(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("Before $$broken display$$ after.\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"Display equation delimiter.*source\.md:1"):
+                parse_markdown(path)
+
+    def test_doubled_dollar_in_code_span_or_escape_stays_literal(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("Use `price$$value` or `\\$\\$` or \\$\\$ as literal text.\n", encoding="utf-8")
+            blocks = parse_markdown(path)
+        document = render_blocks_to_doc(blocks)
+        self.assertEqual(document.paragraphs[0].text, "Use price$$value or \\$\\$ or $$ as literal text.")
+
     def test_standalone_font_override_preserves_inline_formatting(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", "C<sub>36</sub>Fe *d* **bold**")],
@@ -207,6 +252,14 @@ class OmmlTests(unittest.TestCase):
         for cell in document.tables[0].rows[1].cells:
             self.assertEqual(next(run for run in cell.paragraphs[0].runs if run.text).font.name, "Consolas")
         self.assertEqual(document.paragraphs[0].runs[0].font.name, "Arial")
+
+    def test_escaped_table_pipe_is_plain_cell_text_in_docx(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "source.md"
+            path.write_text("| Header | Value |\n| --- | --- |\n| left \\| right | ok |\n", encoding="utf-8")
+            blocks = parse_markdown(path)
+        document = render_blocks_to_doc(blocks)
+        assert document.tables[0].cell(1, 0).text == "left | right"
 
     def test_nested_scripts_inside_bold_or_italic_markup_are_preserved(self) -> None:
         document = render_blocks_to_doc(

@@ -4,20 +4,19 @@ import re
 from pathlib import Path
 from .tokenize import plain_tex
 from ..bibliography import CitationResolver as SharedCitationResolver
+from ..bibliography.loaders import _bib_records
 
 def parse_bib(path: Path) -> dict[str, dict]:
-    """Parse a BibTeX file into {key: field-dict} (fields lower-cased)."""
+    """Parse a BibTeX file into ``{key: field-dict}``.
+
+    The shared loader scans balanced field braces, so titles containing
+    protected words or commas are not truncated at their first closing brace.
+    """
     text = path.read_text(encoding="utf-8")
-    entries: dict[str, dict] = {}
-    for m in re.finditer(r"@(\w+)\{(\w+),\s*(.*?)\n\}", text, re.DOTALL):
-        entry_type, key, body = m.group(1), m.group(2), m.group(3)
-        fields: dict[str, str] = {"_type": entry_type}
-        for fm in re.finditer(r"(\w+)\s*=\s*\{(.*?)\}(?:\s*,|\s*$)", body, re.DOTALL):
-            fname = fm.group(1).lower()
-            fval = re.sub(r"\s+", " ", fm.group(2).strip())
-            fields[fname] = fval
-        entries[key] = fields
-    return entries
+    return {
+        key: fields
+        for _entry_type, key, fields in _bib_records(text)
+    }
 
 
 
