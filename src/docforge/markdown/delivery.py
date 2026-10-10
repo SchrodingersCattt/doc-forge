@@ -351,12 +351,20 @@ def _docx_paragraph_records(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _reviewed_identity(item: Mapping[str, Any]) -> str | None:
-    value = item.get("reviewed_paragraph", item.get("reviewed_id"))
+    value = item.get("docx_paragraph_id") or item.get("reviewed_paragraph", item.get("reviewed_id"))
     if isinstance(value, Mapping):
         value = value.get("id", value.get("paragraph_id", value.get("para_id")))
     if value is None or not str(value).strip():
         return None
     return str(value)
+
+
+def _stable_docx_id(value: Any) -> str:
+    """Return an OOXML-valid, deterministic eight-digit paragraph ID."""
+    text = str(value)
+    if re.fullmatch(r"[0-9A-Fa-f]{8}", text):
+        return text.upper()
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8].upper()
 
 
 def _normalise_edit_text(value: str) -> str:
@@ -418,7 +426,7 @@ def _stamp_output_paragraph_ids(path: Path, review: _PreparedReview | None) -> d
         )
         if match is None or ordinal in used:
             continue
-        identity = str(match["docx_paragraph_id"])
+        identity = _stable_docx_id(match["docx_paragraph_id"])
         paragraph.set(f"{{{_W14}}}paraId", identity)
         used.add(ordinal)
         result[(str(match["path"]), int(match["start_line"]))] = {

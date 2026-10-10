@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -201,7 +202,7 @@ def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkey
     assert exported["file"] == "body.md"
     assert exported["reviewed_paragraph"]["id"] == "p1"
     assert exported["reviewed_start_line"] == 1
-    assert exported["docx_paragraph_id"] == "p1"
+    assert exported["docx_paragraph_id"] == hashlib.sha1(b"p1").hexdigest()[:8].upper()
     assert exported["docx_paragraph_range"] == {"start": 1, "end": 1}
     source.write_text("changed\nkeep\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="hash mismatch"):
