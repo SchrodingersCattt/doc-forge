@@ -126,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     md2.add_argument("--force", action="store_true", help="Overwrite an existing output file")
     md2.add_argument("--ratio-cache", type=Path, help="JSON file that keeps paragraph similarity ratios between runs")
     md2.add_argument("--workers", type=int, help="Processes for uncached ratios; 1 disables the process pool")
+    md2.add_argument(
+        "--allow-block-replace",
+        action="store_true",
+        help="Allow a sparse redline to insert the current document and delete the baseline",
+    )
 
     tex = sub.add_parser("tex2docx", help="LaTeX -> DOCX (main + optional SI)")
     tex.add_argument("main", type=Path, help="main.tex path")
@@ -442,6 +447,7 @@ def _cmd_redline(args: argparse.Namespace) -> int:
         report_path=args.report_path,
         ratio_cache=args.ratio_cache,
         workers=args.workers,
+        allow_block_replace=args.allow_block_replace,
     )
     print("tracked revisions: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
     if args.report_path is not None:
