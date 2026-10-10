@@ -59,6 +59,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manifest from docx2md; reuse its exact source DOCX when all sections and media are unchanged",
     )
 
+    contract = sub.add_parser(
+        "contract",
+        help="Atomically build, validate, and audit a semantic-role DOCX",
+    )
+    contract.add_argument("inputs", nargs="+", type=Path, help="Markdown files to merge in order")
+    contract.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    contract.add_argument("--template", type=Path, required=True, help="DOCX template with semantic paragraph roles")
+    contract.add_argument("--metadata", type=Path, required=True, help="Metadata Markdown file")
+    contract.add_argument("--bibliography", type=Path)
+    contract.add_argument("--citation-base", type=Path)
+    contract.add_argument("--citation-format", choices=("template", "bracketed", "superscript", "superscript-bracketed"), default="template")
+    contract.add_argument("--title", default="")
+    contract.add_argument("--style", dest="style_profile", default="template")
+    contract.add_argument("--columns", choices=("template", "one", "two"), default="template")
+    contract.add_argument("--figure-span", choices=("column", "page"), default="column")
+    contract.add_argument("--line-numbers", choices=("template", "on", "off"), default="template")
+    contract.add_argument("--font", dest="font_family")
+    contract.add_argument("--east-asia-font", dest="east_asia_font")
+    contract.add_argument("--keep-comments", action="store_true")
+    contract.add_argument("--no-title", action="store_true")
+    contract.add_argument("--native-toc", action="store_true")
+    contract.add_argument("--force", action="store_true", help="Replace existing output and sidecars")
+
     docx_md = sub.add_parser("docx2md", help="DOCX -> GitHub-Flavored Markdown via Pandoc")
     docx_md.add_argument("input", type=Path, help="Input DOCX path")
     docx_md.add_argument("-o", "--output", type=Path, help="Output Markdown path")
@@ -192,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "md2docx":
             return _cmd_md2docx(args)
+        if args.command == "contract":
+            return _cmd_contract(args)
         if args.command == "docx2md":
             return _cmd_docx2md(args)
         if args.command == "md-export":
@@ -336,6 +361,36 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
 
 def _load_split(path: Path | None) -> list[dict] | None:
     return json.loads(path.read_text(encoding="utf-8-sig")) if path else None
+
+
+def _cmd_contract(args: argparse.Namespace) -> int:
+    from ..markdown import build_docx_contract
+
+    result = build_docx_contract(
+        args.inputs,
+        template_path=args.template,
+        metadata_path=args.metadata,
+        bibliography_path=args.bibliography,
+        citation_base_path=args.citation_base,
+        output=args.output,
+        force=args.force,
+        command=args._command_argv,
+        title=args.title,
+        citation_format=args.citation_format,
+        style_profile=args.style_profile,
+        columns=args.columns,
+        figure_span=args.figure_span,
+        line_numbers=args.line_numbers,
+        font_family=args.font_family,
+        east_asia_font=args.east_asia_font,
+        keep_comments=args.keep_comments,
+        strip_level_one_headings=args.no_title,
+        native_toc=args.native_toc,
+    )
+    print(result.output)
+    print(result.manifest)
+    print(result.checksum)
+    return 0
 
 
 def _guard_bundle(args: argparse.Namespace) -> None:

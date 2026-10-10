@@ -26,6 +26,25 @@ Word is the reference renderer (`--render word`, Windows with pywin32).
 LibreOffice shapes text per run, so merging two runs with identical formatting
 can move its line breaks even though Word lays the text out the same way.
 
+## Atomic one-pass contract
+
+For template-driven Markdown assembly, `docforge contract` is the project-neutral
+one-pass entry point:
+
+```text
+docforge contract 01.main.md -o main.docx --template template.docx \
+  --metadata 00.metadata.md --bibliography references.json --force
+```
+
+The command discovers every semantic paragraph role before creating output,
+builds and verifies in a sibling temporary directory, then publishes the DOCX,
+`.manifest.json`, and `.sha256` sidecars together. A missing role, malformed
+input, or failed verification leaves an existing output untouched and does not
+publish a misleading partial file. The manifest carries
+`contract.schema=docforge.docx-contract.v1`, the resolved role map, and one
+decision record for each parsed Markdown block (source, kind, role, and text
+hash).
+
 ## Bundle layout
 
 ```text
