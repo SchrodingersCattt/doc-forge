@@ -193,62 +193,70 @@ def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[
     """
 
     source = [(index, key) for index, key in docx_keys if key]
-    used: set[int] = set()
-    mapping: dict[int, int] = {}
+    if not source:
+        return {}
 
-    # Exact keys are anchors. Picking the first occurrence after the previous
-    # anchor gives duplicate sentences their natural occurrence order.
-    cursor = -1
-    for index, block in enumerate(blocks):
-        if block.kind != "text":
-            continue
-        exact = [child for child, key in source if child > cursor and child not in used and key == block.key]
-        if exact:
-            mapping[index] = exact[0]
-            used.add(exact[0])
-            cursor = exact[0]
+    # Solve exact and fuzzy candidates together.  A greedy exact pass can let
+    # a later duplicate consume the paragraph needed by an earlier fuzzy
+    # block (for example ``fooo, foo`` against ``foo, foo``).  The state also
+    # records whether a source neighbour was skipped: fuzzy matching is only
+    # allowed against the nearest remaining source paragraph, while exact
+    # anchors may skip unrelated paragraphs.
+    from functools import lru_cache
 
-    # Fuzzy matches are deliberately conservative. For each gap between exact
-    # anchors, only the first still-unmatched source paragraph is a candidate;
-    # a distant high-ratio paragraph must remain unmapped. Compare that
-    # candidate with its immediate next neighbour and require a 0.04 margin.
-    for index, block in enumerate(blocks):
-        if block.kind != "text" or index in mapping:
-            continue
-        previous = max((value for key, value in mapping.items() if key < index), default=None)
-        following = min((value for key, value in mapping.items() if key > index), default=None)
-        candidates = [
-            (child, key)
-            for child, key in source
-            if child not in used
-            and (previous is None or child > previous)
-            and (following is None or child < following)
-        ]
-        if not candidates:
-            continue
-        best_child, best_key = candidates[0]
-        best_ratio = SequenceMatcher(a=block.key, b=best_key, autojunk=False).ratio()
-        # Compare with the next source neighbour even when that neighbour is
-        # already an exact anchor. A close future anchor makes the fuzzy pair
-        # ambiguous and must therefore fail the required ratio margin.
-        next_key = next(
-            (
-                key
-                for child, key in source
-                if child > best_child
-                and (following is None or child <= following)
-            ),
-            None,
-        )
-        next_ratio = (
-            SequenceMatcher(a=block.key, b=next_key, autojunk=False).ratio()
-            if next_key is not None
-            else 0.0
-        )
-        if best_ratio >= 0.92 and best_ratio - next_ratio >= 0.04:
-            mapping[index] = best_child
-            used.add(best_child)
-    return mapping
+    def pair_score(block: _Block, key: str, *, exact: bool) -> tuple[int, int, float] | None:
+        if block.kind != "text" or not block.key:
+            return None
+        ratio = SequenceMatcher(a=block.key, b=key, autojunk=False).ratio()
+        if not exact and ratio < 0.92:
+            return None
+        return (1, 1 if exact else 0, ratio)
+
+    def add_score(left: tuple[int, int, float], right: tuple[int, int, float]) -> tuple[int, int, float]:
+        return left[0] + right[0], left[1] + right[1], left[2] + right[2]
+
+    zero = (0, 0, 0.0)
+
+    @lru_cache(maxsize=None)
+    def solve(block_index: int, source_index: int, fuzzy_allowed: bool):
+        if block_index >= len(blocks) or source_index >= len(source):
+            return zero, ()
+        block = blocks[block_index]
+        child, key = source[source_index]
+        options: list[tuple[tuple[int, int, float], tuple]] = []
+
+        # Pairing is considered first so ties retain the natural occurrence
+        # order. Exact pairs are always safe; fuzzy pairs must use the nearest
+        # source neighbour and beat that neighbour by the required margin.
+        exact = block.kind == "text" and block.key == key
+        score = pair_score(block, key, exact=exact)
+        if score is not None and (exact or fuzzy_allowed):
+            if not exact and source_index + 1 < len(source):
+                next_key = source[source_index + 1][1]
+                next_ratio = SequenceMatcher(a=block.key, b=next_key, autojunk=False).ratio()
+                if score[2] - next_ratio < 0.04:
+                    score = None
+            if score is not None:
+                tail_score, tail_path = solve(block_index + 1, source_index + 1, True)
+                options.append((add_score(score, tail_score), ((block_index, child),) + tail_path))
+
+        # An unmatched Markdown block does not consume a source paragraph.
+        tail_score, tail_path = solve(block_index + 1, source_index, fuzzy_allowed)
+        options.append((tail_score, tail_path))
+
+        # Skipping a source paragraph disables fuzzy matching for the current
+        # block. A later exact anchor can still cross the gap and re-enable it.
+        tail_score, tail_path = solve(block_index, source_index + 1, False)
+        options.append((tail_score, tail_path))
+
+        best_score, best_path = options[0]
+        for candidate_score, candidate_path in options[1:]:
+            if candidate_score > best_score:
+                best_score, best_path = candidate_score, candidate_path
+        return best_score, best_path
+
+    _score, path = solve(0, 0, True)
+    return {block_index: child_index for block_index, child_index in path}
 
 
 def _anchor_before(blocks: list[_Block], mapping: dict[int, int], start: int) -> int:
@@ -294,7 +302,14 @@ def _heading_style_ids(styles_xml: bytes | None) -> dict[int, str]:
 
 
 def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> dict:
-    body = next((child for child in children if _paragraph_key(child) and not _style_id(child)), None)
+    body_candidates = [
+        child for child in children
+        if _paragraph_key(child) and not _style_id(child)
+    ]
+    # Titles and short front-matter labels are often unstyled. Choose the
+    # richest ordinary paragraph as the body role; placement remains governed
+    # by the separate source anchor.
+    body = max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None)
     if body is None:
         body = next((child for child in children if etree.QName(child).localname == "p"), None)
     headings = {}
@@ -398,7 +413,11 @@ def _insert_before(
         if properties is not None:
             paragraph.append(properties)
         heading = _is_heading(block.raw)
-        run_source = _heading_prototype(block.raw, prototypes) if heading else source
+        run_source = (
+            _heading_prototype(block.raw, prototypes)
+            if heading
+            else (prototypes.get("body") if prototypes.get("body") is not None else source)
+        )
         _add_runs(
             paragraph,
             _display_text(block.raw),
@@ -430,7 +449,11 @@ def _insert_after(
         if properties is not None:
             paragraph.append(properties)
         heading = _is_heading(block.raw)
-        run_source = _heading_prototype(block.raw, prototypes) if heading else source
+        run_source = (
+            _heading_prototype(block.raw, prototypes)
+            if heading
+            else (prototypes.get("body") if prototypes.get("body") is not None else source)
+        )
         if run_source is None:
             run_source = source
         _add_runs(
@@ -489,7 +512,10 @@ def _properties_for(raw: str, prototypes: dict, anchor: etree._Element) -> etree
             properties = etree.Element(f"{{{W}}}pPr")
             etree.SubElement(properties, f"{{{W}}}pStyle").set(f"{{{W}}}val", style_id)
             return properties
-    source = anchor if _paragraph_key(anchor) else prototypes["body"]
+    # Placement and formatting are separate concerns.  A body insertion that
+    # happens to be placed before a heading must still use the body role's
+    # prototype instead of inheriting heading or caption formatting.
+    source = prototypes.get("body") if prototypes.get("body") is not None else anchor
     if source is None:
         return None
     return _copy_paragraph_properties(source)

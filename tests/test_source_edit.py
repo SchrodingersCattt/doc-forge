@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from docx import Document
+from docx.shared import Pt
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
@@ -193,6 +194,43 @@ def test_mapping_pairs_duplicate_sentences_in_source_order():
         0: 3,
         1: 8,
     }
+
+
+def test_mapping_solves_exact_and_fuzzy_duplicates_in_one_ordered_pass():
+    # The exact second block must not greedily consume source[0] before the
+    # earlier fuzzy block has had a chance to pair with it.
+    blocks = [_Block("text", "A repeated sentence with one edit."), _Block("text", "A repeated sentence.")]
+    mapping = _map_blocks(
+        blocks,
+        [
+            (0, "A repeated sentence with one edit!"),
+            (1, "A repeated sentence."),
+        ],
+    )
+    assert mapping == {0: 0, 1: 1}
+
+
+def test_body_insertion_before_heading_uses_body_formatting(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    heading = document.add_paragraph("Heading")
+    heading.runs[0].bold = True
+    heading.runs[0].font.size = Pt(18)
+    body = document.add_paragraph("Body anchor")
+    body.runs[0].font.size = Pt(11)
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Heading\n\nBody anchor", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Inserted body\n\nHeading\n\nBody anchor", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+
+    inserted = Document(output).paragraphs[0]
+    assert inserted.text == "Inserted body"
+    assert inserted.runs[0].font.size == Pt(11)
+    assert inserted.runs[0].bold is not True
 
 
 def test_mapping_allows_short_headings_and_does_not_jump_to_distant_fuzzy_match():
