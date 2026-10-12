@@ -422,7 +422,7 @@ def key(markdown: str, strip_list_number: bool = True) -> str:
 
 
 _CAPTION_LABEL = re.compile(
-    r"^(?:supplementary\s+)?(?:figure|fig\.|table|scheme|chart)\s+[A-Za-z]*\s*\d+\b",
+    r"^(?:supplementary\s+)?(?:figure|fig\.|table|scheme|chart)\s+[A-Za-z0-9]+\b",
     re.IGNORECASE,
 )
 _CAPTION_SLOT = re.compile(r"^\[(?:figure|fig\.|table|scheme|chart)\s+caption\]$", re.IGNORECASE)
@@ -437,7 +437,11 @@ def is_caption(markdown: str) -> bool:
 def is_filename_alt(markdown: str) -> bool:
     """Return whether image alt text is only a media filename."""
     value = key(markdown)
-    return bool(value and re.fullmatch(r"[^/\\\s]+\.(?:avif|bmp|gif|jpe?g|png|svg|tiff?|webp)", value, re.IGNORECASE))
+    return bool(value and re.fullmatch(
+        r"(?:[A-Za-z]:[\\/]|/)?(?:[^/\\\s]+/)*[^/\\\s]+\.(?:avif|bmp|gif|jpe?g|png|svg|tiff?|webp)",
+        value,
+        re.IGNORECASE,
+    ))
 
 
 def _toggle(stack: list, mark) -> None:

@@ -39,6 +39,18 @@ def test_output_path_rejects_final_token(tmp_path: Path) -> None:
     validate_output_path(tmp_path / "main-manuscript.docx")
 
 
+def test_template_writer_uses_canonical_escape_codec(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Literal a\\>b remains visible.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    assert "a>b" in "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
+
+
 def test_figure_groups_consume_emphasized_caption_and_ignore_filename_alt():
     image = Block("image", text="figure.png", path="figure.png")
     caption = Block("paragraph", "**Figure 1.** Caption")

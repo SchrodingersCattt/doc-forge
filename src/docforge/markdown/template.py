@@ -32,6 +32,7 @@ from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .inline import is_caption, is_filename_alt, key as inline_key
+from ..docxmd.inline import Atom, parse as parse_inline, write as write_inline
 from .blocks import Block
 from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
@@ -739,7 +740,17 @@ def _new_paragraph(
     """Render text with a template paragraph and run-format prototype."""
     temporary = Document()
     paragraph = temporary.add_paragraph()
-    add_inline(paragraph, text.upper() if uppercase else text, bold_default=bold_default)
+    rendered_text = text.upper() if uppercase else text
+    try:
+        parsed_inline = parse_inline(rendered_text)
+        # Keep the legacy renderer for atoms it cannot materialize, but route
+        # ordinary text through the canonical lossless codec first so escapes
+        # and emphasis have one interpretation across DOCX paths.
+        if not any(isinstance(item, Atom) for item in parsed_inline):
+            rendered_text = write_inline(parsed_inline)
+    except ValueError:
+        pass
+    add_inline(paragraph, rendered_text, bold_default=bold_default)
     element = copy.deepcopy(paragraph._p)
     if prototype is not None:
         original_properties = prototype.find(qn("w:pPr"))

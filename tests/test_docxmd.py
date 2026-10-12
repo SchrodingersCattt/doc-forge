@@ -55,6 +55,15 @@ def test_inline_key_and_caption_ignore_emphasis_and_formatting():
     assert not is_caption("figure.png")
 
 
+def test_caption_and_filename_detection_accepts_letter_labels_and_paths():
+    from docforge.docxmd.inline import is_filename_alt
+
+    assert is_caption("Figure A. Overview")
+    assert is_caption("Scheme I. Overview")
+    assert is_filename_alt("figures/abc123.png")
+    assert is_filename_alt("/tmp/image.png")
+
+
 def test_tokens_round_trip_and_diff():
     xml = (
         f'<w:pPr xmlns:w="{W}"><w:pStyle w:val="Body"/><w:spacing w:after="240" w:line="360"/>'
