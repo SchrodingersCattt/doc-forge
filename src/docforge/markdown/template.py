@@ -32,6 +32,7 @@ from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .blocks import Block
+from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
     CITATION_RE,
     CitationStyle,
@@ -422,6 +423,12 @@ def discover_template_styles(
     # accepted by the public API.  Content roles remain strict in both modes
     # when a style profile has not supplied an explicit replacement.
     fallback_roles = {"title", "authors", "affiliations", "abstract_title"}
+    # Some real templates have no named Heading styles and encode all section
+    # levels as numbered bold Normal paragraphs.  Let strict preflight reach
+    # the prototype fallback in that case instead of rejecting the template
+    # before assembly can inspect its paragraph semantics.
+    if numbered_bold_prototypes(document.paragraphs):
+        fallback_roles.update({"heading_1", "heading_2", "heading_3", "references_heading"})
     fallback = "Normal"
     return {
         role: _find_style(
@@ -528,7 +535,9 @@ def _clean_paragraph_prototype(element, *, keep_alignment: bool = False):
             # Direct alignment belongs to the sample paragraph, not the
             # semantic role.  Let the named style define it for generated
             # paragraphs.
-            if child.tag == qn("w:sectPr") or (child.tag == qn("w:jc") and not keep_alignment):
+            if child.tag in {qn("w:sectPr"), qn("w:numPr")} or (
+                child.tag == qn("w:jc") and not keep_alignment
+            ):
                 properties.remove(child)
     for child in list(result):
         if child.tag != qn("w:pPr"):
@@ -543,8 +552,24 @@ def _run_prototype(element, *, prefer_long: bool = False):
     if not runs:
         return None
     if prefer_long:
-        return copy.deepcopy(max(runs, key=lambda run: len(_text_of(run))))
+        # Prototypes often begin with a bold label (for example ``LABEL: ``)
+        # followed by the ordinary body sample.  Prefer the longest neutral
+        # run when one exists so marker styling is not copied to every
+        # generated paragraph; heading/caption prototypes that are entirely
+        # marked still retain their longest styled run.
+        marker_tags = {qn("w:b"), qn("w:bCs"), qn("w:i"), qn("w:iCs"), qn("w:u"), qn("w:vertAlign")}
+        neutral = [
+            run for run in runs
+            if not any(child.tag in marker_tags for child in run.findall("./" + qn("w:rPr") + "/*"))
+        ]
+        candidates = neutral or runs
+        return copy.deepcopy(max(candidates, key=lambda run: len(_text_of(run))))
     return copy.deepcopy(runs[0])
+
+
+def _numbered_bold_prototypes(paragraphs) -> dict[int, object]:
+    """Find the first usable numbered bold paragraph at each list level."""
+    return numbered_bold_prototypes(paragraphs, copy_nodes=True)
 
 
 def _sanitize_run_properties(run_properties, *, keep_bold: bool | None = None):
@@ -747,7 +772,8 @@ def _new_paragraph(
     # title that is intentionally inherited from Normal.
     base_run = (
         _run_prototype(prototype, prefer_long=True)
-        if prototype is not None and style_id != "Normal"
+        if prototype is not None
+        and (style_id != "Normal" or has_clean_direct_bold_run(prototype))
         else None
     )
     base_rpr = _sanitize_run_properties(
@@ -1196,11 +1222,20 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
             return None
         return copy.deepcopy(max(values, key=lambda node: len(_text_of(node)))) if long else copy.deepcopy(values[0])
 
-    # The reference file uses the same heading style IDs as the numbering
-    # definitions; selecting an actual paragraph preserves its numPr/spacing.
-    heading_1 = choose("heading_1")
-    heading_2 = choose("heading_2")
-    heading_3 = choose("heading_3")
+    # Prefer semantic Heading styles.  Some reviewed templates encode their
+    # headings as numbered bold paragraphs under Normal; use the first sample
+    # at the matching numbering level in that case.
+    numbered_headings = _numbered_bold_prototypes(paragraphs)
+    def choose_heading(role: str, level: int):
+        # ``Normal`` is only the preflight fallback for a template whose
+        # headings are represented by numbered bold paragraphs.  Do not let a
+        # body sample under Normal shadow that semantic fallback.
+        selected = None if styles[role] == "Normal" else choose(role)
+        return selected if selected is not None else numbered_headings.get(level - 1)
+
+    heading_1 = choose_heading("heading_1", 1)
+    heading_2 = choose_heading("heading_2", 2)
+    heading_3 = choose_heading("heading_3", 3)
     body_candidates = [
         (index, node)
         for index, node in enumerate(paragraphs)
