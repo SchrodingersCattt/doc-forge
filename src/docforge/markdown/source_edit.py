@@ -23,13 +23,13 @@ from lxml import etree
 from ..docxdiff.package import Package
 from ..docxmd.inline import Atom, parse as parse_inline
 from ..output import validate_output_path
-<<<<<<< HEAD
 from .prototypes import numbered_bold_prototypes
 from .inline import display, key as inline_key
-=======
->>>>>>> 6e34f64 (Strengthen source markdown delta contract)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+TAG_RE = re.compile(r"</?[^>]+>")
+ESCAPE_RE = re.compile(r"\\([\\`*{}\[\]()#+\-.!_>~|])")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 DASHES = str.maketrans(
     {
@@ -59,7 +59,7 @@ def _opaque_kind(element: etree._Element) -> str | None:
         return "opaque"
     if element.find(f".//{{{W}}}drawing") is not None:
         return "drawing"
-    if element.find(f".//{{{W}}}oMath") is not None or element.find(f".//{{{W}}}oMathPara") is not None:
+    if element.find(f".//{{{M}}}oMath") is not None or element.find(f".//{{{M}}}oMathPara") is not None:
         return "equation"
     if element.find(f".//{{{W}}}fldSimple") is not None or element.find(f".//{{{W}}}instrText") is not None:
         return "field"
@@ -318,6 +318,21 @@ def _map_blocks_with_map(
         for number, entry in enumerate(entries)
         if number in source_for_entry and str(entry.get("kind", "text")) == "text"
     ]
+    # A text-map entry is trusted only when it still points at the same
+    # ordinary paragraph that was exported.  Otherwise a stale or tampered
+    # map could redirect editable text into a table/equation and emit invalid
+    # OOXML while appearing to succeed.
+    seen_sources: set[int] = set()
+    for number, entry, child_index in text_entries:
+        child = children[child_index]
+        if _local(child) != "p" or _opaque_kind(child) is not None:
+            raise ValueError(f"text block map entry {number} does not point to an editable paragraph")
+        expected = entry.get("text", entry.get("raw", ""))
+        if _key(str(expected)) != _paragraph_key(child):
+            raise ValueError(f"text block map entry {number} is stale for source index {child_index}")
+        if child_index in seen_sources:
+            raise ValueError(f"text block map reuses source index {child_index}")
+        seen_sources.add(child_index)
     mapping: dict[int, int] = {}
     used: set[int] = set()
     text_blocks = [(index, block) for index, block in enumerate(blocks) if block.kind == "text"]
@@ -545,11 +560,19 @@ def _apply(root: etree._Element, operations: list[tuple]) -> None:
     body = root.find(f"{{{W}}}body")
     children = [child for child in list(body) if etree.QName(child).localname != "sectPr"]
     refs = {index: child for index, child in enumerate(children)}
+
+    def opaque_after(start: int | None) -> etree._Element | None:
+        threshold = -1 if start is None else start
+        return next(
+            (node for index, node in refs.items() if index > threshold and _opaque_kind(node) is not None),
+            None,
+        )
+
     insertion_cursors: dict[int | None, etree._Element | None] = {}
     for operation in operations:
         if operation[0] == "insert":
             next_anchor, blocks, prototypes, style_anchor = operation[1:]
-            next_node = refs.get(next_anchor) if next_anchor is not None else None
+            next_node = refs.get(next_anchor) if next_anchor is not None else opaque_after(style_anchor)
             style_node = refs.get(style_anchor) if style_anchor is not None else prototypes.get("body")
             previous = insertion_cursors.get(next_anchor)
             if previous is not None:
@@ -573,7 +596,7 @@ def _apply(root: etree._Element, operations: list[tuple]) -> None:
                 parent.remove(extra_node)
         if len(new_blocks) > 1:
             next_anchor = operation[4] if len(operation) > 4 else None
-            next_node = refs.get(next_anchor) if next_anchor is not None else None
+            next_node = refs.get(next_anchor) if next_anchor is not None else opaque_after(max(indexes))
             # Place replacement siblings immediately before the next matched
             # source node. This keeps tables, drawings, and other opaque
             # nodes in their original relative location.

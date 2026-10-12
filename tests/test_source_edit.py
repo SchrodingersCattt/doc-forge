@@ -122,6 +122,73 @@ def test_replacement_extras_stay_after_intervening_table(tmp_path):
     assert [etree.QName(child).localname for child in body] == ["p", "tbl", "p", "p", "sectPr"]
 
 
+def test_replacement_extras_stay_before_trailing_table(tmp_path):
+    from zipfile import ZipFile
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Only editable paragraph with enough words for matching.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "trailing opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Only editable paragraph with enough words for matching.", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "Changed editable paragraph with enough words for matching.\n\n"
+        "Extra paragraph before trailing table.",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    with ZipFile(output) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    body = root.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
+    assert [etree.QName(child).localname for child in body] == ["p", "p", "tbl", "sectPr"]
+
+
+def test_omml_paragraph_is_opaque_and_preserved(tmp_path):
+    from zipfile import ZipFile
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    math = etree.SubElement(paragraph._p, "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath")
+    etree.SubElement(math, "{http://schemas.openxmlformats.org/officeDocument/2006/math}r")
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Before equation\n", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Changed equation\n", encoding="utf-8")
+    with __import__("pytest").raises(ValueError, match="unique source paragraph"):
+        apply_markdown_delta(source, baseline, edited, tmp_path / "output.docx", overwrite=True)
+    with ZipFile(source) as archive:
+        assert b"oMath" in archive.read("word/document.xml")
+
+
+def test_text_block_map_rejects_stale_source_index(tmp_path):
+    import json
+    import pytest
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Editable paragraph with enough words for matching.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Editable paragraph with enough words for matching.", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Changed paragraph with enough words for matching.", encoding="utf-8")
+    block_map = export_block_map(source)
+    entry = next(item for item in block_map["blocks"] if item["kind"] == "text")
+    entry["source_index"] = 1
+    block_map_path = tmp_path / "map.json"
+    block_map_path.write_text(json.dumps(block_map), encoding="utf-8")
+    with pytest.raises(ValueError, match="editable paragraph|stale"):
+        apply_markdown_delta(source, baseline, edited, tmp_path / "output.docx", block_map=block_map_path, overwrite=True)
+
+
 def test_markdown_delta_keeps_unedited_paragraphs(tmp_path):
     source = tmp_path / "source.docx"
     document = Document()
@@ -257,7 +324,6 @@ def test_insert_keeps_anchor_size_and_unescapes_markdown(tmp_path):
     assert heading_run.font.size == Pt(14)
     assert citation_run.font.size == Pt(12)
     assert current_doc.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:numPr")) is None
-<<<<<<< HEAD
 
 
 def test_insertions_follow_the_next_mapped_paragraph(tmp_path):
@@ -575,5 +641,3 @@ def test_body_insertion_does_not_borrow_unstyled_title_metrics(tmp_path):
     inserted = Document(output).paragraphs[2]
     assert inserted.text == "Inserted body text."
     assert inserted.runs[0].font.size == Pt(11)
-=======
->>>>>>> 6e34f64 (Strengthen source markdown delta contract)
