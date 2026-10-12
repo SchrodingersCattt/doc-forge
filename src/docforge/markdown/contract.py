@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from docx import Document
-
 from ..output import validate_output_path
 from .blocks import Block
 from .launcher import parse_markdown
@@ -28,6 +26,7 @@ from .template import (
     AssemblyResult,
     assemble_markdown_template,
     discover_template_styles,
+    _load_template_document,
     sha256_file,
     verify_template_output,
     write_assembly_sidecars,
@@ -147,7 +146,10 @@ def build_docx_contract(
     # Strict discovery is the contract's key preflight.  It runs before any
     # destination is touched, so a malformed template cannot leave a stale or
     # partially generated DOCX that looks usable to a caller.
-    roles = discover_template_styles(Document(template_path), strict=True)
+    # Use the same revision-accepting DOCX/DOTX loader as the regular
+    # assembly path.  Opening a real DOTX directly with python-docx fails on
+    # its template content type before semantic preflight can run.
+    roles = discover_template_styles(_load_template_document(template_path), strict=True)
     blocks = _block_audit(source_paths, keep_comments=bool(options.get("keep_comments", False)))
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".docforge-contract-", dir=output.parent) as temporary:
@@ -179,6 +181,10 @@ def build_docx_contract(
             command=command or ["docforge", "contract"],
         )
         manifest_data = json.loads(staged_manifest.read_text(encoding="utf-8"))
+        # The sidecar was generated beside the staged file.  Rewrite its
+        # output descriptor to the destination that is about to be installed
+        # so the published audit never points into the deleted temp directory.
+        manifest_data["output"]["path"] = str(output.resolve())
         manifest_data["contract"] = {
             "schema": "docforge.docx-contract.v1",
             "atomic": True,
