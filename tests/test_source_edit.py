@@ -242,6 +242,37 @@ def test_body_insertion_before_heading_uses_body_formatting(tmp_path):
     assert inserted.runs[0].bold is not True
 
 
+def test_body_insertion_does_not_borrow_unstyled_title_metrics(tmp_path):
+    from docx.shared import Pt
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    title = document.add_paragraph("A very long unstyled title that must not be used as body prototype")
+    title.runs[0].font.size = Pt(18)
+    body = document.add_paragraph("Body anchor with enough words for matching.")
+    body.runs[0].font.size = Pt(11)
+    heading = document.add_paragraph("Heading")
+    heading.runs[0].bold = True
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nHeading",
+        encoding="utf-8",
+    )
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nInserted body text.\n\nHeading",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    inserted = Document(output).paragraphs[2]
+    assert inserted.text == "Inserted body text."
+    assert inserted.runs[0].font.size == Pt(11)
+
+
 def test_mapping_allows_short_headings_and_does_not_jump_to_distant_fuzzy_match():
     assert _map_blocks([_Block("text", "# R")], [(2, "R")]) == {0: 2}
     block = _Block("text", "A sentence with a local edit.")

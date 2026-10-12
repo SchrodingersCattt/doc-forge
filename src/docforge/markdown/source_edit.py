@@ -341,10 +341,33 @@ def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> 
         child for child in children
         if _paragraph_key(child) and not _style_id(child)
     ]
-    # Titles and short front-matter labels are often unstyled. Choose the
-    # richest ordinary paragraph as the body role; placement remains governed
-    # by the separate source anchor.
-    body = max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None)
+    # Prefer an unstyled, non-bold paragraph after the first heading.  This
+    # avoids borrowing title/front-matter typography for body insertions when
+    # both roles are represented as direct formatting rather than named
+    # styles.  Fall back to the longest ordinary paragraph only when no
+    # neutral body sample exists.
+    first_heading = next(
+        (index for index, child in enumerate(children) if _is_heading_paragraph(child)),
+        None,
+    )
+    preferred: list[etree._Element] = []
+    for index, child in enumerate(children):
+        if child in body_candidates and not _has_direct_bold(child) and (
+            first_heading is not None and index > first_heading
+        ):
+            preferred.append(child)
+    neutral = [child for child in body_candidates if not _has_direct_bold(child)]
+    if not preferred and first_heading is not None:
+        before_heading = [
+            child for index, child in enumerate(children)
+            if index < first_heading and child in neutral
+        ]
+        preferred = before_heading[-1:]
+    body = (
+        preferred[0]
+        if preferred
+        else (neutral[-1] if neutral else max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None))
+    )
     if body is None:
         body = next((child for child in children if etree.QName(child).localname == "p"), None)
     headings = {}
@@ -358,6 +381,19 @@ def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> 
         "heading_ids": heading_ids,
         "list_headings": _list_headings(children),
     }
+
+
+def _is_heading_paragraph(element: etree._Element) -> bool:
+    style = _style_id(element).casefold()
+    return style.startswith("heading") or element.find(f"{{{W}}}pPr/{{{W}}}numPr") is not None
+
+
+def _has_direct_bold(element: etree._Element) -> bool:
+    return any(
+        run.find(f"{{{W}}}rPr/{{{W}}}b") is not None
+        or run.find(f"{{{W}}}rPr/{{{W}}}bCs") is not None
+        for run in element.findall(f"{{{W}}}r")
+    )
 
 
 def _style_id(element: etree._Element) -> str:
@@ -567,6 +603,9 @@ def _copy_paragraph_properties(
     copied = copy.deepcopy(properties)
     for numbering in copied.findall(f"{{{W}}}numPr"):
         copied.remove(numbering)
+    for style in copied.findall(f"{{{W}}}pStyle"):
+        if (style.get(f"{{{W}}}val") or "").casefold() in {"listparagraph", "list paragraph"}:
+            copied.remove(style)
     if drop_style:
         for style in copied.findall(f"{{{W}}}pStyle"):
             copied.remove(style)
