@@ -134,10 +134,10 @@ class SparseRedlineError(ValueError):
 
 
 class Context:
-    def __init__(self, author: str, next_id: int):
+    def __init__(self, author: str, next_id: int, revision_date: str | None = None):
         self.author = author
         self.next_id = next_id
-        self.date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.date = revision_date or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def attrs(self) -> dict[str, str]:
         result = {
@@ -2222,6 +2222,7 @@ def create_tracked_docx(
     workers: int | None = None,
     accept_baseline: bool = False,
     report_path: Path | None = None,
+    revision_date: str | None = None,
     allow_block_replace: bool = False,
 ) -> dict[str, int]:
     """Write ``output_path`` as ``current_path`` tracked against ``base_path``.
@@ -2260,7 +2261,7 @@ def create_tracked_docx(
         block for block in base_blocks
         if block.drawing or not _NOISE_PARAGRAPH.fullmatch(_normalize(block.text))
     ]
-    context = Context(author, _next_id(raw_base_root))
+    context = Context(author, _next_id(raw_base_root), revision_date)
     carry_base, save_base_relationships = _base_relationships(base_package, current_package)
     summary: dict[str, int] = {
         "matched": 0,
@@ -2542,6 +2543,7 @@ def create_tracked_docx(
                     "output": str(output_path),
                     "accept_baseline": accept_baseline,
                     "revision_author": author,
+                    "revision_date": context.date,
                     "actions": alignment_report,
                     "summary": summary,
                 },
