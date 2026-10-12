@@ -342,10 +342,10 @@ def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> 
         child for child in children
         if _paragraph_key(child) and not _style_id(child)
     ]
-    # Prefer an unstyled, non-bold paragraph after the first heading.  This
+    # Prefer an unstyled, non-bold paragraph after the first heading. This
     # avoids borrowing title/front-matter typography for body insertions when
     # both roles are represented as direct formatting rather than named
-    # styles.  Fall back to the longest ordinary paragraph only when no
+    # styles. Fall back to the longest ordinary paragraph only when no
     # neutral body sample exists.
     first_heading = next(
         (index for index, child in enumerate(children) if _is_heading_paragraph(child)),
@@ -367,7 +367,11 @@ def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> 
     body = (
         preferred[0]
         if preferred
-        else (neutral[-1] if neutral else max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None))
+        else (
+            neutral[-1]
+            if neutral
+            else max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None)
+        )
     )
     if body is None:
         body = next((child for child in children if etree.QName(child).localname == "p"), None)
@@ -595,6 +599,9 @@ def _copy_paragraph_properties(
     had_numbering = bool(copied.findall(f"{{{W}}}numPr"))
     for numbering in copied.findall(f"{{{W}}}numPr"):
         copied.remove(numbering)
+    for style in copied.findall(f"{{{W}}}pStyle"):
+        if (style.get(f"{{{W}}}val") or "").casefold() in {"listparagraph", "list paragraph"}:
+            copied.remove(style)
     if drop_style:
         for style in list(copied.findall(f"{{{W}}}pStyle")):
             copied.remove(style)

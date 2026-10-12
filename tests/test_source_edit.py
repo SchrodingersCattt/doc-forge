@@ -414,3 +414,32 @@ def test_heading_list_prototype_uses_first_clean_bold_sample_per_level():
     copied = _copy_paragraph_properties(clean)
     assert copied.find(qn("w:numPr")) is None
     assert _run_properties(clean).find(qn("w:b")) is not None
+
+
+def test_body_insertion_does_not_borrow_unstyled_title_metrics(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    title = document.add_paragraph("A very long unstyled title that must not be used as body prototype")
+    title.runs[0].font.size = Pt(18)
+    body = document.add_paragraph("Body anchor with enough words for matching.")
+    body.runs[0].font.size = Pt(11)
+    heading = document.add_paragraph("Heading")
+    heading.runs[0].bold = True
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nHeading",
+        encoding="utf-8",
+    )
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nInserted body text.\n\nHeading",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    inserted = Document(output).paragraphs[2]
+    assert inserted.text == "Inserted body text."
+    assert inserted.runs[0].font.size == Pt(11)
