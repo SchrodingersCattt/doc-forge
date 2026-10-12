@@ -32,6 +32,7 @@ from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .blocks import Block
+from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
     CITATION_RE,
     CitationStyle,
@@ -422,6 +423,12 @@ def discover_template_styles(
     # accepted by the public API.  Content roles remain strict in both modes
     # when a style profile has not supplied an explicit replacement.
     fallback_roles = {"title", "authors", "affiliations", "abstract_title"}
+    # Some real templates have no named Heading styles and encode all section
+    # levels as numbered bold Normal paragraphs.  Let strict preflight reach
+    # the prototype fallback in that case instead of rejecting the template
+    # before assembly can inspect its paragraph semantics.
+    if numbered_bold_prototypes(document.paragraphs):
+        fallback_roles.update({"heading_1", "heading_2", "heading_3", "references_heading"})
     fallback = "Normal"
     return {
         role: _find_style(
@@ -549,55 +556,9 @@ def _run_prototype(element, *, prefer_long: bool = False):
     return copy.deepcopy(runs[0])
 
 
-def _has_direct_bold_run(element) -> bool:
-    """Whether a paragraph contains a direct bold text run."""
-    for run in element.findall(qn("w:r")):
-        properties = run.find(qn("w:rPr"))
-        bold = properties.find(qn("w:b")) if properties is not None else None
-        if bold is None and properties is not None:
-            bold = properties.find(qn("w:bCs"))
-        if bold is None or bold.get(qn("w:val"), "true").lower() in {"0", "false", "off", "none"}:
-            continue
-        if run.find(".//" + qn("w:tab")) is not None:
-            continue
-        if run.find(".//" + qn("w:highlight")) is not None:
-            continue
-        if run.find(".//" + qn("w:instrText")) is not None:
-            continue
-        if any(node.text for node in run.iter(qn("w:t"))):
-            return True
-    return False
-
-
 def _numbered_bold_prototypes(paragraphs) -> dict[int, object]:
     """Find the first usable numbered bold paragraph at each list level."""
-    result: dict[int, object] = {}
-    for paragraph in paragraphs:
-        element = paragraph._p
-        numbering = element.find(qn("w:pPr") + "/" + qn("w:numPr"))
-        if numbering is None or not _has_direct_bold_run(element):
-            continue
-        # Skip list labels, field results, and generated navigation markers.
-        if any(
-            node.tag in {qn("w:tab"), qn("w:hyperlink"), qn("w:fldChar")}
-            for node in element.iter()
-        ):
-            continue
-        if any(
-            token in (node.text or "").upper()
-            for node in element.iter(qn("w:instrText"))
-            for token in ("PAGEREF", "HYPERLINK")
-        ):
-            continue
-        if element.find(".//" + qn("w:highlight")) is not None:
-            continue
-        level_node = numbering.find(qn("w:ilvl"))
-        try:
-            level = int(level_node.get(qn("w:val"), "0")) if level_node is not None else 0
-        except ValueError:
-            continue
-        result.setdefault(level, copy.deepcopy(element))
-    return result
+    return numbered_bold_prototypes(paragraphs, copy_nodes=True)
 
 
 def _sanitize_run_properties(run_properties, *, keep_bold: bool | None = None):
@@ -800,7 +761,8 @@ def _new_paragraph(
     # title that is intentionally inherited from Normal.
     base_run = (
         _run_prototype(prototype)
-        if prototype is not None and style_id != "Normal"
+        if prototype is not None
+        and (style_id != "Normal" or has_clean_direct_bold_run(prototype))
         else None
     )
     base_rpr = _sanitize_run_properties(
@@ -1254,7 +1216,10 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
     # at the matching numbering level in that case.
     numbered_headings = _numbered_bold_prototypes(paragraphs)
     def choose_heading(role: str, level: int):
-        selected = choose(role)
+        # ``Normal`` is only the preflight fallback for a template whose
+        # headings are represented by numbered bold paragraphs.  Do not let a
+        # body sample under Normal shadow that semantic fallback.
+        selected = None if styles[role] == "Normal" else choose(role)
         return selected if selected is not None else numbered_headings.get(level - 1)
 
     heading_1 = choose_heading("heading_1", 1)

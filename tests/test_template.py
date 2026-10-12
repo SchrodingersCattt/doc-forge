@@ -168,6 +168,50 @@ def test_style_discovery_rejects_missing_semantic_role() -> None:
         discover_template_styles(document)
 
 
+def test_numbered_bold_heading_fallback_is_reachable_without_heading_styles(tmp_path: Path) -> None:
+    document = Document()
+    for name in ("TA_Main_Text", "BD_Abstract", "Caption", "References"):
+        if name not in document.styles:
+            document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    # Remove python-docx's built-in Heading styles to model a template whose
+    # headings are represented only by numbered bold Normal paragraphs.
+    for style in list(document.styles._element):
+        if style.get(qn("w:styleId"), "").lower().startswith("heading"):
+            document.styles._element.remove(style)
+    document.add_paragraph("Index\t1")
+    for text, level in (("1 Introduction", 0), ("1.1 Methods", 1)):
+        paragraph = document.add_paragraph(text)
+        paragraph.runs[0].bold = True
+        numbering = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+        numbering.get_or_add_ilvl().val = level
+        numbering.get_or_add_numId().val = 7
+    document.add_paragraph("Body prototype", style="TA_Main_Text")
+    document.add_paragraph("Caption prototype", style="Caption")
+    document.add_paragraph("References prototype", style="References")
+    template = tmp_path / "numbered.docx"
+    document.save(template)
+
+    styles = discover_template_styles(Document(template), strict=True)
+    assert styles["heading_1"] == "Normal"
+    assert styles["heading_2"] == "Normal"
+
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("## New section\n\nGenerated body.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template(
+        [source],
+        template_path=template,
+        output=output,
+        metadata_path=metadata,
+        include_title=False,
+    )
+    heading = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "New section")
+    assert heading.runs[0].bold is True
+    assert heading._p.find(".//" + qn("w:numPr")) is None
+
+
 def _style_complete_template(
     path: Path, *, normal_body_sample: bool = False, centered_body_sample: bool = False
 ) -> None:

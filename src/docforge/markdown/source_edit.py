@@ -20,6 +20,7 @@ from lxml import etree
 
 from ..docxdiff.package import Package
 from ..output import validate_output_path
+from .prototypes import numbered_bold_prototypes
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 TAG_RE = re.compile(r"</?[^>]+>")
@@ -408,65 +409,7 @@ def _list_headings(children: list[etree._Element]) -> dict[int, etree._Element]:
     formatting in those paragraphs. The first example of each level is kept.
     """
 
-    found: dict[int, etree._Element] = {}
-    for child in children:
-        numbering = child.find(f"{{{W}}}pPr/{{{W}}}numPr")
-        if numbering is None or not _has_direct_bold_run(child):
-            continue
-        # List examples frequently start with a tab stop or a field used for
-        # page references.  They describe list mechanics rather than heading
-        # typography and must not become heading anchors.
-        if any(
-            node.tag in {
-                f"{{{W}}}tab",
-                f"{{{W}}}instrText",
-                f"{{{W}}}fldChar",
-                f"{{{W}}}hyperlink",
-            }
-            for node in child.iter()
-        ):
-            continue
-        if any(
-            "PAGEREF" in (node.text or "").upper()
-            or "HYPERLINK" in (node.text or "").upper()
-            for node in child.iter(f"{{{W}}}instrText")
-        ):
-            continue
-        if child.find(f".//{{{W}}}highlight") is not None:
-            continue
-        level_node = numbering.find(f"{{{W}}}ilvl")
-        try:
-            level = int(level_node.get(f"{{{W}}}val") or "0") if level_node is not None else 0
-        except ValueError:
-            continue
-        found.setdefault(level, child)
-    return found
-
-
-def _has_direct_bold_run(paragraph: etree._Element) -> bool:
-    """Return whether a paragraph has a direct bold text run.
-
-    Restricting this to direct ``w:r`` children avoids treating a bold field
-    result or hyperlink as a heading sample.  Such runs often carry tabs,
-    highlight, or field instructions that are layout markers rather than
-    heading typography.
-    """
-    for run in paragraph.findall(f"{{{W}}}r"):
-        properties = run.find(f"{{{W}}}rPr")
-        bold = properties.find(f"{{{W}}}b") if properties is not None else None
-        if bold is None and properties is not None:
-            bold = properties.find(f"{{{W}}}bCs")
-        if bold is None or (bold.get(f"{{{W}}}val", "true").lower() in {"0", "false", "off", "none"}):
-            continue
-        if run.find(f".//{{{W}}}tab") is not None:
-            continue
-        if run.find(f".//{{{W}}}highlight") is not None:
-            continue
-        if run.find(f".//{{{W}}}instrText") is not None:
-            continue
-        if any(node.text for node in run.iter(f"{{{W}}}t")):
-            return True
-    return False
+    return numbered_bold_prototypes(children)
 
 
 def _apply(root: etree._Element, operations: list[tuple]) -> None:
@@ -649,23 +592,18 @@ def _copy_paragraph_properties(
     if properties is None:
         return None
     copied = copy.deepcopy(properties)
-    list_indent = False
-    indentation = copied.find(f"{{{W}}}ind")
-    if indentation is not None:
-        for name in ("left", "right", "hanging"):
-            value = indentation.get(f"{{{W}}}{name}")
-            try:
-                list_indent = list_indent or int(value or "0") != 0
-            except ValueError:
-                list_indent = True
+    had_numbering = bool(copied.findall(f"{{{W}}}numPr"))
     for numbering in copied.findall(f"{{{W}}}numPr"):
         copied.remove(numbering)
-    if drop_style or list_indent:
+    if drop_style:
         for style in list(copied.findall(f"{{{W}}}pStyle")):
-            value = style.get(f"{{{W}}}val", "")
-            semantic_heading = re.fullmatch(r"heading ?[1-9]|h[1-9]", value, re.IGNORECASE)
-            if drop_style or not semantic_heading:
-                copied.remove(style)
+            copied.remove(style)
+    elif had_numbering:
+        # Explicit numbering identifies list identity. Indentation alone is
+        # ordinary semantic paragraph formatting and must remain intact.
+        style = copied.find(f"{{{W}}}pStyle")
+        if style is not None and re.search(r"(?:list|bullet|number)", style.get(f"{{{W}}}val", ""), re.IGNORECASE):
+            copied.remove(style)
     else:
         # A list prototype must not make inserted body paragraphs inherit its
         # list role even when it has no explicit indentation.
