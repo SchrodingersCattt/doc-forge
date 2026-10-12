@@ -80,6 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     contract.add_argument("--keep-comments", action="store_true")
     contract.add_argument("--no-title", action="store_true")
     contract.add_argument("--native-toc", action="store_true")
+    contract.add_argument("--baseline", type=Path, help="Reviewed baseline DOCX to redline against")
+    contract.add_argument("--redline-output", type=Path, help="Tracked DOCX path (defaults beside the clean output)")
+    contract.add_argument("--render", choices=("auto", "word", "libreoffice", "none"), default="auto", help="Render audit engine")
     contract.add_argument("--force", action="store_true", help="Replace existing output and sidecars")
 
     docx_md = sub.add_parser("docx2md", help="DOCX -> GitHub-Flavored Markdown via Pandoc")
@@ -406,6 +409,9 @@ def _cmd_contract(args: argparse.Namespace) -> int:
         keep_comments=args.keep_comments,
         strip_level_one_headings=args.no_title,
         native_toc=args.native_toc,
+        baseline_path=args.baseline,
+        redline_output=args.redline_output,
+        render_engine=args.render,
     )
     print(result.output)
     print(result.manifest)
