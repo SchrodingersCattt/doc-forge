@@ -63,6 +63,7 @@ PASSTHROUGH_LOCAL_NAMES = {
     "pict",
     "object",
     "fldChar",
+    "fldSimple",
     "instrText",
     "footnoteReference",
     "endnoteReference",
@@ -694,7 +695,7 @@ def _opaque_reasons(block: Block) -> tuple[str, ...]:
                 reasons.add("drawing")
             elif local in {"oMath", "oMathPara"}:
                 reasons.add("oMath")
-            elif local in {"fldChar", "instrText"}:
+            elif local in {"fldChar", "fldSimple", "instrText"}:
                 reasons.add("field")
             elif local == "sdt":
                 reasons.add("content-control")

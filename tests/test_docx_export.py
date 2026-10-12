@@ -1002,3 +1002,16 @@ def test_internal_hyperlink_field_does_not_force_whole_paragraph_replacement():
 
     assert not _needs_passthrough(paragraph(r'HYPERLINK \l "ref_34"'))
     assert _needs_passthrough(paragraph("PAGE"))
+
+
+def test_simple_page_field_is_passthrough():
+    from lxml import etree
+    from docforge.docxdiff.redline import W, _needs_passthrough
+
+    paragraph = etree.fromstring(
+        f'<w:p xmlns:w="{W}">'
+        '<w:fldSimple w:instr="PAGE">'
+        '<w:r><w:t>1</w:t></w:r>'
+        '</w:fldSimple></w:p>'
+    )
+    assert _needs_passthrough(paragraph)
