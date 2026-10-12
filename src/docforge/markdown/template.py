@@ -25,14 +25,16 @@ from typing import Iterable, Mapping, Sequence
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
 from lxml import etree
 from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
 from .inline import is_caption, is_filename_alt, key as inline_key
-from ..docxmd.inline import Atom, parse as parse_inline, write as write_inline
+from ..docxmd.inline import Atom, Text, parse as parse_inline
 from .blocks import Block
 from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
@@ -45,7 +47,7 @@ from .citations import (
 from ..output import validate_output_path
 from .launcher import (
     accept_docx_revisions,
-    add_inline,
+    append_inline_math,
     convert_unicode_scripts_in_docx,
     normalize_document_typography,
     parse_markdown,
@@ -741,16 +743,7 @@ def _new_paragraph(
     temporary = Document()
     paragraph = temporary.add_paragraph()
     rendered_text = text.upper() if uppercase else text
-    try:
-        parsed_inline = parse_inline(rendered_text)
-        # Keep the legacy renderer for atoms it cannot materialize, but route
-        # ordinary text through the canonical lossless codec first so escapes
-        # and emphasis have one interpretation across DOCX paths.
-        if not any(isinstance(item, Atom) for item in parsed_inline):
-            rendered_text = write_inline(parsed_inline)
-    except ValueError:
-        pass
-    add_inline(paragraph, rendered_text, bold_default=bold_default)
+    _add_template_inline(paragraph, rendered_text, bold_default=bold_default)
     element = copy.deepcopy(paragraph._p)
     if prototype is not None:
         original_properties = prototype.find(qn("w:pPr"))
@@ -806,6 +799,106 @@ def _new_paragraph(
             run.insert(0, merged_rpr)
     _override_run_fonts(element, font_family, east_asia_font)
     return element
+
+
+_INLINE_MATH_RE = re.compile(r"(?<!\\)(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$)")
+
+
+def _apply_template_marks(run, marks, *, bold_default: bool, size: float) -> None:
+    run.bold = bold_default
+    run.font.size = Pt(size)
+    for mark in marks:
+        kind = mark[0]
+        if kind == "b":
+            run.bold = True
+        elif kind == "i":
+            run.italic = True
+        elif kind == "u":
+            run.underline = True
+        elif kind == "strike":
+            run.font.strike = True
+        elif kind == "code":
+            run.font.name = "Consolas"
+            rpr = run._r.get_or_add_rPr()
+            fonts = rpr.find(qn("w:rFonts"))
+            if fonts is None:
+                fonts = OxmlElement("w:rFonts")
+                rpr.append(fonts)
+            for attribute in ("ascii", "hAnsi", "cs"):
+                fonts.set(qn("w:" + attribute), "Consolas")
+        elif kind == "sub":
+            run.font.subscript = True
+        elif kind == "sup":
+            run.font.superscript = True
+        elif kind == "hl":
+            shading = run._r.get_or_add_rPr().find(qn("w:shd"))
+            if shading is None:
+                shading = OxmlElement("w:shd")
+                run._r.get_or_add_rPr().append(shading)
+            shading.set(qn("w:fill"), "FFF2CC")
+        elif kind == "span":
+            for token in str(mark[1]).split():
+                if token == "-b":
+                    run.bold = True
+                elif token == "-i":
+                    run.italic = True
+                elif token == "-u":
+                    run.underline = True
+                elif token.startswith("color="):
+                    try:
+                        run.font.color.rgb = RGBColor.from_string(token.split("=", 1)[1])
+                    except ValueError:
+                        pass
+
+
+def _append_template_atom(paragraph, atom: Atom, *, bold_default: bool, size: float) -> None:
+    """Materialize lossless inline atoms that have a direct Word equivalent."""
+    kind = atom.kind
+    if kind in {"image", "cite", "ooxml", "annotation-ref", "comment-start", "comment-end", "comment-ref",
+                "bookmark-start", "bookmark-end", "footnote-ref", "endnote-ref"}:
+        raise ValueError(f"inline atom {kind!r} is unsupported in template paragraphs")
+    run = paragraph.add_run()
+    _apply_template_marks(run, atom.marks, bold_default=bold_default, size=size)
+    if kind == "tab":
+        run.add_tab()
+    elif kind == "br":
+        run.add_break(WD_BREAK.PAGE if atom.get("type") == "page" else WD_BREAK.LINE)
+    elif kind == "cr":
+        run.add_break(WD_BREAK.LINE)
+    elif kind in {"nbhyphen", "shy", "sym", "fld-begin", "fld-sep", "fld-end", "instr"}:
+        node = OxmlElement("w:" + ({"nbhyphen": "noBreakHyphen", "shy": "softHyphen", "instr": "instrText"}.get(kind, kind)))
+        if kind == "sym":
+            node.set(qn("w:font"), atom.get("font", "") or "")
+            node.set(qn("w:char"), atom.get("char", "") or "")
+        elif kind in {"fld-begin", "fld-sep", "fld-end"}:
+            node.set(qn("w:fldCharType"), {"fld-begin": "begin", "fld-sep": "separate", "fld-end": "end"}[kind])
+        elif kind == "instr":
+            node.text = atom.get("code", "") or ""
+        run._r.append(node)
+
+
+def _add_template_inline(paragraph, text: str, *, bold_default: bool = False, size: float = 11.0) -> None:
+    """Render template text through the canonical lossless inline codec."""
+    def render_codec_segment(segment: str) -> None:
+        try:
+            items = parse_inline(segment)
+        except ValueError as exc:
+            raise ValueError(f"invalid inline Markdown: {exc}") from exc
+        for item in items:
+            if isinstance(item, Text):
+                run = paragraph.add_run(item.text)
+                _apply_template_marks(run, item.marks, bold_default=bold_default, size=size)
+            else:
+                _append_template_atom(paragraph, item, bold_default=bold_default, size=size)
+
+    # Inline TeX has a separate, well-tested Word-run renderer.  Split only
+    # those spans and let the canonical codec own every surrounding token.
+    position = 0
+    for match in _INLINE_MATH_RE.finditer(text):
+        render_codec_segment(text[position:match.start()])
+        append_inline_math(paragraph, match.group(0)[1:-1], bold_default=bold_default, size=size)
+        position = match.end()
+    render_codec_segment(text[position:])
 
 
 def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *, prototype=None):

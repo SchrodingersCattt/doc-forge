@@ -33,8 +33,8 @@ from dataclasses import dataclass, replace
 from .ooxml import format_tokens, format_value, parse_tokens, split_words
 
 PRECEDENCE = {
-    "rev": 0, "link": 1, "span": 2, "hl": 3, "u": 4, "strike": 5, "b": 6, "i": 7,
-    "sup": 8, "sub": 8,
+    "rev": 0, "link": 1, "span": 2, "code": 3, "hl": 4, "u": 5, "strike": 6, "b": 7, "i": 8,
+    "sup": 9, "sub": 9,
 }
 MILESTONES = {"comment-start", "comment-end", "comment-ref", "bookmark-start", "bookmark-end", "node"}
 _ESCAPABLE = set("\\*_[]{}<>|#=~:!&`+-().")
@@ -72,9 +72,12 @@ class DisplayRun:
     italic: bool = False
     subscript: bool = False
     superscript: bool = False
+    code: bool = False
 
     @property
     def style(self) -> str:
+        if self.code:
+            return "code"
         if self.subscript:
             return "sub"
         if self.superscript:
@@ -98,6 +101,8 @@ class DisplayRun:
             marks.append("sub")
         if self.superscript:
             marks.append("sup")
+        if self.code:
+            marks.append("code")
         return tuple(marks)
 
 
@@ -172,7 +177,7 @@ def _escape(text: str, strict: bool) -> str:
 
 
 _OPENERS = {
-    "link": "[", "span": "[", "hl": "==", "u": "<u>", "strike": "~~", "b": "**", "i": "*",
+    "link": "[", "span": "[", "code": "`", "hl": "==", "u": "<u>", "strike": "~~", "b": "**", "i": "*",
     "sup": "<sup>", "sub": "<sub>",
 }
 
@@ -194,7 +199,7 @@ def _close(mark) -> str:
     if kind == "span":
         return "]{" + mark[1] + "}"
     return {
-        "hl": "==", "u": "</u>", "strike": "~~", "b": "**", "i": "*", "sup": "</sup>",
+        "code": "`", "hl": "==", "u": "</u>", "strike": "~~", "b": "**", "i": "*", "sup": "</sup>",
         "sub": "</sub>",
     }[kind]
 
@@ -389,9 +394,11 @@ def display(markdown: str) -> list[DisplayRun]:
             italic="i" in marks,
             subscript="sub" in marks,
             superscript="sup" in marks,
+            code="code" in marks,
         )
         if result and result[-1].bold == run.bold and result[-1].italic == run.italic \
-                and result[-1].subscript == run.subscript and result[-1].superscript == run.superscript:
+                and result[-1].subscript == run.subscript and result[-1].superscript == run.superscript \
+                and result[-1].code == run.code:
             previous = result[-1]
             result[-1] = replace(previous, text=previous.text + run.text)
         else:
@@ -520,6 +527,17 @@ def _parse_into(text: str, outer: tuple, items: list) -> None:
                 raise ValueError(f"Unbalanced emphasis in: {text!r}")
             index += run
             continue
+        if char == "`":
+            run = 1
+            while index + run < len(text) and text[index + run] == "`":
+                run += 1
+            delimiter = "`" * run
+            end = text.find(delimiter, index + run)
+            if end >= 0:
+                flush()
+                items.append(Text(text[index + run:end], marks() + (("code",),)))
+                index = end + run
+                continue
         if text.startswith("==", index) or text.startswith("~~", index):
             flush()
             _toggle(stack, ("hl",) if char == "=" else ("strike",))
