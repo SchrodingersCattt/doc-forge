@@ -48,6 +48,27 @@ def test_inline_display_decodes_visible_runs_and_pandoc_escapes():
     ]
 
 
+def test_inline_display_preserves_lossless_atom_boundaries():
+    runs = display("a<tab/>b<br/>\\citep{smith2020}![figure](media/figure.png)")
+    assert [run.text for run in runs] == ["a", "\t", "b", "\n", "\\citep{smith2020}", "figure"]
+    assert [run.atom.kind for run in runs if run.atom is not None] == ["tab", "br", "cite", "image"]
+
+
+def test_markdown_writer_uses_canonical_codec_for_inline_atoms():
+    from docforge.markdown.launcher import add_body_paragraph, make_empty_doc
+
+    document = make_empty_doc()
+    paragraph = add_body_paragraph(
+        document,
+        'left<tab/>right<br/>next<nbhyphen/><sym font="Arial" char="F06E"/>',
+    )
+    xml = etree.tostring(paragraph._p, encoding="unicode")
+    assert "<w:tab" in xml
+    assert "<w:br" in xml
+    assert "<w:noBreakHyphen" in xml
+    assert "<w:sym" in xml and 'w:char="F06E"' in xml
+
+
 def test_inline_key_and_caption_ignore_emphasis_and_formatting():
     assert key("1. **Figure 1.**  A\u00a0result – confirmed") == "Figure 1. A result - confirmed"
     assert is_caption("**Figure 1.** Caption")

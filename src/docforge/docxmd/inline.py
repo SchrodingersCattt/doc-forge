@@ -30,6 +30,12 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 
+from docx.enum.text import WD_BREAK
+from docx.enum.text import WD_COLOR_INDEX
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
+
 from .ooxml import format_tokens, format_value, parse_tokens, split_words
 
 PRECEDENCE = {
@@ -37,7 +43,7 @@ PRECEDENCE = {
     "sup": 9, "sub": 9,
 }
 MILESTONES = {"comment-start", "comment-end", "comment-ref", "bookmark-start", "bookmark-end", "node"}
-_ESCAPABLE = set("\\*_[]{}<>|#=~:!&`+-().")
+_ESCAPABLE = set("\\*_[]{}<>|#=~:!&`+-().$")
 _TAG = re.compile(r"<(/?)([a-z][a-z0-9-]*)((?:\s+[a-zA-Z_:][\w:.-]*=\"(?:[^\"\\]|\\.)*\")*)\s*(/?)>")
 _ATTR = re.compile(r"([a-zA-Z_:][\w:.-]*)=\"((?:[^\"\\]|\\.)*)\"")
 _ENTITY = re.compile(r"&#(x[0-9A-Fa-f]+|\d+);")
@@ -73,6 +79,7 @@ class DisplayRun:
     subscript: bool = False
     superscript: bool = False
     code: bool = False
+    atom: "Atom | None" = None
 
     @property
     def style(self) -> str:
@@ -384,8 +391,32 @@ def display(markdown: str) -> list[DisplayRun]:
         return []
     items = parse(_underscore_emphasis(markdown))
     result: list[DisplayRun] = []
+
+    def atom_text(atom: Atom) -> str:
+        if atom.kind == "sym":
+            value = (atom.get("char") or "").strip()
+            if not value:
+                return ""
+            try:
+                return chr(int(value, 16))
+            except (TypeError, ValueError, OverflowError):
+                return ""
+        return {
+            "tab": "\t",
+            "br": "\n",
+            "cr": "\n",
+            "nbhyphen": "\u2011",
+            "shy": "\u00ad",
+            "cite": "\\citep{" + (atom.get("keys") or "") + "}",
+            "image": atom.get("alt", "") or "",
+            "instr": atom.get("code", "") or "",
+        }.get(atom.kind, "")
+
     for item in items:
-        if not isinstance(item, Text) or not item.text:
+        if isinstance(item, Atom):
+            result.append(DisplayRun(atom_text(item), atom=item))
+            continue
+        if not item.text:
             continue
         marks = {mark[0] for mark in item.marks if mark}
         run = DisplayRun(
@@ -396,7 +427,7 @@ def display(markdown: str) -> list[DisplayRun]:
             superscript="sup" in marks,
             code="code" in marks,
         )
-        if result and result[-1].bold == run.bold and result[-1].italic == run.italic \
+        if result and result[-1].atom is None and result[-1].bold == run.bold and result[-1].italic == run.italic \
                 and result[-1].subscript == run.subscript and result[-1].superscript == run.superscript \
                 and result[-1].code == run.code:
             previous = result[-1]
@@ -404,6 +435,138 @@ def display(markdown: str) -> list[DisplayRun]:
         else:
             result.append(run)
     return result
+
+
+_INLINE_MATH_RE = re.compile(r"(?<!\\)(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$)")
+_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.DOTALL)
+
+
+def _apply_marks(run, marks, *, bold_default: bool, size: float) -> None:
+    run.bold = bold_default
+    run.font.size = Pt(size)
+    for mark in marks:
+        kind = mark[0]
+        if kind == "b":
+            run.bold = True
+        elif kind == "i":
+            run.italic = True
+        elif kind == "u":
+            run.underline = True
+        elif kind == "strike":
+            run.font.strike = True
+        elif kind == "code":
+            run.font.name = "Consolas"
+            rpr = run._r.get_or_add_rPr()
+            fonts = rpr.find(qn("w:rFonts"))
+            if fonts is None:
+                fonts = OxmlElement("w:rFonts")
+                rpr.append(fonts)
+            for attribute in ("ascii", "hAnsi", "cs"):
+                fonts.set(qn("w:" + attribute), "Consolas")
+        elif kind == "sub":
+            run.font.subscript = True
+        elif kind == "sup":
+            run.font.superscript = True
+        elif kind == "hl":
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        elif kind == "span":
+            for token in str(mark[1]).split():
+                if token == "-b":
+                    run.bold = True
+                elif token == "-i":
+                    run.italic = True
+                elif token == "-u":
+                    run.underline = True
+                elif token.startswith("color="):
+                    try:
+                        run.font.color.rgb = RGBColor.from_string(token.split("=", 1)[1])
+                    except ValueError:
+                        pass
+
+
+def _append_atom(paragraph, atom: Atom, *, bold_default: bool, size: float) -> None:
+    if atom.kind in {"image", "ooxml"}:
+        raise ValueError(f"inline atom {atom.kind!r} requires a block-aware writer")
+    run = paragraph.add_run()
+    _apply_marks(run, atom.marks, bold_default=bold_default, size=size)
+    if atom.kind == "tab":
+        run.add_tab()
+    elif atom.kind in {"br", "cr"}:
+        run.add_break(WD_BREAK.PAGE if atom.kind == "br" and atom.get("type") == "page" else WD_BREAK.LINE)
+    elif atom.kind in {"nbhyphen", "shy", "sym", "fld-begin", "fld-sep", "fld-end", "instr"}:
+        node = OxmlElement("w:" + {"nbhyphen": "noBreakHyphen", "shy": "softHyphen", "instr": "instrText"}.get(atom.kind, atom.kind))
+        if atom.kind == "sym":
+            node.set(qn("w:font"), atom.get("font", "") or "")
+            node.set(qn("w:char"), atom.get("char", "") or "")
+        elif atom.kind in {"fld-begin", "fld-sep", "fld-end"}:
+            node.set(qn("w:fldCharType"), {"fld-begin": "begin", "fld-sep": "separate", "fld-end": "end"}[atom.kind])
+        elif atom.kind == "instr":
+            node.text = atom.get("code", "") or ""
+        run._r.append(node)
+    elif atom.kind == "cite":
+        run.text = "\\citep{" + (atom.get("keys") or "") + "}"
+    elif atom.kind in MILESTONES:
+        # Milestones have no visible run content but are intentionally kept in
+        # the lossless parser and rejected by source-edit before this point.
+        paragraph._p.remove(run._r)
+    else:
+        raise ValueError(f"unsupported inline atom {atom.kind!r}")
+
+
+def render(paragraph, markdown: str, *, bold_default: bool = False, size: float = 11.0, math_renderer=None) -> None:
+    """Write canonical inline Markdown to a python-docx paragraph.
+
+    All formatting and non-text atoms come from :func:`parse`; a caller may
+    supply ``math_renderer`` for the separate native-OMML representation.
+    """
+    position = 0
+
+    def segment(value: str) -> None:
+        cursor = 0
+        for match in _COMMENT_RE.finditer(value):
+            segment(value[cursor:match.start()])
+            body = match.group(1).strip()
+            if body.upper().startswith("TODO:"):
+                body = body[5:].strip()
+            run = paragraph.add_run(f"[TODO: {body}]")
+            _apply_marks(run, (), bold_default=bold_default, size=size)
+            cursor = match.end()
+        tail = value[cursor:]
+        if not tail:
+            return
+        try:
+            items = parse(tail)
+        except ValueError as exc:
+            raise ValueError(f"invalid inline Markdown: {exc}") from exc
+        for item in items:
+            if isinstance(item, Text):
+                text = item.text
+                if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and text.startswith(" "):
+                    text = text.lstrip(" ")
+                if not text:
+                    continue
+                run = paragraph.add_run(text)
+                _apply_marks(run, item.marks, bold_default=bold_default, size=size)
+            else:
+                _append_atom(paragraph, item, bold_default=bold_default, size=size)
+
+    for match in _INLINE_MATH_RE.finditer(markdown):
+        segment(markdown[position:match.start()])
+        if math_renderer is None:
+            segment(match.group(0))
+        else:
+            before = paragraph.runs[-1] if paragraph.runs else None
+            first_math_run = len(paragraph.runs)
+            math_renderer(paragraph, match.group(0)[1:-1], bold_default=bold_default, size=size)
+            if (
+                before is not None
+                and before.text.endswith(" ")
+                and len(paragraph.runs) > first_math_run
+                and paragraph.runs[first_math_run].text.startswith(" ")
+            ):
+                before.text = before.text.rstrip(" ")
+        position = match.end()
+    segment(markdown[position:])
 
 
 _DASHES = {
@@ -636,5 +799,5 @@ def _parse_into(text: str, outer: tuple, items: list) -> None:
 
 __all__ = [
     "Atom", "DisplayRun", "MILESTONES", "Run", "Text", "display", "is_caption",
-    "is_filename_alt", "key", "normalize", "parse", "parse_attr_words", "sort_marks", "write",
+    "is_filename_alt", "key", "normalize", "parse", "parse_attr_words", "render", "sort_marks", "write",
 ]
