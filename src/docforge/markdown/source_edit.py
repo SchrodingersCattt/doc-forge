@@ -961,6 +961,12 @@ def roundtrip_source_docx(
     report = Path(report) if report is not None else workdir / "roundtrip.manifest.json"
     if len({output.resolve(), redline.resolve(), report.resolve()}) != 3:
         raise ValueError("roundtrip output, redline, and report paths must be distinct")
+    if output.resolve() == source.resolve() or redline.resolve() == source.resolve():
+        raise ValueError("roundtrip outputs must not overwrite the source package")
+    if not force:
+        for target in (output, redline, report):
+            if target.exists():
+                raise FileExistsError(f"Output exists; pass --force to overwrite: {target}")
     validate_output_path(output)
     validate_output_path(redline)
     validate_output_path(report, label="report")
@@ -1013,6 +1019,7 @@ def roundtrip_source_docx(
             overwrite=True,
             accept_baseline=True,
             report_path=redline_report,
+            revision_date="1970-01-01T00:00:00Z",
             workers=1,
         )
         render_receipt: dict[str, Any] = {"enabled": False}
@@ -1024,10 +1031,14 @@ def roundtrip_source_docx(
                 "enabled": True,
                 "engine": render_engine,
                 "documents": [
-                    {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    {"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                     for path in pdfs
                 ],
             }
+        redline_report_payload = json.loads(redline_report.read_text(encoding="utf-8"))
+        redline_report_payload["baseline"] = str(baseline.resolve())
+        redline_report_payload["current"] = str(output.resolve())
+        redline_report_payload["output"] = str(redline.resolve())
         payload = {
             "schema": "docforge.source-roundtrip.v1",
             "source": {"path": str(source.resolve()), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
@@ -1045,7 +1056,7 @@ def roundtrip_source_docx(
                 "sha256": hashlib.sha256(staged_redline.read_bytes()).hexdigest(),
                 "summary": redline_summary,
                 "accepted_view_equivalent": True,
-                "report": json.loads(redline_report.read_text(encoding="utf-8")),
+                "report": redline_report_payload,
             },
             "render": render_receipt,
         }
@@ -1054,9 +1065,26 @@ def roundtrip_source_docx(
         output.parent.mkdir(parents=True, exist_ok=True)
         redline.parent.mkdir(parents=True, exist_ok=True)
         report.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged_output, output)
-        os.replace(staged_redline, redline)
-        os.replace(staged_report, report)
+        targets = ((staged_output, output), (staged_redline, redline), (staged_report, report))
+        backups: dict[Path, Path] = {}
+        installed: list[Path] = []
+        try:
+            for _staged, target in targets:
+                if target.exists():
+                    backup = stage / (target.name + ".previous")
+                    shutil.copy2(target, backup)
+                    backups[target] = backup
+            for staged_path, target in targets:
+                os.replace(staged_path, target)
+                installed.append(target)
+        except Exception:
+            for target in installed:
+                backup = backups.get(target)
+                if backup is not None and backup.exists():
+                    os.replace(backup, target)
+                elif target.exists():
+                    target.unlink()
+            raise
     return payload
 
 

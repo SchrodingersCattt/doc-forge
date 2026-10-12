@@ -76,6 +76,7 @@ def test_mapping_aligns_greedy_duplicate_with_later_exact_anchor():
 
 
 def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
+    import json
     source = tmp_path / "source.docx"
     document = Document()
     document.add_paragraph("Repeated paragraph.")
@@ -104,6 +105,9 @@ def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
     assert report["patch"]["replaced"] == 1
     assert report["redline"]["summary"]["changed"] == 1
     assert report["redline"]["accepted_view_equivalent"] is True
+    assert report["redline"]["report"]["revision_date"] == "1970-01-01T00:00:00Z"
+    assert report["redline"]["report"]["current"] == str(output.resolve())
+    assert "docforge-roundtrip-" not in json.dumps(report)
     assert output.exists() and tracked.exists()
     assert Document(output).tables[0].cell(0, 0).text == "opaque table"
 
