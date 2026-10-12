@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from docforge.docxmd import roundtrip
 
 
@@ -69,3 +71,43 @@ def test_roundtrip_audit_names_package_patch_mode(tmp_path: Path, monkeypatch) -
     report = roundtrip(source, work, section_map=tmp_path / "map.json", output=tmp_path / "out.docx")
     assert report["mode"] == "rebuild"
     assert report["output_sha256"] == _sha(tmp_path / "out.docx")
+
+
+def test_roundtrip_checks_output_before_exact_source_reuse(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    output = tmp_path / "out.docx"
+    output.write_bytes(b"KEEP")
+
+    with pytest.raises(FileExistsError, match="out.docx"):
+        roundtrip(source, work, section_map=tmp_path / "map.json", output=output)
+    assert output.read_bytes() == b"KEEP"
+
+
+def test_roundtrip_validates_manifest_paths_before_publishing(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    payload = json.loads((work / "manifest.json").read_text())
+    payload["section_sha256"] = {"../outside.md": _sha(outside)}
+    (work / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    output = tmp_path / "out.docx"
+
+    with pytest.raises(ValueError, match="escapes the workdir"):
+        roundtrip(source, work, section_map=tmp_path / "map.json", output=output)
+    assert not output.exists()
+
+
+def test_roundtrip_rejects_track_policy_mismatch(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    payload = json.loads((work / "manifest.json").read_text())
+    payload["track_changes"] = "all"
+    (work / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="track_changes"):
+        roundtrip(source, work, section_map=tmp_path / "map.json", output=tmp_path / "out.docx")

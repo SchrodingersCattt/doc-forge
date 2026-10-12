@@ -372,6 +372,12 @@ def _exact_roundtrip(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema") != "docforge.docx2md.v1":
         raise ValueError("roundtrip workdir manifest must use schema docforge.docx2md.v1")
+    manifest_track_changes = manifest.get("track_changes")
+    if manifest_track_changes is not None and manifest_track_changes != track_changes:
+        raise ValueError(
+            "roundtrip workdir was exported with track_changes="
+            f"{manifest_track_changes!r}; requested {track_changes!r}"
+        )
     if manifest.get("source_sha256") != _file_sha256(source):
         raise ValueError("roundtrip workdir was created from a different input DOCX")
     snapshot = _bundle_path(work, str(manifest.get("source_copy", "")), label="source_copy")
@@ -380,23 +386,43 @@ def _exact_roundtrip(
     output = Path(output) if output is not None else work / "roundtrip.docx"
     output.parent.mkdir(parents=True, exist_ok=True)
     audit_path = output.with_suffix(".manifest.json")
-    if audit_path.exists() and not force:
-        raise FileExistsError(f"Output exists; pass --force to overwrite: {audit_path}")
+    if not force:
+        if output.exists():
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+        if audit_path.exists():
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {audit_path}")
+
+    # Validate every manifest-controlled path before the reuse helper can
+    # publish the source snapshot.  Resolving only after the copy allowed a
+    # ``../outside.md`` entry to escape the bundle and left an output behind
+    # even though the command eventually rejected the manifest.
+    section_hashes = dict(manifest.get("section_sha256", {}))
+    media_hashes = dict(manifest.get("media_sha256", {}))
+    section_paths = {
+        name: _bundle_path(work, str(name), label="section")
+        for name in section_hashes
+    }
+    media_paths = {
+        name: _bundle_path(work, str(name), label="media")
+        for name in media_hashes
+    }
+    if any(not path.is_file() for path in (*section_paths.values(), *media_paths.values())):
+        # Missing files are handled as ordinary content changes below; this
+        # branch only ensures containment is checked before any publication.
+        pass
 
     # The existing helper verifies every section and media digest and performs
     # the byte-for-byte copy for a true no-op.
     unchanged = reuse_unchanged_roundtrip_source(manifest_path, output, force=force)
-    section_hashes = dict(manifest.get("section_sha256", {}))
-    media_hashes = dict(manifest.get("media_sha256", {}))
     current_section_hashes = {
-        name: _file_sha256(_bundle_path(work, name, label="section"))
+        name: _file_sha256(path)
         for name in section_hashes
-        if _bundle_path(work, name, label="section").is_file()
+        if (path := section_paths[name]).is_file()
     }
     changed_sections = sorted(name for name, expected in section_hashes.items() if current_section_hashes.get(name) != expected)
     changed_media = sorted(
         name for name, expected in media_hashes.items()
-        if not _bundle_path(work, name, label="media").is_file() or _file_sha256(_bundle_path(work, name, label="media")) != expected
+        if not media_paths[name].is_file() or _file_sha256(media_paths[name]) != expected
     )
     if unchanged:
         mode = "exact-source-reuse"
