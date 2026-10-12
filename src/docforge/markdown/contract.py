@@ -142,6 +142,8 @@ def build_docx_contract(
         raise FileNotFoundError(template_path)
     if not metadata_path.is_file():
         raise FileNotFoundError(metadata_path)
+    if output.resolve() == template_path.resolve():
+        raise ValueError("Contract output must differ from the template path")
 
     # Strict discovery is the contract's key preflight.  It runs before any
     # destination is touched, so a malformed template cannot leave a stale or

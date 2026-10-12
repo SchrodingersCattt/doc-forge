@@ -79,3 +79,22 @@ def test_contract_accepts_dotx_and_publishes_final_output_descriptor(tmp_path: P
     manifest = output.with_suffix(".manifest.json")
     assert manifest.exists()
     assert json.loads(manifest.read_text(encoding="utf-8"))["output"]["path"] == str(output.resolve())
+
+
+def test_contract_rejects_template_output_collision(tmp_path: Path) -> None:
+    document = Document()
+    for name in ("BBAuthorName", "FACorrespondingAuthorFootnote", "BDAbstract", "TA_Main_Text", "EndNote Bibliography"):
+        document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Title", style="BBAuthorName")
+    document.add_paragraph("Body", style="TA_Main_Text")
+    template = tmp_path / "template.docx"
+    document.save(template)
+    source = tmp_path / "body.md"
+    source.write_text("Body paragraph.\n", encoding="utf-8")
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="differ from the template"):
+        build_docx_contract(
+            [source], template_path=template, metadata_path=metadata, output=template, force=True
+        )
