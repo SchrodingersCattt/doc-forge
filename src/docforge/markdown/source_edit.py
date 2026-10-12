@@ -209,7 +209,12 @@ def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[
             return None
         ratio = SequenceMatcher(a=block.key, b=key, autojunk=False).ratio()
         if not exact and ratio < 0.92:
-            return None
+            # Short headings and labels have too little text for the normal
+            # ratio gate to survive a single typo (``fooo`` vs ``foo`` is
+            # 0.857).  Accept only one edit in a compact key so this does
+            # not turn arbitrary short prose into a fuzzy anchor.
+            if max(len(block.key), len(key)) > 8 or _edit_distance(block.key, key) > 1:
+                return None
         return (1, 1 if exact else 0, ratio)
 
     def add_score(left: tuple[int, int, float], right: tuple[int, int, float]) -> tuple[int, int, float]:
@@ -235,7 +240,20 @@ def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[
                 next_key = source[source_index + 1][1]
                 next_ratio = SequenceMatcher(a=block.key, b=next_key, autojunk=False).ratio()
                 if score[2] - next_ratio < 0.04:
-                    score = None
+                    # Preserve a duplicate run when the following Markdown
+                    # block is an exact match for the following source node.
+                    # Without this exception, ``fooo, foo`` against
+                    # ``foo, foo`` loses the earlier fuzzy pair even though
+                    # the order-preserving alignment is unambiguous.
+                    duplicate_run = (
+                        source_index + 1 < len(source)
+                        and block_index + 1 < len(blocks)
+                        and blocks[block_index + 1].kind == "text"
+                        and blocks[block_index + 1].key == source[source_index + 1][1]
+                        and source[source_index + 1][1] == key
+                    )
+                    if not duplicate_run:
+                        score = None
             if score is not None:
                 tail_score, tail_path = solve(block_index + 1, source_index + 1, True)
                 options.append((add_score(score, tail_score), ((block_index, child),) + tail_path))
@@ -257,6 +275,23 @@ def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[
 
     _score, path = solve(0, 0, True)
     return {block_index: child_index for block_index, child_index in path}
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Return Levenshtein distance for the short fuzzy-key exception."""
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
 
 
 def _anchor_before(blocks: list[_Block], mapping: dict[int, int], start: int) -> int:

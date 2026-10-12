@@ -210,6 +210,15 @@ def test_mapping_solves_exact_and_fuzzy_duplicates_in_one_ordered_pass():
     assert mapping == {0: 0, 1: 1}
 
 
+def test_mapping_keeps_short_fuzzy_duplicate_before_exact_duplicate():
+    # A one-character typo in a short key must not let the later exact
+    # duplicate consume the first source paragraph.
+    assert _map_blocks(
+        [_Block("text", "fooo"), _Block("text", "foo")],
+        [(0, "foo"), (1, "foo")],
+    ) == {0: 0, 1: 1}
+
+
 def test_body_insertion_before_heading_uses_body_formatting(tmp_path):
     source = tmp_path / "source.docx"
     document = Document()
