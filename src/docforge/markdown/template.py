@@ -528,7 +528,9 @@ def _clean_paragraph_prototype(element, *, keep_alignment: bool = False):
             # Direct alignment belongs to the sample paragraph, not the
             # semantic role.  Let the named style define it for generated
             # paragraphs.
-            if child.tag == qn("w:sectPr") or (child.tag == qn("w:jc") and not keep_alignment):
+            if child.tag in {qn("w:sectPr"), qn("w:numPr")} or (
+                child.tag == qn("w:jc") and not keep_alignment
+            ):
                 properties.remove(child)
     for child in list(result):
         if child.tag != qn("w:pPr"):
@@ -545,6 +547,57 @@ def _run_prototype(element, *, prefer_long: bool = False):
     if prefer_long:
         return copy.deepcopy(max(runs, key=lambda run: len(_text_of(run))))
     return copy.deepcopy(runs[0])
+
+
+def _has_direct_bold_run(element) -> bool:
+    """Whether a paragraph contains a direct bold text run."""
+    for run in element.findall(qn("w:r")):
+        properties = run.find(qn("w:rPr"))
+        bold = properties.find(qn("w:b")) if properties is not None else None
+        if bold is None and properties is not None:
+            bold = properties.find(qn("w:bCs"))
+        if bold is None or bold.get(qn("w:val"), "true").lower() in {"0", "false", "off", "none"}:
+            continue
+        if run.find(".//" + qn("w:tab")) is not None:
+            continue
+        if run.find(".//" + qn("w:highlight")) is not None:
+            continue
+        if run.find(".//" + qn("w:instrText")) is not None:
+            continue
+        if any(node.text for node in run.iter(qn("w:t"))):
+            return True
+    return False
+
+
+def _numbered_bold_prototypes(paragraphs) -> dict[int, object]:
+    """Find the first usable numbered bold paragraph at each list level."""
+    result: dict[int, object] = {}
+    for paragraph in paragraphs:
+        element = paragraph._p
+        numbering = element.find(qn("w:pPr") + "/" + qn("w:numPr"))
+        if numbering is None or not _has_direct_bold_run(element):
+            continue
+        # Skip list labels, field results, and generated navigation markers.
+        if any(
+            node.tag in {qn("w:tab"), qn("w:hyperlink"), qn("w:fldChar")}
+            for node in element.iter()
+        ):
+            continue
+        if any(
+            token in (node.text or "").upper()
+            for node in element.iter(qn("w:instrText"))
+            for token in ("PAGEREF", "HYPERLINK")
+        ):
+            continue
+        if element.find(".//" + qn("w:highlight")) is not None:
+            continue
+        level_node = numbering.find(qn("w:ilvl"))
+        try:
+            level = int(level_node.get(qn("w:val"), "0")) if level_node is not None else 0
+        except ValueError:
+            continue
+        result.setdefault(level, copy.deepcopy(element))
+    return result
 
 
 def _sanitize_run_properties(run_properties, *, keep_bold: bool | None = None):
@@ -746,7 +799,7 @@ def _new_paragraph(
     # do not leak a direct font size from an unrelated sample paragraph into a
     # title that is intentionally inherited from Normal.
     base_run = (
-        _run_prototype(prototype, prefer_long=True)
+        _run_prototype(prototype)
         if prototype is not None and style_id != "Normal"
         else None
     )
@@ -797,7 +850,7 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
     style.set(qn("w:val"), style_id)
     _apply_style_to_paragraph(element, document, style_id)
     base_run = (
-        _run_prototype(prototype, prefer_long=True)
+        _run_prototype(prototype)
         if prototype is not None and style_id != "Normal"
         else None
     )
@@ -1196,11 +1249,17 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
             return None
         return copy.deepcopy(max(values, key=lambda node: len(_text_of(node)))) if long else copy.deepcopy(values[0])
 
-    # The reference file uses the same heading style IDs as the numbering
-    # definitions; selecting an actual paragraph preserves its numPr/spacing.
-    heading_1 = choose("heading_1")
-    heading_2 = choose("heading_2")
-    heading_3 = choose("heading_3")
+    # Prefer semantic Heading styles.  Some reviewed templates encode their
+    # headings as numbered bold paragraphs under Normal; use the first sample
+    # at the matching numbering level in that case.
+    numbered_headings = _numbered_bold_prototypes(paragraphs)
+    def choose_heading(role: str, level: int):
+        selected = choose(role)
+        return selected if selected is not None else numbered_headings.get(level - 1)
+
+    heading_1 = choose_heading("heading_1", 1)
+    heading_2 = choose_heading("heading_2", 2)
+    heading_3 = choose_heading("heading_3", 3)
     body_candidates = [
         (index, node)
         for index, node in enumerate(paragraphs)
@@ -1505,7 +1564,7 @@ def _with_continuous_section(section):
 def _apply_template_run_formatting(element, prototype) -> None:
     if prototype is None:
         return
-    base = _run_prototype(prototype, prefer_long=True)
+    base = _run_prototype(prototype)
     base_rpr = _sanitize_run_properties(base.find(qn("w:rPr")) if base is not None else None)
     for run in element.findall(".//" + qn("w:r")):
         source = run.find(qn("w:rPr"))
