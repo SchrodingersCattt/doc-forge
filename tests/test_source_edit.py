@@ -7,9 +7,301 @@ from docx.shared import Pt
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
-from docforge.markdown.source_edit import apply_markdown_delta
-from docforge.markdown.source_edit import _copy_paragraph_properties, _list_headings, _run_properties
-from docforge.markdown.source_edit import _Block, _map_blocks
+from docforge.markdown.source_edit import (
+    _Block,
+    _copy_paragraph_properties,
+    _list_headings,
+    _map_blocks,
+    _run_properties,
+    apply_markdown_delta,
+    export_block_map,
+    roundtrip_source_docx,
+)
+
+
+def test_block_map_and_noop_preserve_document_xml_and_media(tmp_path):
+    from zipfile import ZipFile
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("A source paragraph with enough text to map.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    edited = tmp_path / "edited.md"
+    body = "A source paragraph with enough text to map.\n\n| value |\n| --- |\n| opaque table |"
+    baseline.write_text(body, encoding="utf-8")
+    edited.write_text(body, encoding="utf-8")
+    block_map = tmp_path / "blocks.json"
+    payload = export_block_map(source, block_map)
+    assert payload["text"]["0"] == 0
+    assert any(entry["kind"] == "table" and entry["opaque_id"] for entry in payload["blocks"])
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, block_map=block_map, overwrite=True)
+    with ZipFile(source) as left, ZipFile(output) as right:
+        assert source.read_bytes() == output.read_bytes()
+        assert left.read("word/document.xml") == right.read("word/document.xml")
+        assert {
+            name: left.read(name)
+            for name in left.namelist()
+            if name.startswith("word/media/")
+        } == {
+            name: right.read(name)
+            for name in right.namelist()
+            if name.startswith("word/media/")
+        }
+
+
+def test_mapping_solves_fuzzy_duplicate_before_later_exact_match():
+    assert _map_blocks(
+        [_Block("text", "A repeated sentence with one edit."), _Block("text", "A repeated sentence.")],
+        [(0, "A repeated sentence with one edit!"), (1, "A repeated sentence.")],
+    ) == {0: 0, 1: 1}
+
+
+def test_mapping_keeps_short_fuzzy_duplicate_before_exact_match():
+    assert _map_blocks(
+        [_Block("text", "fooo"), _Block("text", "foo")],
+        [(0, "foo"), (1, "foo")],
+    ) == {0: 0, 1: 1}
+
+
+def test_mapping_aligns_greedy_duplicate_with_later_exact_anchor():
+    blocks = [
+        _Block("text", "Repeated paragraph!"),
+        _Block("text", "Repeated paragraph."),
+        _Block("text", "The unique trailing anchor remains unchanged."),
+    ]
+    source = [
+        (0, "Repeated paragraph."),
+        (1, "Repeated paragraph."),
+        (2, "The unique trailing anchor remains unchanged."),
+    ]
+    assert _map_blocks(blocks, source) == {0: 0, 1: 1, 2: 2}
+
+
+def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
+    import json
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Repeated paragraph.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.add_paragraph("Repeated paragraph.")
+    document.add_paragraph("The unique trailing anchor remains unchanged.")
+    document.save(source)
+
+    workdir = tmp_path / "bundle"
+    workdir.mkdir()
+    initial = roundtrip_source_docx(source, workdir, tmp_path / "initial.docx", force=True)
+    assert initial["export"]["performed"] is True
+    edited = workdir / "full.md"
+    edited.write_text(
+        edited.read_text(encoding="utf-8").replace("Repeated paragraph.", "Repeated paragraph revision!", 1),
+        encoding="utf-8",
+    )
+    output = tmp_path / "patched.docx"
+    tracked = tmp_path / "tracked.docx"
+    report = roundtrip_source_docx(source, workdir, output, edited=edited, redline=tracked, force=True)
+    assert report["export"]["performed"] is False
+    assert report["patch"]["replaced"] == 1
+    assert report["redline"]["summary"]["changed"] == 1
+    assert report["redline"]["accepted_view_equivalent"] is True
+    assert report["redline"]["report"]["revision_date"] == "1970-01-01T00:00:00Z"
+    assert report["redline"]["report"]["current"] == str(output.resolve())
+    assert "docforge-roundtrip-" not in json.dumps(report)
+    assert output.exists() and tracked.exists()
+    assert Document(output).tables[0].cell(0, 0).text == "opaque table"
+
+
+def test_roundtrip_cli_parser_routes_source_package_mode_without_duplicate_command():
+    from docforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["roundtrip", "source.docx", "--workdir", "bundle", "--output", "patched.docx"]
+    )
+    assert args.section_map is None
+    assert args.edited is None
+
+
+def test_heading_prototype_skips_index_tabs_and_fields():
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    def sample(text: str, *, tab: bool = False, field: bool = False):
+        paragraph = OxmlElement("w:p")
+        ppr = OxmlElement("w:pPr")
+        num = OxmlElement("w:numPr")
+        ilvl = OxmlElement("w:ilvl")
+        ilvl.set(qn("w:val"), "0")
+        num.append(ilvl)
+        ppr.append(num)
+        paragraph.append(ppr)
+        run = OxmlElement("w:r")
+        rpr = OxmlElement("w:rPr")
+        rpr.append(OxmlElement("w:b"))
+        run.append(rpr)
+        if tab:
+            run.append(OxmlElement("w:tab"))
+        if field:
+            run.append(OxmlElement("w:instrText"))
+        node = OxmlElement("w:t")
+        node.text = text
+        run.append(node)
+        paragraph.append(run)
+        return paragraph
+
+    clean = sample("1. Introduction")
+    assert _list_headings([sample("INDEX", tab=True), sample("TOC", field=True), clean])[0] is clean
+
+
+def test_opaque_map_change_fails_before_output(tmp_path):
+    import json
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("A source paragraph with enough text to map.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    edited = tmp_path / "edited.md"
+    baseline.write_text("A source paragraph with enough text to map.", encoding="utf-8")
+    edited.write_text("A changed source paragraph with enough text to map.", encoding="utf-8")
+    block_map = tmp_path / "blocks.json"
+    payload = export_block_map(source, block_map)
+    table = next(entry for entry in payload["blocks"] if entry["kind"] == "table")
+    table["signature"] = "tampered"
+    block_map.write_text(json.dumps(payload), encoding="utf-8")
+    output = tmp_path / "output.docx"
+    import pytest
+
+    with pytest.raises(ValueError, match="opaque block changed"):
+        apply_markdown_delta(source, baseline, edited, output, block_map=block_map, overwrite=True)
+    assert not output.exists()
+
+
+def test_delete_requires_explicit_opt_in(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("A source paragraph with enough text to map.")
+    document.add_paragraph("Another source paragraph with enough text to map.")
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    edited = tmp_path / "edited.md"
+    baseline.write_text(
+        "A source paragraph with enough text to map.\n\nAnother source paragraph with enough text to map.",
+        encoding="utf-8",
+    )
+    edited.write_text("A source paragraph with enough text to map.", encoding="utf-8")
+    import pytest
+
+    with pytest.raises(ValueError, match="allow_delete"):
+        apply_markdown_delta(source, baseline, edited, tmp_path / "refused.docx", overwrite=True)
+    output = tmp_path / "deleted.docx"
+    summary = apply_markdown_delta(source, baseline, edited, output, allow_delete=True, overwrite=True)
+    assert summary["deleted"] == 1
+    assert [paragraph.text for paragraph in Document(output).paragraphs] == [
+        "A source paragraph with enough text to map."
+    ]
+
+
+def test_replacement_extras_stay_after_intervening_table(tmp_path):
+    from zipfile import ZipFile
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("First paragraph has enough words for matching.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table content"
+    document.add_paragraph("Second paragraph has enough words for matching.")
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    edited = tmp_path / "edited.md"
+    baseline.write_text(
+        "First paragraph has enough words for matching.\n\n"
+        "| value |\n| --- |\n| opaque table content |\n\n"
+        "Second paragraph has enough words for matching.",
+        encoding="utf-8",
+    )
+    edited.write_text(
+        "First paragraph has changed words for matching.\n\n"
+        "Inserted after the opaque table and before the next match.\n\n"
+        "| value |\n| --- |\n| opaque table content |\n\n"
+        "Second paragraph has enough words for matching.",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    with ZipFile(output) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    body = root.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
+    assert [etree.QName(child).localname for child in body] == ["p", "tbl", "p", "p", "sectPr"]
+
+
+def test_replacement_extras_stay_before_trailing_table(tmp_path):
+    from zipfile import ZipFile
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Only editable paragraph with enough words for matching.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "trailing opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Only editable paragraph with enough words for matching.", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "Changed editable paragraph with enough words for matching.\n\n"
+        "Extra paragraph before trailing table.",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    with ZipFile(output) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    body = root.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
+    assert [etree.QName(child).localname for child in body] == ["p", "p", "tbl", "sectPr"]
+
+
+def test_omml_paragraph_is_opaque_and_preserved(tmp_path):
+    from zipfile import ZipFile
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Before ")
+    math = etree.SubElement(paragraph._p, "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath")
+    etree.SubElement(math, "{http://schemas.openxmlformats.org/officeDocument/2006/math}r")
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Before equation\n", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Changed equation\n", encoding="utf-8")
+    with __import__("pytest").raises(ValueError, match="unique source paragraph"):
+        apply_markdown_delta(source, baseline, edited, tmp_path / "output.docx", overwrite=True)
+    with ZipFile(source) as archive:
+        assert b"oMath" in archive.read("word/document.xml")
+
+
+def test_text_block_map_rejects_stale_source_index(tmp_path):
+    import json
+    import pytest
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Editable paragraph with enough words for matching.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Editable paragraph with enough words for matching.", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Changed paragraph with enough words for matching.", encoding="utf-8")
+    block_map = export_block_map(source)
+    entry = next(item for item in block_map["blocks"] if item["kind"] == "text")
+    entry["source_index"] = 1
+    block_map_path = tmp_path / "map.json"
+    block_map_path.write_text(json.dumps(block_map), encoding="utf-8")
+    with pytest.raises(ValueError, match="editable paragraph|stale"):
+        apply_markdown_delta(source, baseline, edited, tmp_path / "output.docx", block_map=block_map_path, overwrite=True)
 
 
 def test_markdown_delta_keeps_unedited_paragraphs(tmp_path):

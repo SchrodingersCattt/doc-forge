@@ -129,10 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("input", type=Path, help="DOCX source")
     rt.add_argument("--workdir", type=Path, required=True, help="Markdown bundle directory")
     rt.add_argument("--output", "-o", type=Path, required=True, help="Round-tripped DOCX")
-    rt.add_argument("--section-map", type=Path, required=True, help="JSON section map for DOCX-origin Markdown")
+    rt.add_argument("--section-map", type=Path, help="JSON section map for the legacy sectioned DOCX workflow")
     rt.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
     rt.add_argument("--baseline", type=Path, help="Baseline DOCX for redline, or baseline Markdown")
     rt.add_argument("--redline", type=Path, help="Optional tracked-changes DOCX output")
+    rt.add_argument("--edited", type=Path, help="Edited Markdown (source-package workflow; default: WORKDIR/full.md)")
+    rt.add_argument("--block-map", type=Path, help="Explicit exported source block map")
+    rt.add_argument("--allow-delete", action="store_true", help="Permit deletion of matched text paragraphs")
+    rt.add_argument("--render", choices=("none", "auto", "word", "libreoffice"), default="none", help="Render patched and tracked DOCX files")
+    rt.add_argument("--report", type=Path, help="Roundtrip JSON report")
     rt.add_argument("--force", action="store_true", help="Overwrite output and bundle files")
 
     delta = sub.add_parser(
@@ -143,7 +148,17 @@ def build_parser() -> argparse.ArgumentParser:
     delta.add_argument("baseline", type=Path, help="Markdown exported from the source DOCX")
     delta.add_argument("edited", type=Path, help="Edited Markdown; only matched paragraph changes are applied")
     delta.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    delta.add_argument("--block-map", type=Path, help="Exported source block map used to identify opaque blocks")
+    delta.add_argument("--allow-delete", action="store_true", help="Permit deletion of matched text paragraphs")
     delta.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
+    block_map = sub.add_parser(
+        "export-block-map",
+        help="Export ordered text paragraph indices and opaque source block ids from a DOCX",
+    )
+    block_map.add_argument("source", type=Path, help="Source DOCX")
+    block_map.add_argument("-o", "--output", type=Path, required=True, help="JSON block map path")
+    block_map.add_argument("--force", action="store_true", help="Overwrite an existing map")
 
     delivery = sub.add_parser("deliver", help="Build named article/supplement DOCX files from a JSON profile")
     delivery.add_argument("--profile", type=Path, required=True, help="Delivery profile JSON")
@@ -250,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_roundtrip(args)
         if args.command == "apply-delta":
             return _cmd_apply_delta(args)
+        if args.command == "export-block-map":
+            return _cmd_export_block_map(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "deliver":
@@ -471,6 +488,24 @@ def _cmd_md_roundtrip(args: argparse.Namespace) -> int:
 
 
 def _cmd_roundtrip(args: argparse.Namespace) -> int:
+    if args.section_map is None:
+        from ..markdown import roundtrip_source_docx
+
+        result = roundtrip_source_docx(
+            args.input,
+            args.workdir,
+            args.output,
+            edited=args.edited,
+            baseline=args.baseline,
+            redline=args.redline,
+            block_map=args.block_map,
+            allow_delete=args.allow_delete,
+            force=args.force,
+            render_engine=args.render,
+            report=args.report,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+        return 0
     from ..docxmd import roundtrip
 
     report = roundtrip(
@@ -496,8 +531,20 @@ def _cmd_apply_delta(args: argparse.Namespace) -> int:
         args.edited,
         args.output,
         overwrite=args.force,
+        allow_delete=args.allow_delete,
+        block_map=args.block_map,
     )
     print("markdown delta: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
+    print(args.output)
+    return 0
+
+
+def _cmd_export_block_map(args: argparse.Namespace) -> int:
+    from ..markdown.source_edit import export_block_map
+
+    if args.output.exists() and not args.force:
+        raise FileExistsError(args.output)
+    export_block_map(args.source, args.output)
     print(args.output)
     return 0
 

@@ -10,6 +10,8 @@ docforge md-export  paper.docx md/ --id main --split split.json --bibliography 0
 docforge md-build   md/ --id main -o paper.clean.docx
 docforge redline    --baseline paper.docx --current paper.clean.docx -o paper.tracked.docx --revision-author NAME
 docforge md-roundtrip paper.docx md/ --id main --split split.json --render word
+docforge roundtrip paper.docx --workdir source-bundle --output patched.docx \
+  --redline patched.tracked.docx --force
 ```
 
 `md-roundtrip` exports, rebuilds and compares. It passes only if:
@@ -44,6 +46,13 @@ publish a misleading partial file. The manifest carries
 `contract.schema=docforge.docx-contract.v1`, the resolved role map, and one
 decision record for each parsed Markdown block (source, kind, role, and text
 hash).
+
+For source-package edits, `roundtrip` keeps `source-bundle/baseline.md`,
+`full.md`, and `block-map.json` after the first export. Edit `full.md` and run
+the command again: it patches only matched text paragraphs, preserves opaque
+tables, equations, fields, drawings, and section XML, and writes a native
+redline plus `roundtrip.manifest.json`. A stale map or opaque edit fails before
+the patched or redline DOCX is published.
 
 ## Bundle layout
 
