@@ -270,6 +270,31 @@ def test_body_follows_role_style_instead_of_sample_paragraph(tmp_path: Path) -> 
     assert body.style.style_id == result.style_map["body"] == "TA_Main_Text"
 
 
+def test_body_prototype_ignores_bold_label_run(tmp_path: Path) -> None:
+    document = Document()
+    for name in (
+        "BBAuthorName", "FA_Corresponding_Author_Footnote", "BD_Abstract",
+        "TA_Main_Text", "Heading 1", "Heading 2", "Heading 3",
+        "Caption", "TFReferencesSection", "EndNote Bibliography",
+    ):
+        if name not in [style.name for style in document.styles]:
+            document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    document.add_paragraph("Title", style="BBAuthorName")
+    body = document.add_paragraph(style="TA_Main_Text")
+    body.add_run("LABEL: ").bold = True
+    body.add_run("ordinary body prototype")
+    template = tmp_path / "template.docx"
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("# Intro\n\nGenerated body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    generated = next(paragraph for paragraph in Document(output).paragraphs if paragraph.text == "Generated body text.")
+    assert all(run.bold is not True for run in generated.runs if run.text)
+
+
 def test_generated_body_ignores_sample_alignment(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _style_complete_template(template, centered_body_sample=True)

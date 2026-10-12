@@ -552,7 +552,18 @@ def _run_prototype(element, *, prefer_long: bool = False):
     if not runs:
         return None
     if prefer_long:
-        return copy.deepcopy(max(runs, key=lambda run: len(_text_of(run))))
+        # Prototypes often begin with a bold label (for example ``LABEL: ``)
+        # followed by the ordinary body sample.  Prefer the longest neutral
+        # run when one exists so marker styling is not copied to every
+        # generated paragraph; heading/caption prototypes that are entirely
+        # marked still retain their longest styled run.
+        marker_tags = {qn("w:b"), qn("w:bCs"), qn("w:i"), qn("w:iCs"), qn("w:u"), qn("w:vertAlign")}
+        neutral = [
+            run for run in runs
+            if not any(child.tag in marker_tags for child in run.findall("./" + qn("w:rPr") + "/*"))
+        ]
+        candidates = neutral or runs
+        return copy.deepcopy(max(candidates, key=lambda run: len(_text_of(run))))
     return copy.deepcopy(runs[0])
 
 
@@ -760,7 +771,7 @@ def _new_paragraph(
     # do not leak a direct font size from an unrelated sample paragraph into a
     # title that is intentionally inherited from Normal.
     base_run = (
-        _run_prototype(prototype)
+        _run_prototype(prototype, prefer_long=True)
         if prototype is not None
         and (style_id != "Normal" or has_clean_direct_bold_run(prototype))
         else None
@@ -812,7 +823,7 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
     style.set(qn("w:val"), style_id)
     _apply_style_to_paragraph(element, document, style_id)
     base_run = (
-        _run_prototype(prototype)
+        _run_prototype(prototype, prefer_long=True)
         if prototype is not None and style_id != "Normal"
         else None
     )
@@ -1529,7 +1540,7 @@ def _with_continuous_section(section):
 def _apply_template_run_formatting(element, prototype) -> None:
     if prototype is None:
         return
-    base = _run_prototype(prototype)
+    base = _run_prototype(prototype, prefer_long=True)
     base_rpr = _sanitize_run_properties(base.find(qn("w:rPr")) if base is not None else None)
     for run in element.findall(".//" + qn("w:r")):
         source = run.find(qn("w:rPr"))
