@@ -55,6 +55,7 @@ from .docx_export import (
 from .delivery import DeliveryArtifact, DeliveryResult, deliver
 from .source_edit import apply_markdown_delta
 from .contract import ContractResult, build_docx_contract
+from .inline import DisplayRun, Run, display, is_caption, is_filename_alt, key
 
 __all__ = [
     "Block",
@@ -109,4 +110,10 @@ __all__ = [
     "apply_markdown_delta",
     "ContractResult",
     "build_docx_contract",
+    "DisplayRun",
+    "Run",
+    "display",
+    "key",
+    "is_caption",
+    "is_filename_alt",
 ]

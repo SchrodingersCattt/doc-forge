@@ -24,10 +24,12 @@ from docforge.markdown import (
     write_assembly_sidecars,
 )
 from docforge.markdown.template import (
+    _figure_groups,
     _format_citation_labels,
     _template_uses_superscript_citations,
     _word_compatible_image_bytes,
 )
+from docforge.markdown.blocks import Block
 from docforge.output import validate_output_path
 
 
@@ -35,6 +37,16 @@ def test_output_path_rejects_final_token(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="forbidden token 'final'"):
         validate_output_path(tmp_path / "main-final.docx")
     validate_output_path(tmp_path / "main-manuscript.docx")
+
+
+def test_figure_groups_consume_emphasized_caption_and_ignore_filename_alt():
+    image = Block("image", text="figure.png", path="figure.png")
+    caption = Block("paragraph", "**Figure 1.** Caption")
+    groups = _figure_groups((image, caption))
+    assert groups[0][2] == caption.text
+
+    empty = Block("image", text="", path="figure.png")
+    assert _figure_groups((empty,))[0][2] == ""
 
 
 def _template(path: Path) -> None:

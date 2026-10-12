@@ -27,6 +27,7 @@ characters ``<fld-begin/>`` ``<instr code=".."/>`` ``<fld-sep/>``
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 
 from .ooxml import format_tokens, format_value, parse_tokens, split_words
@@ -53,6 +54,56 @@ _VOID = {
 class Text:
     text: str
     marks: tuple = ()
+
+
+@dataclass(frozen=True)
+class DisplayRun:
+    """One visible run returned by :func:`display`.
+
+    Markdown delimiters and Pandoc backslash escapes are removed from ``text``;
+    formatting is represented by the four boolean flags.  Keeping this small
+    view separate from the lossless :class:`Text`/ :class:`Atom` model lets
+    matching and caption detection use exactly the same inline rules as the
+    DOCX writer.
+    """
+
+    text: str
+    bold: bool = False
+    italic: bool = False
+    subscript: bool = False
+    superscript: bool = False
+
+    @property
+    def style(self) -> str:
+        if self.subscript:
+            return "sub"
+        if self.superscript:
+            return "sup"
+        if self.bold and self.italic:
+            return "bold-italic"
+        if self.bold:
+            return "bold"
+        if self.italic:
+            return "italic"
+        return "plain"
+
+    @property
+    def marks(self) -> tuple[str, ...]:
+        marks: list[str] = []
+        if self.bold:
+            marks.append("b")
+        if self.italic:
+            marks.append("i")
+        if self.subscript:
+            marks.append("sub")
+        if self.superscript:
+            marks.append("sup")
+        return tuple(marks)
+
+
+# ``Run`` is a convenient public name for callers that do not need to know
+# this view is derived from the lossless inline parser.
+Run = DisplayRun
 
 
 @dataclass(frozen=True)
@@ -305,6 +356,90 @@ def parse(text: str) -> list:
     return normalize(items)
 
 
+def _underscore_emphasis(text: str) -> str:
+    """Map ordinary underscore emphasis to the parser's asterisk form.
+
+    The reversible bundle writer emits asterisks, while Pandoc accepts both
+    forms.  Converting only delimiters that are outside words keeps variable
+    names such as ``x_y`` unchanged and leaves escaped underscores literal.
+    """
+    text = re.sub(r"(?<![\\\w])__([^_\n]+?)__(?!\w)", r"**\1**", text)
+    return re.sub(r"(?<![\\\w])_([^_\n]+?)_(?!\w)", r"*\1*", text)
+
+
+def display(markdown: str) -> list[DisplayRun]:
+    """Decode inline Markdown into visible text runs.
+
+    The lossless parser remains the source of truth for escapes and nesting;
+    atoms such as images, links' structural wrappers, and citations have no
+    visible text in this view.  Adjacent runs with the same formatting are
+    merged so callers can write one ``w:t`` per visible run.
+    """
+    if not markdown:
+        return []
+    items = parse(_underscore_emphasis(markdown))
+    result: list[DisplayRun] = []
+    for item in items:
+        if not isinstance(item, Text) or not item.text:
+            continue
+        marks = {mark[0] for mark in item.marks if mark}
+        run = DisplayRun(
+            item.text,
+            bold="b" in marks,
+            italic="i" in marks,
+            subscript="sub" in marks,
+            superscript="sup" in marks,
+        )
+        if result and result[-1].bold == run.bold and result[-1].italic == run.italic \
+                and result[-1].subscript == run.subscript and result[-1].superscript == run.superscript:
+            previous = result[-1]
+            result[-1] = replace(previous, text=previous.text + run.text)
+        else:
+            result.append(run)
+    return result
+
+
+_DASHES = {
+    "\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212", "\u2e3a", "\u2e3b",
+}
+_LEADING_LIST_NUMBER = re.compile(r"^\s*(?:\[\s*\d+\s*\]|\d+[.)])\s+")
+
+
+def key(markdown: str, strip_list_number: bool = True) -> str:
+    """Return a stable matching key for inline Markdown text.
+
+    Visibility is decoded first, then Unicode compatibility forms, dash
+    variants, and whitespace are normalized.  Numbered-list prefixes are
+    ignored by default because Word and Pandoc represent them differently.
+    """
+    value = "".join(run.text for run in display(markdown))
+    value = unicodedata.normalize("NFKC", value)
+    value = "".join("-" if char in _DASHES or unicodedata.category(char) == "Pd" else char for char in value)
+    value = re.sub(r"\s+", " ", value).strip()
+    if strip_list_number:
+        value = _LEADING_LIST_NUMBER.sub("", value)
+    return value
+
+
+_CAPTION_LABEL = re.compile(
+    r"^(?:supplementary\s+)?(?:figure|fig\.|table|scheme|chart)\s+[A-Za-z]*\s*\d+\b",
+    re.IGNORECASE,
+)
+_CAPTION_SLOT = re.compile(r"^\[(?:figure|fig\.|table|scheme|chart)\s+caption\]$", re.IGNORECASE)
+
+
+def is_caption(markdown: str) -> bool:
+    """Return whether visible inline text starts with a figure/table label."""
+    visible = key(markdown)
+    return bool(_CAPTION_LABEL.match(visible) or _CAPTION_SLOT.match(visible))
+
+
+def is_filename_alt(markdown: str) -> bool:
+    """Return whether image alt text is only a media filename."""
+    value = key(markdown)
+    return bool(value and re.fullmatch(r"[^/\\\s]+\.(?:avif|bmp|gif|jpe?g|png|svg|tiff?|webp)", value, re.IGNORECASE))
+
+
 def _toggle(stack: list, mark) -> None:
     if mark in stack:
         stack.remove(mark)
@@ -477,4 +612,7 @@ def _parse_into(text: str, outer: tuple, items: list) -> None:
     flush()
 
 
-__all__ = ["Atom", "MILESTONES", "Text", "normalize", "parse", "parse_attr_words", "sort_marks", "write"]
+__all__ = [
+    "Atom", "DisplayRun", "MILESTONES", "Run", "Text", "display", "is_caption",
+    "is_filename_alt", "key", "normalize", "parse", "parse_attr_words", "sort_marks", "write",
+]

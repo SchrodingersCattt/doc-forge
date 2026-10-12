@@ -25,7 +25,7 @@ from .common import (
     BIB_SCHEMA, FORCED, SCHEMA, SHORTCUT_ELEMENT, Attrs, clean_tokens, format_attrs,
     format_citation_numbers, parse_citation_numbers, run_tokens_for, top_name,
 )
-from .inline import Atom, Text, normalize, write as write_inline
+from .inline import Atom, Text, key as inline_key, normalize, write as write_inline
 from .ooxml import KNOWN_NAMESPACES, PKG_REL, R, W, Token, diff, flatten, format_tokens, merge
 from .styles import StyleSheet
 
@@ -848,7 +848,7 @@ def _save_bibliography(path: Path, payload: dict) -> None:
 
 def _find_references(block_models) -> tuple[int, int, str] | None:
     for index, (kind, model, element) in enumerate(block_models):
-        if kind != "p" or not _REFERENCE_HEADING.match(model.text):
+        if kind != "p" or not _REFERENCE_HEADING.match(inline_key(model.text)):
             continue
         start = index + 1
         numbered = []

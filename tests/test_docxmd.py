@@ -13,7 +13,7 @@ from lxml import etree
 
 from docforge.docxdiff.redline import create_tracked_docx
 from docforge.docxmd import ExportOptions, build_docx, compare_docx, export_docx, roundtrip
-from docforge.docxmd.inline import parse, write
+from docforge.docxmd.inline import display, is_caption, key, parse, write
 from docforge.docxmd.ooxml import W, build, diff, flatten, merge, parse_tokens, format_tokens
 
 
@@ -34,6 +34,25 @@ INLINE_SAMPLES = [
 def test_inline_round_trip(text):
     items = parse(text)
     assert parse(write(items)) == items
+
+
+def test_inline_display_decodes_visible_runs_and_pandoc_escapes():
+    runs = display(r"**Figure 1.** H<sub>2</sub>O and x<sup>2</sup> \*literal\*")
+    assert [(run.text, run.bold, run.italic, run.subscript, run.superscript) for run in runs] == [
+        ("Figure 1.", True, False, False, False),
+        (" H", False, False, False, False),
+        ("2", False, False, True, False),
+        ("O and x", False, False, False, False),
+        ("2", False, False, False, True),
+        (" *literal*", False, False, False, False),
+    ]
+
+
+def test_inline_key_and_caption_ignore_emphasis_and_formatting():
+    assert key("1. **Figure 1.**  A\u00a0result – confirmed") == "Figure 1. A result - confirmed"
+    assert is_caption("**Figure 1.** Caption")
+    assert is_caption("*Supplementary Fig. S2:* Details")
+    assert not is_caption("figure.png")
 
 
 def test_tokens_round_trip_and_diff():
