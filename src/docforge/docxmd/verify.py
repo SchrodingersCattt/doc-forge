@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -391,6 +392,16 @@ def _exact_roundtrip(
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
         if audit_path.exists():
             raise FileExistsError(f"Output exists; pass --force to overwrite: {audit_path}")
+        if redline is not None and Path(redline).exists():
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {redline}")
+
+    # Build every artifact beside the destination and publish only after the
+    # DOCX, optional redline, and audit sidecar have all succeeded.  A failed
+    # redline or audit must never leave a seemingly valid DOCX behind.
+    stage_root = Path(tempfile.mkdtemp(prefix="docforge-roundtrip-stage-", dir=output.parent))
+    staged_output = stage_root / output.name
+    staged_audit = stage_root / audit_path.name
+    staged_redline = stage_root / Path(redline).name if redline is not None else None
 
     # Validate every manifest-controlled path before the reuse helper can
     # publish the source snapshot.  Resolving only after the copy allowed a
@@ -413,7 +424,7 @@ def _exact_roundtrip(
 
     # The existing helper verifies every section and media digest and performs
     # the byte-for-byte copy for a true no-op.
-    unchanged = reuse_unchanged_roundtrip_source(manifest_path, output, force=force)
+    unchanged = reuse_unchanged_roundtrip_source(manifest_path, staged_output, force=True)
     current_section_hashes = {
         name: _file_sha256(path)
         for name in section_hashes
@@ -456,7 +467,7 @@ def _exact_roundtrip(
                 snapshot,
                 source_edit_baseline,
                 source_edit_edited,
-                output,
+                staged_output,
                 overwrite=True,
             )
             summary = {
@@ -474,7 +485,7 @@ def _exact_roundtrip(
 
         redline_path = Path(redline)
         redline_base = baseline if baseline is not None and baseline.suffix.lower() == ".docx" else source
-        redline_summary = create_tracked_docx(redline_base, output, redline_path, author="roundtrip", overwrite=force, workers=1)
+        redline_summary = create_tracked_docx(redline_base, staged_output, staged_redline, author="roundtrip", overwrite=True, workers=1)
 
     bundle_manifest_sha256 = _file_sha256(manifest_path)
     audit = {
@@ -486,15 +497,22 @@ def _exact_roundtrip(
         "manifest_sha256": bundle_manifest_sha256,
         "source": {"path": source.name, "sha256": _file_sha256(source)},
         "source_snapshot": {"path": str(Path(manifest["source_copy"]).as_posix()), "sha256": manifest["source_copy_sha256"]},
-        "output": {"path": output.name, "sha256": _file_sha256(output)},
+        "output": {"path": output.name, "sha256": _file_sha256(staged_output)},
         "sections": {"sha256": {name: current_section_hashes.get(name) for name in section_hashes}, "changed": changed_sections},
         "media": {"sha256": media_hashes, "changed": changed_media},
         "revisions": redline_summary or summary,
         "track_changes": track_changes,
     }
     if redline_path is not None:
-        audit["redline"] = {"path": redline_path.name, "sha256": _file_sha256(redline_path), "summary": redline_summary}
-    audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        audit["redline"] = {"path": redline_path.name, "sha256": _file_sha256(staged_redline), "summary": redline_summary}
+    staged_audit.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # Final publication is the only point at which destination paths are
+    # touched.  All source-package work and validation above is reversible.
+    os.replace(staged_output, output)
+    os.replace(staged_audit, audit_path)
+    if redline_path is not None and staged_redline is not None:
+        os.replace(staged_redline, redline_path)
+    shutil.rmtree(stage_root, ignore_errors=True)
     output_sha256 = _file_sha256(output)
     return {
         "mode": audit["mode"],
@@ -507,7 +525,7 @@ def _exact_roundtrip(
         "manifest": str(audit_path),
         "changed_sections": changed_sections,
         "redline": redline_summary,
-        "revisions": summary,
+        "revisions": redline_summary or summary,
         "ok": True,
     }
 

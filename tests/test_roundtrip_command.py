@@ -111,3 +111,40 @@ def test_roundtrip_rejects_track_policy_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="track_changes"):
         roundtrip(source, work, section_map=tmp_path / "map.json", output=tmp_path / "out.docx")
+
+
+def test_roundtrip_redline_failure_does_not_publish_partial_output(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    (work / "main.md").write_text("Edited\n", encoding="utf-8")
+
+    def fake_export(_source, *, split_dir, **_kwargs):
+        (split_dir / "main.md").write_text("Original\n", encoding="utf-8")
+
+    def fake_delta(source_path, _baseline, _edited, output, **_kwargs):
+        output.write_bytes(source_path.read_bytes() + b" patched")
+        return {"replaced": 1, "inserted": 0}
+
+    def fail_redline(*_args, **_kwargs):
+        raise RuntimeError("redline generation failed")
+
+    monkeypatch.setattr("docforge.docxmd.verify.docx_to_markdown", fake_export, raising=False)
+    monkeypatch.setattr("docforge.markdown.docx_export.docx_to_markdown", fake_export)
+    monkeypatch.setattr("docforge.markdown.source_edit.apply_markdown_delta", fake_delta)
+    monkeypatch.setattr("docforge.docxdiff.redline.create_tracked_docx", fail_redline)
+
+    output = tmp_path / "out.docx"
+    audit = output.with_suffix(".manifest.json")
+    redline = tmp_path / "redline.docx"
+    with pytest.raises(RuntimeError, match="redline generation failed"):
+        roundtrip(
+            source,
+            work,
+            section_map=tmp_path / "map.json",
+            output=output,
+            redline=redline,
+        )
+    assert not output.exists()
+    assert not audit.exists()
+    assert not redline.exists()
