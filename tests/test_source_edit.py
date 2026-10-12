@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from docx import Document
+from docx.shared import Pt
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
 from docforge.markdown.source_edit import apply_markdown_delta
+from docforge.markdown.source_edit import _Block, _map_blocks
 
 
 def test_markdown_delta_keeps_unedited_paragraphs(tmp_path):
@@ -142,3 +144,195 @@ def test_insert_keeps_anchor_size_and_unescapes_markdown(tmp_path):
     assert heading_run.font.size == Pt(14)
     assert citation_run.font.size == Pt(12)
     assert current_doc.paragraphs[2]._p.find(qn("w:pPr")).find(qn("w:numPr")) is None
+
+
+def test_insertions_follow_the_next_mapped_paragraph(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    original = [
+        "P stays byte-identical.",
+        "Q is the paragraph whose wording changes.",
+        "R is the next mapped paragraph.",
+        "S stays byte-identical too.",
+    ]
+    for text in original:
+        document.add_paragraph(text)
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("\n\n".join(original), encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "\n\n".join(
+            [
+                original[0],
+                "Q has revised wording.",
+                "Inserted before R (one).",
+                "Inserted before R (two).",
+                original[2],
+                original[3],
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    summary = apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    assert summary == {"replaced": 1, "inserted": 0}
+    assert [paragraph.text for paragraph in Document(output).paragraphs] == [
+        original[0],
+        "Q has revised wording.",
+        "Inserted before R (one).",
+        "Inserted before R (two).",
+        original[2],
+        original[3],
+    ]
+
+
+def test_mapping_pairs_duplicate_sentences_in_source_order():
+    blocks = [_Block("text", "Repeated sentence."), _Block("text", "Repeated sentence.")]
+    assert _map_blocks(blocks, [(3, "Repeated sentence."), (8, "Repeated sentence.")]) == {
+        0: 3,
+        1: 8,
+    }
+
+
+def test_mapping_solves_exact_and_fuzzy_duplicates_in_one_ordered_pass():
+    # The exact second block must not greedily consume source[0] before the
+    # earlier fuzzy block has had a chance to pair with it.
+    blocks = [_Block("text", "A repeated sentence with one edit."), _Block("text", "A repeated sentence.")]
+    mapping = _map_blocks(
+        blocks,
+        [
+            (0, "A repeated sentence with one edit!"),
+            (1, "A repeated sentence."),
+        ],
+    )
+    assert mapping == {0: 0, 1: 1}
+
+
+def test_mapping_keeps_short_fuzzy_duplicate_before_exact_duplicate():
+    # A one-character typo in a short key must not let the later exact
+    # duplicate consume the first source paragraph.
+    assert _map_blocks(
+        [_Block("text", "fooo"), _Block("text", "foo")],
+        [(0, "foo"), (1, "foo")],
+    ) == {0: 0, 1: 1}
+
+
+def test_body_insertion_before_heading_uses_body_formatting(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    heading = document.add_paragraph("Heading")
+    heading.runs[0].bold = True
+    heading.runs[0].font.size = Pt(18)
+    body = document.add_paragraph("Body anchor")
+    body.runs[0].font.size = Pt(11)
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Heading\n\nBody anchor", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Inserted body\n\nHeading\n\nBody anchor", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+
+    inserted = Document(output).paragraphs[0]
+    assert inserted.text == "Inserted body"
+    assert inserted.runs[0].font.size == Pt(11)
+    assert inserted.runs[0].bold is not True
+
+
+def test_body_insertion_does_not_borrow_unstyled_title_metrics(tmp_path):
+    from docx.shared import Pt
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    title = document.add_paragraph("A very long unstyled title that must not be used as body prototype")
+    title.runs[0].font.size = Pt(18)
+    body = document.add_paragraph("Body anchor with enough words for matching.")
+    body.runs[0].font.size = Pt(11)
+    heading = document.add_paragraph("Heading")
+    heading.runs[0].bold = True
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nHeading",
+        encoding="utf-8",
+    )
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "A very long unstyled title that must not be used as body prototype\n\n"
+        "Body anchor with enough words for matching.\n\nInserted body text.\n\nHeading",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    inserted = Document(output).paragraphs[2]
+    assert inserted.text == "Inserted body text."
+    assert inserted.runs[0].font.size == Pt(11)
+
+
+def test_mapping_allows_short_headings_and_does_not_jump_to_distant_fuzzy_match():
+    assert _map_blocks([_Block("text", "# R")], [(2, "R")]) == {0: 2}
+    block = _Block("text", "A sentence with a local edit.")
+    # The distant paragraph is a strong fuzzy match, but the nearest source
+    # neighbour is intentionally unrelated. Ordered matching must leave the
+    # block unmapped instead of reaching across that neighbour.
+    mapping = _map_blocks(
+        [block],
+        [
+            (0, "An unrelated paragraph."),
+            (1, "A sentence with a local edit!"),
+        ],
+    )
+    assert mapping == {}
+
+    # A future exact anchor is also the next neighbour for the margin check;
+    # a close fuzzy candidate must not steal that anchor.
+    assert _map_blocks(
+        [
+            _Block("text", "A sentence with a local edit."),
+            _Block("text", "A sentence with a local edit?"),
+        ],
+        [(0, "A sentence with a local edit!"), (1, "A sentence with a local edit?")],
+    ) == {1: 1}
+
+
+def test_insertion_before_short_heading_skips_unmapped_equation(tmp_path):
+    from lxml import etree
+
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Opening paragraph.")
+    equation = document.add_paragraph()
+    math = etree.SubElement(equation._p, "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath")
+    etree.SubElement(math, "{http://schemas.openxmlformats.org/officeDocument/2006/math}t").text = "E=mc2"
+    document.add_paragraph("R")
+    document.add_paragraph("Closing paragraph.")
+    document.save(source)
+
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("\n\n".join(["Opening paragraph.", r"\[E=mc^2\]", "# R", "Closing paragraph."]), encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(
+        "\n\n".join(
+            [
+                "Opening paragraph.",
+                r"\[E=mc^2\]",
+                "Inserted after the equation.",
+                "# R",
+                "Closing paragraph.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+    assert [paragraph.text for paragraph in Document(output).paragraphs] == [
+        "Opening paragraph.",
+        "",
+        "Inserted after the equation.",
+        "R",
+        "Closing paragraph.",
+    ]
