@@ -595,7 +595,41 @@ def _heading_style_ids(styles_xml: bytes | None) -> dict[int, str]:
 
 
 def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> dict:
-    body = next((child for child in children if _paragraph_key(child) and not _style_id(child)), None)
+    body_candidates = [
+        child for child in children
+        if _paragraph_key(child) and not _style_id(child)
+    ]
+    # Prefer an unstyled, non-bold paragraph after the first heading. This
+    # avoids borrowing title/front-matter typography for body insertions when
+    # both roles are represented as direct formatting rather than named
+    # styles. Fall back to the longest ordinary paragraph only when no
+    # neutral body sample exists.
+    first_heading = next(
+        (index for index, child in enumerate(children) if _is_heading_paragraph(child)),
+        None,
+    )
+    preferred: list[etree._Element] = []
+    for index, child in enumerate(children):
+        if child in body_candidates and not _has_direct_bold(child) and (
+            first_heading is not None and index > first_heading
+        ):
+            preferred.append(child)
+    neutral = [child for child in body_candidates if not _has_direct_bold(child)]
+    if not preferred and first_heading is not None:
+        before_heading = [
+            child for index, child in enumerate(children)
+            if index < first_heading and child in neutral
+        ]
+        preferred = before_heading[-1:]
+    body = (
+        preferred[0]
+        if preferred
+        else (
+            neutral[-1]
+            if neutral
+            else max(body_candidates, key=lambda child: len(_paragraph_key(child)), default=None)
+        )
+    )
     if body is None:
         body = next((child for child in children if etree.QName(child).localname == "p"), None)
     headings = {}
@@ -611,6 +645,19 @@ def _prototypes(children: list[etree._Element], heading_ids: dict[int, str]) -> 
     }
 
 
+def _is_heading_paragraph(element: etree._Element) -> bool:
+    style = _style_id(element).casefold()
+    return style.startswith("heading") or element.find(f"{{{W}}}pPr/{{{W}}}numPr") is not None
+
+
+def _has_direct_bold(element: etree._Element) -> bool:
+    return any(
+        run.find(f"{{{W}}}rPr/{{{W}}}b") is not None
+        or run.find(f"{{{W}}}rPr/{{{W}}}bCs") is not None
+        for run in element.findall(f"{{{W}}}r")
+    )
+
+
 def _style_id(element: etree._Element) -> str:
     style = element.find(f"{{{W}}}pPr/{{{W}}}pStyle")
     return style.get(f"{{{W}}}val") if style is not None else ""
@@ -623,37 +670,7 @@ def _list_headings(children: list[etree._Element]) -> dict[int, etree._Element]:
     formatting in those paragraphs. The first example of each level is kept.
     """
 
-    found: dict[int, etree._Element] = {}
-    for child in children:
-        numbering = child.find(f"{{{W}}}pPr/{{{W}}}numPr")
-        if numbering is None or not _has_clean_direct_bold_run(child):
-            continue
-        level_node = numbering.find(f"{{{W}}}ilvl")
-        level = int(level_node.get(f"{{{W}}}val") or "0") if level_node is not None else 0
-        found.setdefault(level, child)
-    return found
-
-
-def _has_clean_direct_bold_run(element: etree._Element) -> bool:
-    """Return true for a numbered bold sample without index/field markup."""
-    blocked = {
-        f"{{{W}}}tab", f"{{{W}}}instrText", f"{{{W}}}fldChar",
-        f"{{{W}}}fldSimple", f"{{{W}}}hyperlink",
-    }
-    if any(node.tag in blocked for node in element.iter()):
-        return False
-    for run in element.findall(f"{{{W}}}r"):
-        properties = run.find(f"{{{W}}}rPr")
-        bold = properties.find(f"{{{W}}}b") if properties is not None else None
-        if bold is None and properties is not None:
-            bold = properties.find(f"{{{W}}}bCs")
-        if bold is None or (bold.get(f"{{{W}}}val", "true").lower() in {"0", "false", "off", "none"}):
-            continue
-        if properties is not None and properties.find(f"{{{W}}}highlight") is not None:
-            continue
-        if any(node.text for node in run.iter(f"{{{W}}}t")):
-            return True
-    return False
+    return numbered_bold_prototypes(children)
 
 
 def _apply(root: etree._Element, operations: list[tuple]) -> None:
@@ -718,7 +735,11 @@ def _insert_after(
         if properties is not None:
             paragraph.append(properties)
         heading = _is_heading(block.raw)
-        run_source = _heading_prototype(block.raw, prototypes) if heading else None
+        run_source = (
+            _heading_prototype(block.raw, prototypes)
+            if heading
+            else (prototypes.get("body") if prototypes.get("body") is not None else source_style)
+        )
         if run_source is None:
             run_source = source_style
         _add_runs(
@@ -757,7 +778,11 @@ def _insert_before(
             if properties is not None:
                 paragraph.append(properties)
             heading = _is_heading(block.raw)
-            run_source = _heading_prototype(block.raw, prototypes) if heading else style_source(cursor, prototypes.get("body"))
+            run_source = (
+                _heading_prototype(block.raw, prototypes)
+                if heading
+                else (prototypes.get("body") if prototypes.get("body") is not None else style_source(cursor, prototypes.get("body")))
+            )
             if run_source is None:
                 run_source = prototypes.get("body")
             _add_runs(paragraph, _display_text(block.raw), _run_properties(run_source), extra_marks={"b"} if heading else frozenset())
@@ -775,7 +800,11 @@ def _insert_before(
         if properties is not None:
             paragraph.append(properties)
         heading = _is_heading(block.raw)
-        run_source = _heading_prototype(block.raw, prototypes) if heading else style_source(cursor, prototypes.get("body"))
+        run_source = (
+            _heading_prototype(block.raw, prototypes)
+            if heading
+            else (prototypes.get("body") if prototypes.get("body") is not None else style_source(cursor, prototypes.get("body")))
+        )
         _add_runs(paragraph, _display_text(block.raw), _run_properties(run_source), extra_marks={"b"} if heading else frozenset())
         anchor.addprevious(paragraph)
         cursor = paragraph
@@ -819,7 +848,7 @@ def _properties_for(raw: str, prototypes: dict, anchor: etree._Element) -> etree
     if heading:
         level = min(len(heading.group(1)), 6)
         prototype = _heading_prototype(raw, prototypes)
-        if prototype is not None and (level in prototypes["headings"] or 1 in prototypes["headings"]):
+        if prototype is not None and level in prototypes["headings"]:
             return _copy_paragraph_properties(prototype)
         if prototype is not None:
             return _copy_paragraph_properties(prototype, drop_style=True)
@@ -828,7 +857,10 @@ def _properties_for(raw: str, prototypes: dict, anchor: etree._Element) -> etree
             properties = etree.Element(f"{{{W}}}pPr")
             etree.SubElement(properties, f"{{{W}}}pStyle").set(f"{{{W}}}val", style_id)
             return properties
-    source = anchor if _paragraph_key(anchor) else prototypes["body"]
+    # Placement and formatting are separate concerns.  A body insertion that
+    # happens to be placed before a heading must still use the body role's
+    # prototype instead of inheriting heading or caption formatting.
+    source = prototypes.get("body") if prototypes.get("body") is not None else anchor
     if source is None:
         return None
     return _copy_paragraph_properties(source)
@@ -843,11 +875,27 @@ def _copy_paragraph_properties(
     if properties is None:
         return None
     copied = copy.deepcopy(properties)
+    had_numbering = bool(copied.findall(f"{{{W}}}numPr"))
     for numbering in copied.findall(f"{{{W}}}numPr"):
         copied.remove(numbering)
-    if drop_style:
-        for style in copied.findall(f"{{{W}}}pStyle"):
+    for style in copied.findall(f"{{{W}}}pStyle"):
+        if (style.get(f"{{{W}}}val") or "").casefold() in {"listparagraph", "list paragraph"}:
             copied.remove(style)
+    if drop_style:
+        for style in list(copied.findall(f"{{{W}}}pStyle")):
+            copied.remove(style)
+    elif had_numbering:
+        # Explicit numbering identifies list identity. Indentation alone is
+        # ordinary semantic paragraph formatting and must remain intact.
+        style = copied.find(f"{{{W}}}pStyle")
+        if style is not None and re.search(r"(?:list|bullet|number)", style.get(f"{{{W}}}val", ""), re.IGNORECASE):
+            copied.remove(style)
+    else:
+        # A list prototype must not make inserted body paragraphs inherit its
+        # list role even when it has no explicit indentation.
+        for style in list(copied.findall(f"{{{W}}}pStyle")):
+            if (style.get(f"{{{W}}}val") or "").casefold() in {"listparagraph", "list paragraph"}:
+                copied.remove(style)
     return copied
 
 
@@ -871,7 +919,14 @@ def _run_properties(paragraph: etree._Element | None) -> etree._Element | None:
     if paragraph is None:
         return None
     properties = paragraph.find(f"{{{W}}}r/{{{W}}}rPr")
-    return copy.deepcopy(properties) if properties is not None else None
+    if properties is None:
+        return None
+    copied = copy.deepcopy(properties)
+    # Highlight belongs to the sample marker (and can make inserted text look
+    # like a tracked placeholder).  Typography and emphasis remain intact.
+    for node in list(copied.findall(f"{{{W}}}highlight")):
+        copied.remove(node)
+    return copied
 
 
 def _add_runs(

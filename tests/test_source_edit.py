@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
 from docforge.markdown.source_edit import (
     _Block,
+    _copy_paragraph_properties,
     _list_headings,
     _map_blocks,
+    _run_properties,
     apply_markdown_delta,
     export_block_map,
     roundtrip_source_docx,
@@ -87,21 +92,17 @@ def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
 
     workdir = tmp_path / "bundle"
     workdir.mkdir()
-    baseline = workdir / "baseline.md"
+    initial = roundtrip_source_docx(source, workdir, tmp_path / "initial.docx", force=True)
+    assert initial["export"]["performed"] is True
     edited = workdir / "full.md"
-    text = (
-        "Repeated paragraph.\n\n"
-        "| value |\n| --- |\n| opaque table |\n\n"
-        "Repeated paragraph.\n\n"
-        "The unique trailing anchor remains unchanged."
+    edited.write_text(
+        edited.read_text(encoding="utf-8").replace("Repeated paragraph.", "Repeated paragraph revision!", 1),
+        encoding="utf-8",
     )
-    baseline.write_text(text, encoding="utf-8")
-    edited.write_text(text.replace("Repeated paragraph.", "Repeated paragraph revision!", 1), encoding="utf-8")
-    block_map = workdir / "block-map.json"
-    export_block_map(source, block_map)
     output = tmp_path / "patched.docx"
     tracked = tmp_path / "tracked.docx"
-    report = roundtrip_source_docx(source, workdir, output, redline=tracked, force=True)
+    report = roundtrip_source_docx(source, workdir, output, edited=edited, redline=tracked, force=True)
+    assert report["export"]["performed"] is False
     assert report["patch"]["replaced"] == 1
     assert report["redline"]["summary"]["changed"] == 1
     assert report["redline"]["accepted_view_equivalent"] is True
@@ -112,10 +113,19 @@ def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
     assert Document(output).tables[0].cell(0, 0).text == "opaque table"
 
 
+def test_roundtrip_cli_parser_routes_source_package_mode_without_duplicate_command():
+    from docforge.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["roundtrip", "source.docx", "--workdir", "bundle", "--output", "patched.docx"]
+    )
+    assert args.section_map is None
+    assert args.edited is None
+
+
 def test_heading_prototype_skips_index_tabs_and_fields():
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from lxml import etree
 
     def sample(text: str, *, tab: bool = False, field: bool = False):
         paragraph = OxmlElement("w:p")
