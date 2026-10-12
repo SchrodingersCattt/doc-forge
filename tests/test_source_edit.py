@@ -276,6 +276,27 @@ def test_body_insertion_does_not_borrow_unstyled_title_metrics(tmp_path):
     assert inserted.runs[0].font.size == Pt(11)
 
 
+def test_source_edit_uses_canonical_inline_display_for_code_runs(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Anchor paragraph with enough words for matching.")
+    document.save(source)
+    baseline = tmp_path / "baseline.md"
+    baseline.write_text("Anchor paragraph with enough words for matching.", encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text("Anchor **updated** text with `code` for matching.", encoding="utf-8")
+    output = tmp_path / "output.docx"
+
+    apply_markdown_delta(source, baseline, edited, output, overwrite=True)
+
+    paragraph = Document(output).paragraphs[0]
+    assert paragraph.text == "Anchor updated text with code for matching."
+    code_run = next(run for run in paragraph.runs if run.text == "code")
+    properties = code_run._r.find(qn("w:rPr"))
+    fonts = properties.find(qn("w:rFonts")) if properties is not None else None
+    assert fonts is not None and fonts.get(qn("w:ascii")) == "Consolas"
+
+
 def test_mapping_allows_short_headings_and_does_not_jump_to_distant_fuzzy_match():
     assert _map_blocks([_Block("text", "# R")], [(2, "R")]) == {0: 2}
     block = _Block("text", "A sentence with a local edit.")

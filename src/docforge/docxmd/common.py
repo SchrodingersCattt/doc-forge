@@ -20,6 +20,10 @@ REVISION_ELEMENTS = {
 FORCED: dict[str, list[Token]] = {
     "b": [("-b", None), ("b", None)],
     "i": [("-i", None), ("i", None)],
+    "code": [
+        ("-rFonts@ascii", None), ("-rFonts@hAnsi", None), ("-rFonts@cs", None),
+        ("rFonts@ascii", "Consolas"), ("rFonts@hAnsi", "Consolas"), ("rFonts@cs", "Consolas"),
+    ],
     "sup": [("-vertAlign", None), ("vertAlign@val", "superscript")],
     "sub": [("-vertAlign", None), ("vertAlign@val", "subscript")],
     "u": [("-u", None), ("u@val", "single")],

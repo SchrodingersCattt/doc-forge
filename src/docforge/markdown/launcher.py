@@ -24,6 +24,7 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 import lxml.etree as etree
 
 from .blocks import Block, SectionSource
+from .inline import key as inline_key, render as render_inline
 from ..tex.tokenize import tokenize_tex
 
 __all__ = [
@@ -58,17 +59,6 @@ BANG_COMMENT_RE = re.compile(r"^[!！](?:\s+|$)")
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
-INLINE_TOKEN_RE = re.compile(
-    # A doubled dollar delimiter belongs to a display-math block.  When it
-    # occurs inside prose (for example an unmatched ``$$``), it must remain
-    # literal text: allowing the single-dollar alternative to start at the
-    # second character turns the remainder into inline math and strips the
-    # authored spaces.  Guard both sides so only a real, single-dollar pair
-    # is tokenized here; standalone ``$$`` lines are parsed as block equations
-    # by :func:`parse_markdown`.
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\\\$|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$))"
-)
-
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
 UNICODE_SUBSCRIPT_MAP = str.maketrans(
     "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜₓₔ",
@@ -91,7 +81,7 @@ BOND_HYPHEN_RE = re.compile(r"(?<![A-Za-z])([A-Z][a-z]?)-([A-Z][a-z]?)(?=(?:[0-9
 
 
 def normalize_text(value: str) -> str:
-    return re.sub(r"[\s\u00a0\u3000]+", "", value).rstrip("：:")
+    return inline_key(value).rstrip("：:")
 
 
 def normalize_typography(value: str) -> str:
@@ -553,80 +543,17 @@ def append_inline_math(
                 pass
 
 
-def add_inline(
+def _render_inline(
     paragraph, text: str, *, bold_default: bool = False, size: float = 11.0
 ) -> None:
-    """Render inline Markdown tokens (bold, italic, code, math, comments)."""
-    text = normalize_typography(text)
-    position = 0
-    for match in INLINE_TOKEN_RE.finditer(text):
-        if match.start() > position:
-            segment = text[position : match.start()]
-            if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and segment.startswith(" "):
-                segment = segment.lstrip(" ")
-            run = paragraph.add_run(segment)
-            run.bold = bold_default
-            set_run_font(run, size=size)
-        token = match.group(0)
-        if token.startswith("<u>**"):
-            start = len(paragraph.runs)
-            add_inline(paragraph, token[5:-6], bold_default=True, size=size)
-            for run in paragraph.runs[start:]:
-                run.underline = True
-        elif token.lower().startswith("<sup>"):
-            run = paragraph.add_run(token[5:-6])
-            run.bold = bold_default
-            run.font.superscript = True
-            set_run_font(run, size=size)
-        elif token.lower().startswith("<sub>"):
-            run = paragraph.add_run(token[5:-6])
-            run.bold = bold_default
-            run.font.subscript = True
-            set_run_font(run, size=size)
-        elif token.lower().startswith("<br"):
-            paragraph.add_run().add_break()
-        elif token.startswith("<!--"):
-            inner = token[4:-3].strip()
-            if inner.upper().startswith("TODO:"):
-                inner = inner[5:].strip()
-            run = paragraph.add_run(f"[TODO: {inner}]")
-            set_run_font(run, chinese="宋体", latin="Times New Roman", size=size)
-        elif token.startswith("***"):
-            start = len(paragraph.runs)
-            add_inline(paragraph, token[3:-3], bold_default=True, size=size)
-            for run in paragraph.runs[start:]:
-                run.bold = True
-                run.italic = True
-        elif token.startswith("**"):
-            add_inline(paragraph, token[2:-2], bold_default=True, size=size)
-        elif token.startswith("*"):
-            start = len(paragraph.runs)
-            add_inline(paragraph, token[1:-1], bold_default=bold_default, size=size)
-            for run in paragraph.runs[start:]:
-                run.italic = True
-        elif token.startswith("`"):
-            run = paragraph.add_run(token[1:-1])
-            set_run_font(run, chinese="等线", latin="Consolas", size=max(size - 1, 9))
-        elif token == r"\$":
-            run = paragraph.add_run("$")
-            run.bold = bold_default
-            set_run_font(run, size=size)
-        elif token.startswith("$"):
-            before = paragraph.runs[-1] if paragraph.runs else None
-            first_math_run = len(paragraph.runs)
-            append_inline_math(paragraph, token[1:-1], bold_default=bold_default, size=size)
-            if before is not None and len(paragraph.runs) > first_math_run:
-                first = paragraph.runs[first_math_run]
-                if before.text.endswith(" ") and first.text.startswith(" "):
-                    before.text = before.text.rstrip(" ")
-        position = match.end()
-    if position < len(text):
-        remainder = text[position:]
-        if paragraph.runs and paragraph.runs[-1].text.endswith(" ") and remainder.startswith(" "):
-            remainder = remainder.lstrip(" ")
-        run = paragraph.add_run(remainder)
-        run.bold = bold_default
-        set_run_font(run, size=size)
+    """Render one inline value with the canonical lossless inline codec."""
+    render_inline(
+        paragraph,
+        normalize_typography(text),
+        bold_default=bold_default,
+        size=size,
+        math_renderer=append_inline_math,
+    )
 
 
 # ── block rendering ────────────────────────────────────────────────────────
@@ -658,7 +585,7 @@ def add_heading(doc: DocumentType, text: str, level: int):
     else:
         size, before, after = 11.0, 4, 1
     set_paragraph_spacing(paragraph, before=before, after=after, line=1.2)
-    add_inline(paragraph, text, bold_default=True, size=size)
+    _render_inline(paragraph, text, bold_default=True, size=size)
     for run in paragraph.runs:
         run.bold = True
         run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
@@ -673,7 +600,7 @@ def add_heading(doc: DocumentType, text: str, level: int):
 
 def add_body_paragraph(doc: DocumentType, text: str, *, indent: bool = True):
     paragraph = doc.add_paragraph()
-    add_inline(paragraph, text)
+    _render_inline(paragraph, text)
     apply_base_format(paragraph, first_indent=indent)
     return paragraph
 
@@ -681,7 +608,7 @@ def add_body_paragraph(doc: DocumentType, text: str, *, indent: bool = True):
 def add_list_paragraph(doc: DocumentType, text: str, level: int, ordered: bool):
     paragraph = doc.add_paragraph()
     prefix = "" if ordered else "• "
-    add_inline(paragraph, prefix + text)
+    _render_inline(paragraph, prefix + text)
     apply_base_format(paragraph, first_indent=False)
     paragraph.paragraph_format.left_indent = Cm(0.74 + 0.6 * level)
     paragraph.paragraph_format.first_line_indent = Cm(-0.37 if not ordered else 0)
@@ -756,7 +683,7 @@ def add_table_caption(
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_paragraph_spacing(paragraph, before=3, after=2, line=1.0)
     label = f"Table {number_prefix}{number}. " if number is not None else "Table. "
-    add_inline(paragraph, label + text, bold_default=False, size=10.0)
+    _render_inline(paragraph, label + text, bold_default=False, size=10.0)
     for run in paragraph.runs:
         if run.font.name != "Consolas":
             set_run_font(run, size=10.0)
@@ -764,7 +691,7 @@ def add_table_caption(
 
 def add_quote(doc: DocumentType, text: str) -> None:
     paragraph = doc.add_paragraph()
-    add_inline(paragraph, text)
+    _render_inline(paragraph, text)
     apply_base_format(paragraph, first_indent=False)
     paragraph.paragraph_format.left_indent = Cm(0.74)
     paragraph.paragraph_format.right_indent = Cm(0.74)
@@ -786,7 +713,7 @@ def add_image(doc: DocumentType, path: str, caption: str) -> None:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         paragraph.paragraph_format.keep_with_next = False
         set_paragraph_spacing(paragraph, before=0, after=5, line=1.0)
-        add_inline(paragraph, caption, size=10.0)
+        _render_inline(paragraph, caption, size=10.0)
         for run in paragraph.runs:
             if run.font.name != "Consolas":
                 set_run_font(run, size=10.0)
@@ -810,7 +737,7 @@ def add_separator(doc: DocumentType) -> None:
 def set_cell_text(cell, text: str, bold: bool = False) -> None:
     cell.text = ""
     paragraph = cell.paragraphs[0]
-    add_inline(paragraph, text, bold_default=bold)
+    _render_inline(paragraph, text, bold_default=bold)
 
 
 def set_cell_margins(cell, top: int = 80, start: int = 80, bottom: int = 80, end: int = 80) -> None:
