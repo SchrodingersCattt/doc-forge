@@ -54,6 +54,7 @@ from .docx_export import (
 )
 from .delivery import DeliveryArtifact, DeliveryResult, deliver
 from .source_edit import apply_markdown_delta
+from .contract import ContractResult, build_docx_contract
 
 __all__ = [
     "Block",
@@ -106,4 +107,6 @@ __all__ = [
     "DeliveryResult",
     "deliver",
     "apply_markdown_delta",
+    "ContractResult",
+    "build_docx_contract",
 ]
