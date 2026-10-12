@@ -13,8 +13,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
+import tempfile
 import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -124,6 +126,7 @@ def export_block_map(source: Path, output: Path | None = None) -> dict[str, Any]
     result = {
         "version": 1,
         "source_part": "word/document.xml",
+        "source_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest(),
         "blocks": entries,
         # Short aliases make the map convenient to consume without walking
         # the ordered block list while retaining that list as the canonical
@@ -185,6 +188,11 @@ def apply_markdown_delta(
 
     validate_output_path(output)
     package = Package.load(source)
+    source_map = _read_block_map(block_map)
+    if source_map is not None and source_map.get("source_sha256"):
+        actual_source_hash = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        if source_map["source_sha256"] != actual_source_hash:
+            raise ValueError("block map source package is stale")
     root = package.xml("word/document.xml")
     operations = plan_markdown_delta(
         root,
@@ -192,7 +200,7 @@ def apply_markdown_delta(
         edited_markdown.read_text(encoding="utf-8"),
         styles_xml=package.parts.get("word/styles.xml"),
         allow_delete=allow_delete,
-        block_map=block_map,
+        block_map=source_map,
     )
     # Reuse the source package byte-for-byte for a no-op.  Re-zipping an
     # untouched package changes ZIP metadata and can invalidate downstream
@@ -914,3 +922,142 @@ def _append_run(paragraph: etree._Element, text: str, base_properties: etree._El
     if text.startswith(" ") or text.endswith(" "):
         node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
     node.text = text
+
+
+def roundtrip_source_docx(
+    source: Path,
+    workdir: Path,
+    output: Path,
+    *,
+    edited: Path | None = None,
+    baseline: Path | None = None,
+    redline: Path | None = None,
+    block_map: Path | None = None,
+    allow_delete: bool = False,
+    force: bool = False,
+    render_engine: str = "none",
+    report: Path | None = None,
+) -> dict[str, Any]:
+    """Export, patch, and redline one source DOCX without template assembly.
+
+    The first invocation writes ``baseline.md`` and ``block-map.json`` under
+    ``workdir`` and copies the editable Markdown to ``full.md``. Subsequent
+    invocations reuse those files, so callers can edit ``full.md`` and rerun
+    the same command. All candidate DOCX/report files are staged until patch,
+    redline, and optional rendering checks succeed.
+    """
+    source, workdir, output = Path(source), Path(workdir), Path(output)
+    baseline = Path(baseline) if baseline is not None else source
+    workdir.mkdir(parents=True, exist_ok=True)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    if not baseline.is_file():
+        raise FileNotFoundError(baseline)
+    if render_engine not in {"none", "auto", "word", "libreoffice"}:
+        raise ValueError("render_engine must be one of: none, auto, word, libreoffice")
+    if output.exists() and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+    redline = Path(redline) if redline is not None else output.with_name(output.stem + ".tracked" + output.suffix)
+    report = Path(report) if report is not None else workdir / "roundtrip.manifest.json"
+    if len({output.resolve(), redline.resolve(), report.resolve()}) != 3:
+        raise ValueError("roundtrip output, redline, and report paths must be distinct")
+    validate_output_path(output)
+    validate_output_path(redline)
+    validate_output_path(report, label="report")
+
+    baseline_markdown = workdir / "baseline.md"
+    full_markdown = workdir / "full.md"
+    block_map = Path(block_map) if block_map is not None else workdir / "block-map.json"
+    exported = False
+    if not baseline_markdown.is_file() or not block_map.is_file():
+        from .docx_export import docx_to_markdown
+
+        docx_to_markdown(
+            source,
+            output=baseline_markdown,
+            media_dir=workdir,
+            track_changes="accept",
+            force=True,
+        )
+        if not full_markdown.exists():
+            shutil.copyfile(baseline_markdown, full_markdown)
+        export_block_map(source, block_map)
+        exported = True
+    if edited is None:
+        edited = full_markdown
+    edited = Path(edited)
+    if not edited.is_file():
+        raise FileNotFoundError(edited)
+
+    with tempfile.TemporaryDirectory(prefix=".docforge-roundtrip-", dir=workdir) as temporary:
+        stage = Path(temporary)
+        staged_output = stage / output.name
+        delta = apply_markdown_delta(
+            source,
+            baseline_markdown,
+            edited,
+            staged_output,
+            overwrite=True,
+            allow_delete=allow_delete,
+            block_map=block_map,
+        )
+        from ..docxdiff import create_tracked_docx
+
+        staged_redline = stage / redline.name
+        redline_report = stage / (redline.stem + ".report.json")
+        redline_summary = create_tracked_docx(
+            baseline,
+            staged_output,
+            staged_redline,
+            author="docforge-roundtrip",
+            overwrite=True,
+            accept_baseline=True,
+            report_path=redline_report,
+            workers=1,
+        )
+        render_receipt: dict[str, Any] = {"enabled": False}
+        if render_engine != "none":
+            from ..docxmd.verify import render_pdfs
+
+            pdfs = render_pdfs([staged_output, staged_redline], stage / "render", render_engine)
+            render_receipt = {
+                "enabled": True,
+                "engine": render_engine,
+                "documents": [
+                    {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                    for path in pdfs
+                ],
+            }
+        payload = {
+            "schema": "docforge.source-roundtrip.v1",
+            "source": {"path": str(source.resolve()), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+            "baseline": {"path": str(baseline.resolve()), "sha256": hashlib.sha256(baseline.read_bytes()).hexdigest()},
+            "export": {
+                "baseline_markdown": str(baseline_markdown.resolve()),
+                "edited_markdown": str(edited.resolve()),
+                "block_map": str(block_map.resolve()),
+                "performed": exported,
+            },
+            "patch": delta,
+            "output": {"path": str(output.resolve()), "sha256": hashlib.sha256(staged_output.read_bytes()).hexdigest()},
+            "redline": {
+                "path": str(redline.resolve()),
+                "sha256": hashlib.sha256(staged_redline.read_bytes()).hexdigest(),
+                "summary": redline_summary,
+                "accepted_view_equivalent": True,
+                "report": json.loads(redline_report.read_text(encoding="utf-8")),
+            },
+            "render": render_receipt,
+        }
+        staged_report = stage / report.name
+        staged_report.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        redline.parent.mkdir(parents=True, exist_ok=True)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged_output, output)
+        os.replace(staged_redline, redline)
+        os.replace(staged_report, report)
+    return payload
+
+
+source_roundtrip = roundtrip_source_docx

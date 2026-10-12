@@ -53,7 +53,13 @@ from .docx_export import (
     reuse_unchanged_roundtrip_source,
 )
 from .delivery import DeliveryArtifact, DeliveryResult, deliver
-from .source_edit import apply_markdown_delta, export_block_map, export_source_block_map
+from .source_edit import (
+    apply_markdown_delta,
+    export_block_map,
+    export_source_block_map,
+    roundtrip_source_docx,
+    source_roundtrip,
+)
 from .contract import ContractResult, build_docx_contract
 from .inline import DisplayRun, Run, display, is_caption, is_filename_alt, key
 
@@ -118,4 +124,6 @@ __all__ = [
     "is_filename_alt",
     "export_block_map",
     "export_source_block_map",
+    "roundtrip_source_docx",
+    "source_roundtrip",
 ]

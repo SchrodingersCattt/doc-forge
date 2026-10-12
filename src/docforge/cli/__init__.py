@@ -155,6 +155,22 @@ def build_parser() -> argparse.ArgumentParser:
     block_map.add_argument("-o", "--output", type=Path, required=True, help="JSON block map path")
     block_map.add_argument("--force", action="store_true", help="Overwrite an existing map")
 
+    source_roundtrip = sub.add_parser(
+        "roundtrip",
+        help="Export Markdown, patch the source DOCX package, and create a redline",
+    )
+    source_roundtrip.add_argument("source", type=Path, help="Source DOCX")
+    source_roundtrip.add_argument("--workdir", type=Path, required=True, help="Working directory containing full.md and block-map.json")
+    source_roundtrip.add_argument("--edited", type=Path, help="Edited Markdown (default: WORKDIR/full.md)")
+    source_roundtrip.add_argument("--baseline", type=Path, help="Reviewed DOCX baseline for redline (default: source)")
+    source_roundtrip.add_argument("--output", type=Path, required=True, help="Patched clean DOCX")
+    source_roundtrip.add_argument("--redline", type=Path, help="Tracked DOCX (default: beside output)")
+    source_roundtrip.add_argument("--block-map", type=Path, help="Explicit exported source block map")
+    source_roundtrip.add_argument("--allow-delete", action="store_true", help="Permit deletion of matched text paragraphs")
+    source_roundtrip.add_argument("--render", choices=("none", "auto", "word", "libreoffice"), default="none", help="Render patched and tracked DOCX files")
+    source_roundtrip.add_argument("--report", type=Path, help="Roundtrip JSON report")
+    source_roundtrip.add_argument("--force", action="store_true", help="Overwrite output artifacts")
+
     delivery = sub.add_parser("deliver", help="Build named article/supplement DOCX files from a JSON profile")
     delivery.add_argument("--profile", type=Path, required=True, help="Delivery profile JSON")
     delivery.add_argument("--accept-revisions", action="store_true", help="Apply reviewed DOCX revisions to mapped Markdown sources before building")
@@ -262,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_apply_delta(args)
         if args.command == "export-block-map":
             return _cmd_export_block_map(args)
+        if args.command == "roundtrip":
+            return _cmd_source_roundtrip(args)
         if args.command == "redline":
             return _cmd_redline(args)
         if args.command == "deliver":
@@ -523,6 +541,26 @@ def _cmd_export_block_map(args: argparse.Namespace) -> int:
         raise FileExistsError(args.output)
     export_block_map(args.source, args.output)
     print(args.output)
+    return 0
+
+
+def _cmd_source_roundtrip(args: argparse.Namespace) -> int:
+    from ..markdown import roundtrip_source_docx
+
+    result = roundtrip_source_docx(
+        args.source,
+        args.workdir,
+        args.output,
+        edited=args.edited,
+        baseline=args.baseline,
+        redline=args.redline,
+        block_map=args.block_map,
+        allow_delete=args.allow_delete,
+        force=args.force,
+        render_engine=args.render,
+        report=args.report,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=1))
     return 0
 
 

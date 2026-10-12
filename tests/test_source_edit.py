@@ -4,7 +4,14 @@ from docx import Document
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
-from docforge.markdown.source_edit import _Block, _list_headings, _map_blocks, apply_markdown_delta, export_block_map
+from docforge.markdown.source_edit import (
+    _Block,
+    _list_headings,
+    _map_blocks,
+    apply_markdown_delta,
+    export_block_map,
+    roundtrip_source_docx,
+)
 
 
 def test_block_map_and_noop_preserve_document_xml_and_media(tmp_path):
@@ -52,6 +59,53 @@ def test_mapping_keeps_short_fuzzy_duplicate_before_exact_match():
         [_Block("text", "fooo"), _Block("text", "foo")],
         [(0, "foo"), (1, "foo")],
     ) == {0: 0, 1: 1}
+
+
+def test_mapping_aligns_greedy_duplicate_with_later_exact_anchor():
+    blocks = [
+        _Block("text", "Repeated paragraph!"),
+        _Block("text", "Repeated paragraph."),
+        _Block("text", "The unique trailing anchor remains unchanged."),
+    ]
+    source = [
+        (0, "Repeated paragraph."),
+        (1, "Repeated paragraph."),
+        (2, "The unique trailing anchor remains unchanged."),
+    ]
+    assert _map_blocks(blocks, source) == {0: 0, 1: 1, 2: 2}
+
+
+def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("Repeated paragraph.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "opaque table"
+    document.add_paragraph("Repeated paragraph.")
+    document.add_paragraph("The unique trailing anchor remains unchanged.")
+    document.save(source)
+
+    workdir = tmp_path / "bundle"
+    workdir.mkdir()
+    baseline = workdir / "baseline.md"
+    edited = workdir / "full.md"
+    text = (
+        "Repeated paragraph.\n\n"
+        "| value |\n| --- |\n| opaque table |\n\n"
+        "Repeated paragraph.\n\n"
+        "The unique trailing anchor remains unchanged."
+    )
+    baseline.write_text(text, encoding="utf-8")
+    edited.write_text(text.replace("Repeated paragraph.", "Repeated paragraph revision!", 1), encoding="utf-8")
+    block_map = workdir / "block-map.json"
+    export_block_map(source, block_map)
+    output = tmp_path / "patched.docx"
+    tracked = tmp_path / "tracked.docx"
+    report = roundtrip_source_docx(source, workdir, output, redline=tracked, force=True)
+    assert report["patch"]["replaced"] == 1
+    assert report["redline"]["summary"]["changed"] == 1
+    assert report["redline"]["accepted_view_equivalent"] is True
+    assert output.exists() and tracked.exists()
+    assert Document(output).tables[0].cell(0, 0).text == "opaque table"
 
 
 def test_heading_prototype_skips_index_tabs_and_fields():
