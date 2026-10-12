@@ -4,7 +4,7 @@ from docx import Document
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.redline import visible_text
-from docforge.markdown.source_edit import apply_markdown_delta, export_block_map
+from docforge.markdown.source_edit import _Block, _list_headings, _map_blocks, apply_markdown_delta, export_block_map
 
 
 def test_block_map_and_noop_preserve_document_xml_and_media(tmp_path):
@@ -27,6 +27,7 @@ def test_block_map_and_noop_preserve_document_xml_and_media(tmp_path):
     output = tmp_path / "output.docx"
     apply_markdown_delta(source, baseline, edited, output, block_map=block_map, overwrite=True)
     with ZipFile(source) as left, ZipFile(output) as right:
+        assert source.read_bytes() == output.read_bytes()
         assert left.read("word/document.xml") == right.read("word/document.xml")
         assert {
             name: left.read(name)
@@ -37,6 +38,52 @@ def test_block_map_and_noop_preserve_document_xml_and_media(tmp_path):
             for name in right.namelist()
             if name.startswith("word/media/")
         }
+
+
+def test_mapping_solves_fuzzy_duplicate_before_later_exact_match():
+    assert _map_blocks(
+        [_Block("text", "A repeated sentence with one edit."), _Block("text", "A repeated sentence.")],
+        [(0, "A repeated sentence with one edit!"), (1, "A repeated sentence.")],
+    ) == {0: 0, 1: 1}
+
+
+def test_mapping_keeps_short_fuzzy_duplicate_before_exact_match():
+    assert _map_blocks(
+        [_Block("text", "fooo"), _Block("text", "foo")],
+        [(0, "foo"), (1, "foo")],
+    ) == {0: 0, 1: 1}
+
+
+def test_heading_prototype_skips_index_tabs_and_fields():
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    def sample(text: str, *, tab: bool = False, field: bool = False):
+        paragraph = OxmlElement("w:p")
+        ppr = OxmlElement("w:pPr")
+        num = OxmlElement("w:numPr")
+        ilvl = OxmlElement("w:ilvl")
+        ilvl.set(qn("w:val"), "0")
+        num.append(ilvl)
+        ppr.append(num)
+        paragraph.append(ppr)
+        run = OxmlElement("w:r")
+        rpr = OxmlElement("w:rPr")
+        rpr.append(OxmlElement("w:b"))
+        run.append(rpr)
+        if tab:
+            run.append(OxmlElement("w:tab"))
+        if field:
+            run.append(OxmlElement("w:instrText"))
+        node = OxmlElement("w:t")
+        node.text = text
+        run.append(node)
+        paragraph.append(run)
+        return paragraph
+
+    clean = sample("1. Introduction")
+    assert _list_headings([sample("INDEX", tab=True), sample("TOC", field=True), clean])[0] is clean
 
 
 def test_opaque_map_change_fails_before_output(tmp_path):

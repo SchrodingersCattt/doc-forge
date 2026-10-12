@@ -14,6 +14,8 @@ import copy
 import hashlib
 import json
 import re
+import shutil
+import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -192,8 +194,16 @@ def apply_markdown_delta(
         allow_delete=allow_delete,
         block_map=block_map,
     )
-    # Avoid serializing an untouched XML part.  Besides reducing churn this
-    # guarantees that a no-op delta leaves every document byte untouched.
+    # Reuse the source package byte-for-byte for a no-op.  Re-zipping an
+    # untouched package changes ZIP metadata and can invalidate downstream
+    # package hashes even though the document parts are equal.
+    if not operations:
+        if output.exists() and not overwrite:
+            raise FileExistsError(output)
+        if source.resolve() != output.resolve():
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, output)
+        return {"replaced": 0, "inserted": 0}
     if operations:
         _apply(root, operations)
         package.set_xml("word/document.xml", root)
@@ -466,30 +476,92 @@ def _paragraph_key(element: etree._Element) -> str:
 
 
 def _map_blocks(blocks: list[_Block], docx_keys: list[tuple[int, str]]) -> dict[int, int]:
-    unused = {index: key for index, key in docx_keys if key}
-    mapping: dict[int, int] = {}
-    for index, block in enumerate(blocks):
-        if block.kind != "text":
-            continue
-        exact = [child for child, key in unused.items() if key == block.key]
-        if len(exact) == 1:
-            mapping[index] = exact[0]
-            del unused[exact[0]]
-            continue
-        if len(exact) > 1:
-            continue
-        ranked = sorted(
-            ((SequenceMatcher(a=block.key, b=key, autojunk=False).ratio(), child) for child, key in unused.items()),
-            reverse=True,
-        )
-        if not ranked:
-            continue
-        best_ratio, best_child = ranked[0]
-        second = ranked[1][0] if len(ranked) > 1 else 0.0
-        if best_ratio >= 0.92 and best_ratio - second >= 0.04:
-            mapping[index] = best_child
-            del unused[best_child]
-    return mapping
+    """Map Markdown blocks to source children without greedy duplicate capture."""
+    source = [(index, key) for index, key in docx_keys if key]
+    if not source:
+        return {}
+
+    from functools import lru_cache
+
+    def pair_score(block: _Block, key: str, *, exact: bool) -> tuple[int, int, float] | None:
+        if block.kind != "text" or not block.key:
+            return None
+        ratio = SequenceMatcher(a=block.key, b=key, autojunk=False).ratio()
+        if not exact and ratio < 0.92:
+            # Short headings and labels have too little text for the normal
+            # ratio gate to survive one typo. Keep this exception bounded to a
+            # single edit so short prose is not matched arbitrarily.
+            if max(len(block.key), len(key)) > 8 or _edit_distance(block.key, key) > 1:
+                return None
+        return (1, 1 if exact else 0, ratio)
+
+    def add_score(left: tuple[int, int, float], right: tuple[int, int, float]) -> tuple[int, int, float]:
+        return left[0] + right[0], left[1] + right[1], left[2] + right[2]
+
+    zero = (0, 0, 0.0)
+
+    @lru_cache(maxsize=None)
+    def solve(block_index: int, source_index: int, fuzzy_allowed: bool):
+        if block_index >= len(blocks) or source_index >= len(source):
+            return zero, ()
+        block = blocks[block_index]
+        child, key = source[source_index]
+        options: list[tuple[tuple[int, int, float], tuple]] = []
+
+        exact = block.kind == "text" and block.key == key
+        score = pair_score(block, key, exact=exact)
+        if score is not None and (exact or fuzzy_allowed):
+            if not exact and source_index + 1 < len(source):
+                next_key = source[source_index + 1][1]
+                next_ratio = SequenceMatcher(a=block.key, b=next_key, autojunk=False).ratio()
+                if score[2] - next_ratio < 0.04:
+                    duplicate_run = (
+                        source_index + 1 < len(source)
+                        and block_index + 1 < len(blocks)
+                        and blocks[block_index + 1].kind == "text"
+                        and blocks[block_index + 1].key == source[source_index + 1][1]
+                        and source[source_index + 1][1] == key
+                    )
+                    if not duplicate_run:
+                        score = None
+            if score is not None:
+                tail_score, tail_path = solve(block_index + 1, source_index + 1, True)
+                options.append((add_score(score, tail_score), ((block_index, child),) + tail_path))
+
+        # Leave the current Markdown block unmatched without consuming source.
+        tail_score, tail_path = solve(block_index + 1, source_index, fuzzy_allowed)
+        options.append((tail_score, tail_path))
+
+        # Skipping a source paragraph disables fuzzy matching for the current
+        # block; a later exact anchor can still cross the gap.
+        tail_score, tail_path = solve(block_index, source_index + 1, False)
+        options.append((tail_score, tail_path))
+
+        best_score, best_path = options[0]
+        for candidate_score, candidate_path in options[1:]:
+            if candidate_score > best_score:
+                best_score, best_path = candidate_score, candidate_path
+        return best_score, best_path
+
+    _score, path = solve(0, 0, True)
+    return {block_index: child_index for block_index, child_index in path}
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Return Levenshtein distance for bounded short-key fuzzy matching."""
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[j] + 1,
+                previous[j - 1] + (left_char != right_char),
+            ))
+        previous = current
+    return previous[-1]
 
 
 def _anchor_before(blocks: list[_Block], mapping: dict[int, int], start: int) -> int:
@@ -546,14 +618,34 @@ def _list_headings(children: list[etree._Element]) -> dict[int, etree._Element]:
     found: dict[int, etree._Element] = {}
     for child in children:
         numbering = child.find(f"{{{W}}}pPr/{{{W}}}numPr")
-        if numbering is None or child.find(f"{{{W}}}r/{{{W}}}rPr/{{{W}}}b") is None:
-            continue
-        if child.find(f"{{{W}}}r/{{{W}}}rPr/{{{W}}}highlight") is not None:
+        if numbering is None or not _has_clean_direct_bold_run(child):
             continue
         level_node = numbering.find(f"{{{W}}}ilvl")
         level = int(level_node.get(f"{{{W}}}val") or "0") if level_node is not None else 0
         found.setdefault(level, child)
     return found
+
+
+def _has_clean_direct_bold_run(element: etree._Element) -> bool:
+    """Return true for a numbered bold sample without index/field markup."""
+    blocked = {
+        f"{{{W}}}tab", f"{{{W}}}instrText", f"{{{W}}}fldChar",
+        f"{{{W}}}fldSimple", f"{{{W}}}hyperlink",
+    }
+    if any(node.tag in blocked for node in element.iter()):
+        return False
+    for run in element.findall(f"{{{W}}}r"):
+        properties = run.find(f"{{{W}}}rPr")
+        bold = properties.find(f"{{{W}}}b") if properties is not None else None
+        if bold is None and properties is not None:
+            bold = properties.find(f"{{{W}}}bCs")
+        if bold is None or (bold.get(f"{{{W}}}val", "true").lower() in {"0", "false", "off", "none"}):
+            continue
+        if properties is not None and properties.find(f"{{{W}}}highlight") is not None:
+            continue
+        if any(node.text for node in run.iter(f"{{{W}}}t")):
+            return True
+    return False
 
 
 def _apply(root: etree._Element, operations: list[tuple]) -> None:
