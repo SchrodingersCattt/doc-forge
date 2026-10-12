@@ -220,7 +220,6 @@ def _render_receipts(paths: Sequence[Path], output_dir: Path, engine: str) -> di
         documents.append(
             {
                 "docx": str(docx),
-                "pdf_sha256": sha256_file(pdf),
                 "page_count": len(pages),
                 "pages": pages,
             }
@@ -347,7 +346,11 @@ def build_docx_contract(
                 accept_baseline=True,
                 report_path=redline_report,
                 workers=1,
+                revision_date="1970-01-01T00:00:00Z",
             )
+            redline_report_data = json.loads(redline_report.read_text(encoding="utf-8"))
+            redline_report_data["current"] = str(output.resolve())
+            redline_report_data["output"] = str(redline_path.resolve())
             redline_receipt = {
                 "enabled": True,
                 "baseline": {"path": str(baseline_path.resolve()), "sha256": sha256_file(baseline_path)},
@@ -358,7 +361,7 @@ def build_docx_contract(
                 },
                 "summary": redline_summary,
                 "accepted_view_equivalent": True,
-                "report": json.loads(redline_report.read_text(encoding="utf-8")),
+                "report": redline_report_data,
             }
             _canonicalize_package(staged_redline)
             redline_receipt["output"]["sha256"] = sha256_file(staged_redline)

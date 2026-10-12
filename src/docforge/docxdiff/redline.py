@@ -49,7 +49,6 @@ CLOSING_PUNCTUATION = frozenset("，。；：！？、）】》〉」』〕〗�
 # escaped punctuation (``\<``/``\[``) and the template converter turns
 # ``N₅⁻`` into an ASCII ``N5–`` run with true script formatting.
 _ESCAPED_PUNCTUATION = re.compile(r"\\([\\`*{}\[\]()#+\-.!_>~|<%$&=:?@])")
-BLOCK_REPLACE_THRESHOLD = 0.25
 REVISION_NAMES = ("ins", "del", "moveFrom", "moveTo", "rPrChange", "pPrChange", "sectPrChange")
 COMMENT_NAMES = (
     "comments.xml",
@@ -63,7 +62,6 @@ PASSTHROUGH_LOCAL_NAMES = {
     "pict",
     "object",
     "fldChar",
-    "fldSimple",
     "instrText",
     "footnoteReference",
     "endnoteReference",
@@ -120,24 +118,11 @@ class Block:
     companion: etree._Element | None = None
 
 
-class SparseRedlineError(ValueError):
-    """Raised when a document-level replacement is too sparse to review.
-
-    ``summary`` is intentionally attached to the exception so callers that do
-    not use the CLI can still audit why no output was written.
-    """
-
-    def __init__(self, summary: dict[str, int], diagnostic: str) -> None:
-        self.summary = dict(summary)
-        self.diagnostic = diagnostic
-        super().__init__(diagnostic)
-
-
 class Context:
-    def __init__(self, author: str, next_id: int):
+    def __init__(self, author: str, next_id: int, revision_date: str | None = None):
         self.author = author
         self.next_id = next_id
-        self.date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.date = revision_date or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def attrs(self) -> dict[str, str]:
         result = {
@@ -470,17 +455,6 @@ def _reference_content(block: Block) -> str | None:
     return _normalize(match.group(1))
 
 
-def _ratio_cutoff(left: Block, right: Block) -> float | None:
-    """Return the paragraph-ratio cutoff used to reject a candidate pair."""
-    if left.kind != "p" or right.kind != "p":
-        return None
-    a, b = _normalize(left.text), _normalize(right.text)
-    if not a or not b:
-        return None
-    heading = "heading" in left.style.lower() or "heading" in right.style.lower()
-    return 0.22 if heading or min(len(a), len(b)) < 80 else 0.55
-
-
 def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> float:
     if left.kind != right.kind:
         return -10.0
@@ -530,8 +504,8 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     # need a higher bar: a 0.3 overlap is still a different sentence, and
     # word-merging it is unreadable. Short strings stay on the 0.22 bar so
     # small edits such as "before"/"after" remain in-paragraph revisions.
-    cutoff = _ratio_cutoff(left, right)
-    assert cutoff is not None
+    heading = "heading" in left.style.lower() or "heading" in right.style.lower()
+    cutoff = 0.22 if heading or min(len(a), len(b)) < 80 else 0.55
     return -8.0 if ratio < cutoff else 5.0 * ratio - 1.5 + (0.5 if left.style == right.style else 0.0)
 
 
@@ -680,110 +654,6 @@ def _pair_in_place_rewrites(
             result.append(item)
         cursor = end
     return result
-
-
-def _opaque_reasons(block: Block) -> tuple[str, ...]:
-    """Describe layout-bearing controls that make a block opaque to word diff."""
-    reasons: set[str] = set()
-    elements = [block.element]
-    if block.companion is not None:
-        elements.append(block.companion)
-    for element in elements:
-        for node in element.iter():
-            local = etree.QName(node).localname
-            if local == "drawing":
-                reasons.add("drawing")
-            elif local in {"oMath", "oMathPara"}:
-                reasons.add("oMath")
-            elif local in {"fldChar", "fldSimple", "instrText"}:
-                reasons.add("field")
-            elif local == "sdt":
-                reasons.add("content-control")
-    return tuple(sorted(reasons))
-
-
-def _best_rejected_ratio(
-    block: Block, candidates: list[Block]
-) -> tuple[float | None, float | None]:
-    """Return the strongest ratio and its pair cutoff.
-
-    Prefer candidates that fell below the cutoff. An unmatched block can also
-    be left in a gap by the global alignment even when its best candidate
-    clears the ratio cutoff; retaining that ratio in the diagnostic still
-    tells the reviewer why the paragraph was considered.
-    """
-    all_candidates: list[tuple[float, float]] = []
-    rejected: list[tuple[float, float]] = []
-    for candidate in candidates:
-        cutoff = _ratio_cutoff(block, candidate)
-        if cutoff is None or block.kind != candidate.kind:
-            continue
-        left, right = _normalize(block.text), _normalize(candidate.text)
-        if not left or not right:
-            continue
-        ratio = _pair_ratio((left, right))
-        all_candidates.append((ratio, cutoff))
-        if ratio < cutoff:
-            rejected.append((ratio, cutoff))
-    if rejected:
-        return max(rejected, key=lambda item: item[0])
-    if not all_candidates:
-        return None, None
-    return max(all_candidates, key=lambda item: item[0])
-
-
-def _truncate_diagnostic(text: str, limit: int = 96) -> str:
-    value = _normalize(text).replace("|", "\\|") or "∅"
-    return value if len(value) <= limit else value[: limit - 1] + "…"
-
-
-def _format_sparse_diagnostic(
-    base: list[Block],
-    current: list[Block],
-    aligned: list[tuple[str, int | None, int | None]],
-    matched: int,
-) -> str:
-    """Render the alignment that caused a sparse redline refusal."""
-    threshold = BLOCK_REPLACE_THRESHOLD
-    rate = matched / max(len(aligned), 1)
-    lines = [
-        (
-            "redline refused: sparse alignment (block_replace=1); "
-            f"matched={matched}/{len(aligned)} ({rate:.1%}) is below "
-            f"the {threshold:.0%} threshold"
-        ),
-        "",
-        "baseline index | current index | action | normalized text | best rejected ratio | cutoff | opaque",
-        "--- | --- | --- | --- | --- | --- | ---",
-    ]
-    for action, base_index, current_index in aligned:
-        if action == "match":
-            old = base[base_index]  # type: ignore[index]
-            new = current[current_index]  # type: ignore[index]
-            text = f"{_truncate_diagnostic(old.text)} → {_truncate_diagnostic(new.text)}"
-            opaque = ",".join(sorted(set(_opaque_reasons(old)) | set(_opaque_reasons(new)))) or "no"
-            best, cutoff = None, None
-            label = "pair"
-        elif action == "insert":
-            new = current[current_index]  # type: ignore[index]
-            text = _truncate_diagnostic(new.text)
-            best, cutoff = _best_rejected_ratio(new, base)
-            opaque = ",".join(_opaque_reasons(new)) or "no"
-            label = "insert"
-        else:
-            old = base[base_index]  # type: ignore[index]
-            text = _truncate_diagnostic(old.text)
-            best, cutoff = _best_rejected_ratio(old, current)
-            opaque = ",".join(_opaque_reasons(old)) or "no"
-            label = "delete"
-        best_text = f"{best:.2f}" if best is not None else "—"
-        cutoff_text = f"{cutoff:.2f}" if cutoff is not None else "—"
-        lines.append(
-            f"{base_index if base_index is not None else '—'} | "
-            f"{current_index if current_index is not None else '—'} | "
-            f"{label} | {text} | {best_text} | {cutoff_text} | {opaque}"
-        )
-    return "\n".join(lines)
 
 
 def _revision_shell(node: etree._Element) -> etree._Element | None:
@@ -2222,20 +2092,16 @@ def create_tracked_docx(
     workers: int | None = None,
     accept_baseline: bool = False,
     report_path: Path | None = None,
-    allow_block_replace: bool = False,
+    revision_date: str | None = None,
 ) -> dict[str, int]:
     """Write ``output_path`` as ``current_path`` tracked against ``base_path``.
 
     ``ratio_cache`` persists paragraph similarity ratios between runs, and
     ``workers`` sets the process count for ratios not yet cached (``1`` keeps
-    the computation in this process). Set ``accept_baseline`` to materialize
-    earlier baseline revisions first. When ``report_path`` is provided, write
-    a JSON alignment report without changing the historical count-only return
-    value. ``allow_block_replace`` opts into the
-    legacy insertion-then-deletion output when fewer than a quarter of the
-    aligned blocks pair; by default that sparse redline raises
-    :class:`SparseRedlineError` before writing ``output_path``. Neither ratio
-    caching nor worker count changes the result.
+    the computation in this process). Neither changes the result. Set
+    ``accept_baseline`` to materialize earlier baseline revisions first.
+    When ``report_path`` is provided, write a JSON alignment report without
+    changing the historical count-only return value.
     """
     validate_output_path(output_path)
     validate_output_path(report_path, label="report")
@@ -2260,7 +2126,7 @@ def create_tracked_docx(
         block for block in base_blocks
         if block.drawing or not _NOISE_PARAGRAPH.fullmatch(_normalize(block.text))
     ]
-    context = Context(author, _next_id(raw_base_root))
+    context = Context(author, _next_id(raw_base_root), revision_date)
     carry_base, save_base_relationships = _base_relationships(base_package, current_package)
     summary: dict[str, int] = {
         "matched": 0,
@@ -2295,16 +2161,8 @@ def create_tracked_docx(
     # structural rewrite (different geometry, figures, or paragraph roles).
     block_replace = (
         not _same_block_shape(base_blocks, current_blocks)
-        and matched < BLOCK_REPLACE_THRESHOLD * max(len(aligned), 1)
+        and matched < 0.25 * max(len(aligned), 1)
     )
-    if block_replace and not allow_block_replace:
-        summary["block_replace"] = 1
-        raise SparseRedlineError(
-            summary,
-            _format_sparse_diagnostic(base_blocks, current_blocks, aligned, matched),
-        )
-    if block_replace:
-        summary["block_replace"] = 1
     if block_replace:
         alignment_report.append(
             {
@@ -2315,7 +2173,7 @@ def create_tracked_docx(
                 "current_index": None,
                 "baseline_text": None,
                 "current_text": None,
-                "summary_key": "block_replace",
+                "summary_key": None,
             }
         )
         aligned = [("insert", None, index) for index in range(len(current_blocks))]
@@ -2542,6 +2400,7 @@ def create_tracked_docx(
                     "output": str(output_path),
                     "accept_baseline": accept_baseline,
                     "revision_author": author,
+                    "revision_date": context.date,
                     "actions": alignment_report,
                     "summary": summary,
                 },
@@ -2554,4 +2413,4 @@ def create_tracked_docx(
     return summary
 
 
-__all__ = ["create_tracked_docx", "Package", "SparseRedlineError"]
+__all__ = ["create_tracked_docx", "Package"]
