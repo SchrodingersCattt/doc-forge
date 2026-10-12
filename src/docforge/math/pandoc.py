@@ -102,6 +102,19 @@ def _normalize_backend_source(source: str) -> str:
     return source
 
 
+def _remove_alignment_markers(result: etree._Element) -> None:
+    """Drop Pandoc 3.9's literal copies of TeX alignment separators."""
+    for run in result.xpath(
+        ".//m:oMath//m:r",
+        namespaces=NAMESPACES,
+    ):
+        texts = run.xpath("./m:t/text()", namespaces=NAMESPACES)
+        if texts == ["&"]:
+            parent = run.getparent()
+            if parent is not None:
+                parent.remove(run)
+
+
 def latex_to_omml(source: str) -> etree._Element:
     """Return one detached ``m:oMathPara`` compiled from display math.
 
@@ -166,4 +179,6 @@ def latex_to_omml(source: str) -> etree._Element:
     result = copy.deepcopy(math_paragraphs[0])
     if not result.xpath("./m:oMath", namespaces=NAMESPACES):
         raise MathConversionError("pandoc returned an empty OMML display equation")
+    if re.search(r"(?<!\\)&", backend_source):
+        _remove_alignment_markers(result)
     return result
