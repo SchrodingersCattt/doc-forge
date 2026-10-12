@@ -156,7 +156,11 @@ def _opcode_key(block: _Block) -> str:
 
 
 def _key(raw: str) -> str:
-    return inline_key(raw)
+    value = inline_key(raw)
+    heading = HEADING_RE.match(raw.strip())
+    if heading:
+        value = inline_key(heading.group(2))
+    return value
 
 
 def _paragraph_key(element: etree._Element) -> str:
@@ -652,6 +656,8 @@ def _add_runs(
             marks.add("sub")
         elif run.superscript:
             marks.add("sup")
+        if run.code:
+            marks.add("code")
         _append_run(paragraph, run.text, base_properties, marks)
 
 
@@ -670,6 +676,12 @@ def _append_run(paragraph: etree._Element, text: str, base_properties: etree._El
     if "sub" in marks or "sup" in marks:
         align = etree.SubElement(properties, f"{{{W}}}vertAlign")
         align.set(f"{{{W}}}val", "subscript" if "sub" in marks else "superscript")
+    if "code" in marks:
+        fonts = properties.find(f"{{{W}}}rFonts")
+        if fonts is None:
+            fonts = etree.SubElement(properties, f"{{{W}}}rFonts")
+        for attribute in ("ascii", "hAnsi", "cs"):
+            fonts.set(f"{{{W}}}{attribute}", "Consolas")
     if len(properties):
         run.append(properties)
     node = etree.SubElement(run, f"{{{W}}}t")
