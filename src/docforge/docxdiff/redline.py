@@ -331,6 +331,59 @@ def _paragraph_style(paragraph: etree._Element) -> str:
     return style.get(f"{{{W}}}val", "") if style is not None else ""
 
 
+def _style_id_crosswalk(
+    base_styles: etree._Element,
+    current_styles: etree._Element,
+) -> dict[str, str]:
+    """Map baseline style ids onto the ids of the same named styles in the output.
+
+    Word and python-docx do not share style ids: a reviewed file stores Heading
+    1 as ``1`` and Heading 2 as ``21``, while a generated file stores
+    ``Heading1`` and ``Heading2``. Unchanged paragraphs are copied from the
+    baseline into the generated package. Leaving those ids in place makes Word
+    drop H1/H2 and paint the headings as body text.
+    """
+
+    def index(root: etree._Element) -> tuple[dict[str, str], dict[str, str]]:
+        by_id: dict[str, str] = {}
+        by_name: dict[str, str] = {}
+        for style in root.findall(f"{{{W}}}style"):
+            style_id = style.get(f"{{{W}}}styleId")
+            name_node = style.find(f"{{{W}}}name")
+            if not style_id or name_node is None:
+                continue
+            name = name_node.get(f"{{{W}}}val", "").casefold()
+            by_id[style_id] = name
+            by_name.setdefault(name, style_id)
+        return by_id, by_name
+
+    base_ids, _base_names = index(base_styles)
+    current_ids, current_names = index(current_styles)
+    mapping: dict[str, str] = {}
+    for style_id, name in base_ids.items():
+        target = current_names.get(name)
+        if not target or target == style_id:
+            continue
+        # This id already names a different style in the output package.
+        # Rewriting every use would retarget paragraphs that were generated
+        # with that id.
+        if style_id in current_ids and current_ids[style_id] != name:
+            continue
+        mapping[style_id] = target
+    return mapping
+
+
+def _apply_style_crosswalk(root: etree._Element, mapping: dict[str, str]) -> None:
+    if not mapping:
+        return
+    for node in root.iter():
+        if etree.QName(node).localname not in {"pStyle", "rStyle"}:
+            continue
+        value = node.get(f"{{{W}}}val")
+        if value in mapping:
+            node.set(f"{{{W}}}val", mapping[value])
+
+
 def _blocks(root: etree._Element) -> tuple[etree._Element, list[Block]]:
     body = root.find(".//w:body", NS)
     if body is None:
@@ -446,7 +499,9 @@ def _stable_block_label(block: Block) -> str | None:
         if _inside(marker, "del") or _inside(marker, "moveFrom"):
             continue
         name = marker.get(f"{{{W}}}name", "")
-        if name.startswith("ref_"):
+        # Numeric ref_34 anchors are citation ordinals. They move when an
+        # earlier reference is inserted, so they are not a stable identity.
+        if name.startswith("ref_") and not name[4:].isdigit():
             return name
     # Displayed bibliography ordinals (`[1]`, `1.`, `1)`) are deliberately
     # excluded: inserting an earlier citation renumbers every later entry.
@@ -459,7 +514,8 @@ def _reference_content(block: Block) -> str | None:
     if block.kind != "p":
         return None
     style = block.style.casefold()
-    if "reference" not in style and "bibliograph" not in style:
+    numbered = re.match(r"\s*\[[^\]]+\]\s+\S", block.text) is not None
+    if "reference" not in style and "bibliograph" not in style and not numbered:
         return None
     match = re.match(
         r"\s*(?:\[[^\]]+\]\s*|[A-Za-z]?\d+[.)]\s+)(.*)$",
@@ -494,11 +550,12 @@ def _score(left: Block, right: Block, ratios: _RatioTable | None = None) -> floa
     if label_a and label_b and label_a != label_b:
         return -8.0
     stable_a, stable_b = _stable_block_label(left), _stable_block_label(right)
-    if stable_a or stable_b:
-        if stable_a is None or stable_b is None or stable_a != stable_b:
+    if stable_a and stable_b:
+        if stable_a != stable_b:
             return -8.0
         # A stable key is stronger evidence than a wording ratio. Keep the
         # entry in place even when an author list or title was rewritten.
+        # A label on only one side is new bookkeeping, not a different block.
         return 7.0
     reference_a, reference_b = _reference_content(left), _reference_content(right)
     if reference_a and reference_b:
@@ -604,9 +661,8 @@ def _same_slot(left: Block, right: Block) -> bool:
     insertions, deletions, and moved figures as structural revisions.
     """
     left_label, right_label = _stable_block_label(left), _stable_block_label(right)
-    if left_label or right_label:
-        if left_label is None or right_label is None or left_label != right_label:
-            return False
+    if left_label and right_label and left_label != right_label:
+        return False
     left_reference, right_reference = _reference_content(left), _reference_content(right)
     if (left_reference is None) != (right_reference is None):
         return False
@@ -653,7 +709,6 @@ def _pair_in_place_rewrites(
         deletes = [item for item in run if item[0] == "delete"]
         inserts = [item for item in run if item[0] == "insert"]
         paired_base: dict[int, int] = {}
-        paired_current: set[int] = set()
         # Pair in source order.  More elaborate matching would risk turning a
         # genuine paragraph move into a rewrite; the stable style/geometry
         # check is deliberately conservative.
@@ -663,20 +718,18 @@ def _pair_in_place_rewrites(
                 continue
             if _same_slot(base[base_index], current[current_index]):
                 paired_base[base_index] = current_index
-                paired_current.add(current_index)
-        # Re-emit unpaired actions in their original order.  A paired deletion
-        # emits the in-place match at its baseline position; its insertion is
-        # then omitted, preserving the surrounding paragraph order.
+        # Re-emit unpaired actions in their original order.  A paired rewrite
+        # is emitted where the new paragraph sits.  Emitting it at the baseline
+        # deletion instead moves that paragraph after any new paragraphs the
+        # aligner inserted first, so accepting the revisions no longer
+        # reproduces the current document.
+        paired_insert_base = {current_index: base_index for base_index, current_index in paired_base.items()}
         for item in run:
-            if item[0] == "delete":
-                base_index = item[1]
-                if base_index in paired_base:
-                    result.append(("match", base_index, paired_base[base_index]))
-                    continue
-            elif item[0] == "insert":
-                current_index = item[2]
-                if current_index in paired_current:
-                    continue
+            if item[0] == "delete" and item[1] in paired_base:
+                continue
+            if item[0] == "insert" and item[2] in paired_insert_base:
+                result.append(("match", paired_insert_base[item[2]], item[2]))
+                continue
             result.append(item)
         cursor = end
     return result
@@ -2125,6 +2178,26 @@ def _final_special_structure(root: etree._Element) -> list[tuple]:
     return result
 
 
+def _park_comment_markers(source: etree._Element, host: etree._Element, position: int) -> None:
+    """Move comment anchors out of content that acceptance is about to drop."""
+    markers = [
+        node
+        for name in _COMMENT_MARKERS
+        for node in list(source.iter(f"{{{W}}}{name}"))
+    ]
+    for node in markers:
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+        if etree.QName(node).localname == "commentReference":
+            run = etree.Element(f"{{{W}}}r")
+            run.append(node)
+            host.insert(position, run)
+        else:
+            host.insert(position, node)
+        position += 1
+
+
 def _accepted_revision_view(root: etree._Element) -> etree._Element:
     """Return a comment-preserving copy with all earlier revisions accepted.
 
@@ -2150,10 +2223,30 @@ def _accepted_revision_view(root: etree._Element) -> etree._Element:
     # Paragraph deletions use a revision marker in pPr rather than a wrapper
     # around the paragraph text. Remove those paragraphs before stripping the
     # remaining revision metadata, otherwise they would survive as empty blocks.
-    for paragraph in list(result.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=NS)):
+    # A comment anchored only on the deleted paragraph moves to the next
+    # surviving paragraph so acceptance does not drop the reviewer's note.
+    deleted_paragraphs = list(result.xpath(".//w:p[w:pPr/w:rPr/w:del]", namespaces=NS))
+    deleted_ids = set(map(id, deleted_paragraphs))
+    for paragraph in deleted_paragraphs:
         parent = paragraph.getparent()
-        if parent is not None:
-            parent.remove(paragraph)
+        if parent is None:
+            continue
+        siblings = [child for child in parent if child.tag == f"{{{W}}}p" and id(child) not in deleted_ids]
+        following = None
+        seen = False
+        for child in parent:
+            if child is paragraph:
+                seen = True
+                continue
+            if not seen or child.tag != f"{{{W}}}p" or id(child) in deleted_ids:
+                continue
+            following = child
+            break
+        host = following if following is not None else (siblings[-1] if siblings else None)
+        if host is not None:
+            props = host.find("./w:pPr", NS)
+            _park_comment_markers(paragraph, host, host.index(props) + 1 if props is not None else 0)
+        parent.remove(paragraph)
 
     # Table-row revisions are stored in w:trPr rather than as wrappers.
     for row in list(result.xpath(".//w:tr[w:trPr/w:del or w:trPr/w:moveFrom]", namespaces=NS)):
@@ -2167,12 +2260,15 @@ def _accepted_revision_view(root: etree._Element) -> etree._Element:
                 for marker in list(tr_pr.findall(f"./w:{name}", NS)):
                     tr_pr.remove(marker)
 
-    # Reject deleted/moved-from content.
+    # Reject deleted/moved-from content.  Comment anchors inside that content
+    # stay at the same position, without the deleted text.
     for name in ("del", "moveFrom"):
         for node in list(result.findall(f".//w:{name}", NS)):
             parent = node.getparent()
-            if parent is not None:
-                parent.remove(node)
+            if parent is None:
+                continue
+            _park_comment_markers(node, parent, parent.index(node))
+            parent.remove(node)
 
     # Accept inserted/moved-to content by unwrapping it in place. Iterate until
     # no wrappers remain so nested revisions are handled deterministically.
@@ -2510,6 +2606,14 @@ def create_tracked_docx(
         missing = {key: value for key, value in original_markers.items() if final_markers.get(key) != value}
         if missing:
             raise AssertionError(f"Comment anchors were not preserved: {missing}")
+    if "word/styles.xml" in base_package.parts and "word/styles.xml" in current_package.parts:
+        _apply_style_crosswalk(
+            current_root,
+            _style_id_crosswalk(
+                base_package.xml("word/styles.xml"),
+                current_package.xml("word/styles.xml"),
+            ),
+        )
     current_package.set_xml("word/document.xml", current_root)
     save_base_relationships()
     _copy_comment_parts(base_package, current_package)

@@ -492,6 +492,105 @@ def test_redline_ignores_equivalent_run_splits_inside_unchanged_words(tmp_path: 
     assert "old" in deleted
     assert "new" in inserted
 
+def test_in_place_rewrite_stays_at_the_new_paragraph() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import W, Block, _pair_in_place_rewrites
+
+    def block(text: str) -> Block:
+        paragraph = etree.Element(f"{{{W}}}p")
+        run = etree.SubElement(paragraph, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = text
+        return Block(paragraph, "p", text, "Normal", False)
+
+    base = [block("The previous opening stated the method in one paragraph.")]
+    current = [
+        block("The revised opening states the method first."),
+        block("The middle paragraph adds the measurement."),
+        block("The last paragraph states the boundary of the claim."),
+    ]
+    inserted_first = [
+        ("insert", None, 0),
+        ("insert", None, 1),
+        ("insert", None, 2),
+        ("delete", 0, None),
+    ]
+    deleted_first = [
+        ("delete", 0, None),
+        ("insert", None, 0),
+        ("insert", None, 1),
+        ("insert", None, 2),
+    ]
+    expected = [
+        ("match", 0, 0),
+        ("insert", None, 1),
+        ("insert", None, 2),
+    ]
+    assert _pair_in_place_rewrites(base, current, inserted_first) == expected
+    assert _pair_in_place_rewrites(base, current, deleted_first) == expected
+
+
+def test_redline_keeps_split_paragraph_order(tmp_path: Path) -> None:
+    from lxml import etree
+
+    base = tmp_path / "base-split.docx"
+    current = tmp_path / "current-split.docx"
+    old = Document()
+    old.add_paragraph("Results")
+    old.add_paragraph(
+        "The previous opening stated the method, the measurement, and the boundary in one paragraph."
+    )
+    old.save(base)
+    new = Document()
+    new.add_paragraph("Results")
+    new.add_paragraph("The revised opening states the method first.")
+    new.add_paragraph("The middle paragraph adds the measurement.")
+    new.add_paragraph("The last paragraph states the boundary of the claim.")
+    new.save(current)
+    tracked = tmp_path / "tracked-split.docx"
+    create_tracked_docx(base, current, tracked, overwrite=True)
+    root = etree.fromstring(zipfile.ZipFile(tracked).read("word/document.xml"))
+    accepted = [block.strip() for block in _final_blocks(_accepted_revision_view(root)) if block.strip()]
+    assert accepted == [
+        "Results",
+        "The revised opening states the method first.",
+        "The middle paragraph adds the measurement.",
+        "The last paragraph states the boundary of the claim.",
+    ]
+
+
+def test_accepted_view_keeps_comment_anchored_on_a_deleted_paragraph() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import W, _accepted_revision_view, _comment_counts
+
+    def paragraph(text: str, *, deleted: bool = False, comment: str | None = None) -> etree._Element:
+        result = etree.Element(f"{{{W}}}p")
+        if deleted:
+            props = etree.SubElement(result, f"{{{W}}}pPr")
+            mark = etree.SubElement(etree.SubElement(props, f"{{{W}}}rPr"), f"{{{W}}}del")
+            mark.set(f"{{{W}}}id", "1")
+        if comment is not None:
+            for name in ("commentRangeStart", "commentRangeEnd"):
+                marker = etree.SubElement(result, f"{{{W}}}{name}")
+                marker.set(f"{{{W}}}id", comment)
+            wrapper = etree.SubElement(result, f"{{{W}}}del")
+            reference = etree.SubElement(etree.SubElement(wrapper, f"{{{W}}}r"), f"{{{W}}}commentReference")
+            reference.set(f"{{{W}}}id", comment)
+        if text:
+            etree.SubElement(etree.SubElement(result, f"{{{W}}}r"), f"{{{W}}}t").text = text
+        return result
+
+    root = etree.Element(f"{{{W}}}document")
+    body = etree.SubElement(root, f"{{{W}}}body")
+    body.append(paragraph("", deleted=True, comment="9"))
+    body.append(paragraph("Figure stays."))
+    accepted = _accepted_revision_view(root)
+    assert _comment_counts(accepted) == {"9": (1, 1, 1)}
+    assert [node.text for node in accepted.iter(f"{{{W}}}t")] == ["Figure stays."]
+    assert accepted.find(f".//{{{W}}}p/{{{W}}}pPr/{{{W}}}rPr/{{{W}}}del") is None
+
+
 def test_redline_keeps_low_similarity_same_slot_as_word_diff(tmp_path: Path) -> None:
     base = tmp_path / "base-rewrite.docx"
     current = tmp_path / "current-rewrite.docx"
@@ -726,6 +825,29 @@ def test_redline_prefers_stable_bibliography_bookmark_over_body_similarity() -> 
         return Block(paragraph, "p", text, "Bibliography", False)
 
     assert _score(block("[1] Completely old title."), block("[9] Rewritten title.")) > 0
+
+
+def test_redline_ignores_numeric_reference_bookmarks_and_one_sided_captions() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _score
+
+    def block(text: str, bookmark: str | None = None, style: str = "") -> Block:
+        paragraph = etree.Element(f"{{{W}}}p", nsmap={"w": W})
+        if bookmark is not None:
+            marker = etree.SubElement(paragraph, f"{{{W}}}bookmarkStart")
+            marker.set(f"{{{W}}}name", bookmark)
+        run = etree.SubElement(paragraph, f"{{{W}}}r")
+        etree.SubElement(run, f"{{{W}}}t").text = text
+        return Block(paragraph, "p", text, style, False)
+
+    he = block("[35] He et al. Effects of Al addition.", "ref_34")
+    han = block("[34] Han et al. Lightweight high-entropy alloys.", "ref_34")
+    assert _score(he, han) < 0
+    same_han = block("[34] Han et al. Lightweight high-entropy alloys.")
+    assert _score(han, same_han) > 0
+    caption = "Figure 2. The same caption on both sides."
+    assert _score(block(caption), block(caption, "ref_fig_campaign")) > 0
 
 
 def test_redline_preserves_original_hyperlink_paragraph_and_picture(tmp_path: Path) -> None:
@@ -983,6 +1105,64 @@ def test_deleted_hyperlink_field_does_not_keep_field_codes(tmp_path: Path) -> No
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     assert root.xpath(".//w:del//w:fldChar", namespaces=ns) == []
     assert "Andreas Marek" in visible_text(root, "original")
+
+
+def test_redline_remaps_word_heading_style_ids_into_generated_package(tmp_path: Path) -> None:
+    """Reviewed Word files use heading style ids 1/21; generated files use Heading1/2."""
+    from lxml import etree
+
+    base = tmp_path / "base.docx"
+    current = tmp_path / "current.docx"
+    document = Document()
+    document.add_heading("Results", level=1)
+    document.add_heading("The architecture of agentic closed-loop discovery of alloys", level=2)
+    document.add_paragraph("To accelerate alloy design.")
+    document.save(base)
+    document = Document()
+    document.add_heading("Results", level=1)
+    document.add_heading("The architecture of agentic closed-loop discovery of alloys", level=2)
+    document.add_paragraph("We accelerate alloy design.")
+    document.save(current)
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def rename_heading_ids(path: Path) -> None:
+        parts: dict[str, bytes] = {}
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                parts[name] = archive.read(name)
+        styles = etree.fromstring(parts["word/styles.xml"])
+        document_xml = etree.fromstring(parts["word/document.xml"])
+        replacements = {"Heading1": "1", "Heading2": "21"}
+        for node in list(styles.iter()) + list(document_xml.iter()):
+            style_id = node.get(f"{{{w}}}styleId")
+            if style_id in replacements:
+                node.set(f"{{{w}}}styleId", replacements[style_id])
+            value = node.get(f"{{{w}}}val")
+            if value in replacements and etree.QName(node).localname in {"pStyle", "rStyle", "basedOn", "link", "next"}:
+                node.set(f"{{{w}}}val", replacements[value])
+        parts["word/styles.xml"] = etree.tostring(styles, xml_declaration=True, encoding="UTF-8", standalone=True)
+        parts["word/document.xml"] = etree.tostring(document_xml, xml_declaration=True, encoding="UTF-8", standalone=True)
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in parts.items():
+                archive.writestr(name, payload)
+
+    rename_heading_ids(base)
+    output = tmp_path / "tracked.docx"
+    create_tracked_docx(base, current, output, overwrite=True)
+    root = etree.fromstring(zipfile.ZipFile(output).read("word/document.xml"))
+    styles = {
+        "".join(node.text or "" for node in paragraph.iter(f"{{{w}}}t") if node.getparent().tag != f"{{{w}}}delText"): (
+            paragraph.find(f"./{{{w}}}pPr/{{{w}}}pStyle").get(f"{{{w}}}val")
+            if paragraph.find(f"./{{{w}}}pPr/{{{w}}}pStyle") is not None
+            else ""
+        )
+        for paragraph in root.findall(f".//{{{w}}}p")
+    }
+    assert styles["Results"] == "Heading1"
+    assert styles["The architecture of agentic closed-loop discovery of alloys"] == "Heading2"
+    assert "1" not in styles.values()
+    assert "21" not in styles.values()
 
 
 def test_internal_hyperlink_field_does_not_force_whole_paragraph_replacement():
