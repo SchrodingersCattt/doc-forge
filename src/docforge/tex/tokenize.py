@@ -844,6 +844,7 @@ def _preprocess(
     s = re.sub(r"\\vdet\b", lambda _: "V_{\\mathrm{det}}", s)
     s = re.sub(r"\\etasq\b", lambda _: "\\eta^{2}", s)
     s = s.replace("\\%", "%")
+    s = s.replace("\\&", "&")
     s = s.replace("\\#", "#")
     s = s.replace("\\{", "{")
     s = s.replace("\\}", "}")

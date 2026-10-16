@@ -1849,6 +1849,19 @@ def _body_of(path: Path) -> str:
     return _body_from_text(text)
 
 
+def _register_trailing_citations(resolver: CitationResolver, lines: list[str]) -> None:
+    """Number citations that appear after ``\\bibliography``.
+
+    Nature-style manuscripts print the reference list before Methods, yet
+    BibTeX lists every cited work, numbered in order of first citation. The
+    reference list is written when the converter reaches ``\\bibliography``,
+    so citations further down must be numbered first or they are left out.
+    """
+    trailing = _strip_latex_comments("\n".join(lines))
+    for match in re.finditer(r"\\(cite|mainref)\{([^}]+)\}", trailing):
+        resolver.labels_for(match.group(2), use_inherited=match.group(1) == "mainref")
+
+
 def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 aux_path: Path | None = None,
                 inherited_citations: dict[str, int] | None = None,
@@ -2125,6 +2138,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
 
         # --- bibliography ---
         if r"\bibliography{" in line:
+            _register_trailing_citations(resolver, lines[i + 1:])
             refs = resolver.reference_items()
             if refs:
                 if is_si_doc:
