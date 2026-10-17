@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import shutil
 import tempfile
@@ -21,6 +22,7 @@ from .models import (
     StageResult,
     StageSpec,
     ValidationReport,
+    _portable_path,
     canonical_json,
     confined_path,
     new_run_id,
@@ -114,6 +116,17 @@ class CallableStage:
         raise TypeError(f"stage {self.name} returned {type(value).__name__}, expected StageResult or mapping")
 
 
+class CallableValidator:
+    """Adapt a ``context -> ValidationReport`` callback."""
+
+    def __init__(self, name: str, function: Callable[[StageContext], Any]) -> None:
+        self.name = name
+        self.function = function
+
+    def validate(self, context: StageContext) -> ValidationReport:
+        return ValidationReport.from_value(self.function(context))
+
+
 @dataclass
 class PipelineResult:
     success: bool
@@ -156,6 +169,13 @@ def _instance(value: Any, *, kind: str) -> Any:
     if isinstance(value, type):
         return value()
     if callable(value) and not hasattr(value, "run") and not hasattr(value, "validate"):
+        try:
+            signature = inspect.signature(value)
+            required = [item for item in signature.parameters.values() if item.default is inspect.Parameter.empty and item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        except (TypeError, ValueError):
+            required = []
+        if required:
+            return CallableStage(kind, value) if kind == "stage" else CallableValidator(kind, value)
         return value()
     return value
 
@@ -195,13 +215,48 @@ class PipelineRunner:
             path = source.get("path") if isinstance(source, Mapping) else None
             if path is not None:
                 try:
-                    if Path(str(path)).is_absolute() or str(path).startswith(("../", "..\\")):
-                        errors.append(f"document {document.id} source path must be relative: {path}")
-                except OSError:
-                    errors.append(f"document {document.id} source path is invalid: {path}")
+                    _portable_path(str(path), label=f"document {document.id} source path")
+                except (TypeError, ValueError):
+                    errors.append(f"document {document.id} source path must be relative: {path}")
         for name in spec.release.required_artifacts:
             if not str(name).strip():
                 errors.append("release required_artifacts contains an empty value")
+        produced_by: dict[str, str] = {}
+        for stage in spec.stages:
+            for output in stage.produces:
+                produced_by.setdefault(str(output), stage.id)
+        document_artifacts: set[str] = set()
+        for document in spec.documents:
+            document_artifacts.add(document.id)
+            document_artifacts.update(document.outputs)
+            if isinstance(document.source, Mapping):
+                for key in ("id", "artifact_id", "path"):
+                    value = document.source.get(key)
+                    if value:
+                        document_artifacts.add(str(value))
+        dependency_map = {stage.id: set(stage.depends_on) for stage in spec.stages}
+
+        def is_transitive_dependency(stage_id: str, producer_id: str) -> bool:
+            pending = list(dependency_map.get(stage_id, ()))
+            visited: set[str] = set()
+            while pending:
+                candidate = pending.pop()
+                if candidate in visited:
+                    continue
+                visited.add(candidate)
+                if candidate == producer_id:
+                    return True
+                pending.extend(dependency_map.get(candidate, ()))
+            return False
+
+        for stage in spec.stages:
+            for consumed in stage.consumes:
+                producer = produced_by.get(str(consumed))
+                if producer is None:
+                    if str(consumed) not in document_artifacts:
+                        errors.append(f"stage {stage.id} consumes undeclared artifact: {consumed}")
+                elif not is_transitive_dependency(stage.id, producer):
+                    errors.append(f"stage {stage.id} consumes {consumed} without depending on producer {producer}")
         order = self._topological(spec.stages, errors)
         # ``produces`` is a declarative output namespace.  Duplicate names or
         # paths are rejected before any user stage can write to disk.
@@ -250,11 +305,8 @@ class PipelineRunner:
         if not source_root.is_dir():
             raise FileNotFoundError(source_root)
         target = Path(output_dir or source_root / "dist").resolve()
-        if target == source_root or source_root in target.parents:
-            # Outputs inside the input workspace are allowed only under a
-            # dedicated directory, never by replacing the source root itself.
-            if target == source_root:
-                raise ValueError("output_dir must be a dedicated child or sibling of workspace")
+        if target == source_root or target in source_root.parents:
+            raise ValueError("output_dir must not equal or contain the workspace")
         if target.exists() and target.is_symlink():
             raise ValueError("output_dir must not be a symlink")
         rid = run_id or new_run_id()
@@ -285,16 +337,17 @@ class PipelineRunner:
                     all_diagnostics.extend(result.diagnostics)
                     failed = True
                     continue
+                cache_key = self._stage_cache_key(stage, inputs)
                 context = StageContext(spec, stage_root, source_root, stage_root, stage, inputs, artifacts, stage.parameters, rid)
                 try:
                     value = implementation.run(context)
                     result = value if isinstance(value, StageResult) else CallableStage(stage.id, lambda _context: value).run(context)
                 except Exception as exc:  # noqa: BLE001 - recorded as an auditable diagnostic
-                    result = StageResult(status="fail", diagnostics=(Diagnostic("error", "pipeline.stage_exception", f"stage {stage.id} failed: {exc}", details={"stage": stage.id, "exception": type(exc).__name__}),))
+                    result = StageResult(status="fail", diagnostics=(Diagnostic("error", "pipeline.stage_exception", f"stage {stage.id} failed", details={"stage": stage.id, "exception_type": type(exc).__name__, "exception_message": str(exc)}),), cache_key=cache_key)
                 try:
-                    result = self._finalize_stage(result, stage, stage_root, artifacts)
+                    result = self._finalize_stage(result, stage, stage_root, artifacts, cache_key=cache_key)
                 except Exception as exc:  # noqa: BLE001 - publication remains blocked and the error is recorded
-                    result = StageResult(status="fail", diagnostics=(Diagnostic("error", "pipeline.artifact_output_invalid", f"stage {stage.id} produced an invalid artifact: {exc}", details={"stage": stage.id, "exception": type(exc).__name__}),))
+                    result = StageResult(status="fail", diagnostics=(Diagnostic("error", "pipeline.artifact_output_invalid", f"stage {stage.id} produced an invalid artifact", details={"stage": stage.id, "exception_type": type(exc).__name__, "exception_message": str(exc)}),), cache_key=cache_key)
                 results[stage.id] = result
                 all_diagnostics.extend(result.diagnostics)
                 for artifact in result.artifacts:
@@ -343,7 +396,9 @@ class PipelineRunner:
                 # leaving the previous publication untouched.
                 failed_root = target.parent / f".docforge-failed-{rid}"
                 if failed_root.exists():
-                    shutil.rmtree(failed_root, ignore_errors=True)
+                    if not self._has_publication_marker(failed_root):
+                        raise ValueError(f"refusing to replace unmarked failure receipt: {failed_root.name}")
+                    shutil.rmtree(failed_root)
                 os.replace(stage_root, failed_root)
                 publication = "failed"
                 published_manifest = failed_root / "manifest.json"
@@ -364,21 +419,35 @@ class PipelineRunner:
             result[key] = found
         return result
 
+    def _stage_cache_key(self, stage: StageSpec, inputs: Mapping[str, ArtifactRef]) -> str:
+        return sha256_bytes(canonical_json({
+            "stage": stage.to_dict(),
+            "inputs": [{"id": item.id, "role": item.role, "sha256": item.sha256} for item in inputs.values()],
+            "toolchain": self.toolchain,
+        }).encode("utf-8"))
+
     @staticmethod
-    def _finalize_stage(result: StageResult, stage: StageSpec, root: Path, existing: Mapping[str, ArtifactRef]) -> StageResult:
+    def _finalize_stage(result: StageResult, stage: StageSpec, root: Path, existing: Mapping[str, ArtifactRef], *, cache_key: str) -> StageResult:
         outputs: list[ArtifactRef] = []
         seen_paths = {item.path for item in existing.values()}
+        seen_ids = set(existing)
+        declared = {str(item) for item in stage.produces}
         for item in result.artifacts:
-            if item.path in {"manifest.json", "report.txt", "checksums.sha256"}:
-                raise ValueError(f"artifact output collides with reserved audit file: {item.path}")
             path = confined_path(root, item.path, allow_missing=False)
             if path.is_symlink():
                 raise ValueError(f"artifact output must not be a symlink: {item.path}")
-            if item.path in seen_paths:
-                raise ValueError(f"duplicate artifact output path: {item.path}")
-            seen_paths.add(item.path)
+            normalized_path = path.relative_to(root.resolve()).as_posix()
+            if normalized_path in {"manifest.json", "report.txt", "checksums.sha256"}:
+                raise ValueError(f"artifact output collides with reserved audit file: {normalized_path}")
+            if item.id not in declared and item.role not in declared:
+                raise ValueError(f"artifact {item.id} is not declared by stage {stage.id}")
+            if item.id in seen_ids:
+                raise ValueError(f"duplicate artifact id: {item.id}")
+            if normalized_path in seen_paths:
+                raise ValueError(f"duplicate artifact output path: {normalized_path}")
+            seen_ids.add(item.id)
+            seen_paths.add(normalized_path)
             outputs.append(ArtifactRef.from_path(item.id, item.role, path, root=root, media_type=item.media_type, schema=item.schema, producer_stage=stage.id, metadata=item.metadata))
-        cache_key = result.cache_key or sha256_bytes(canonical_json({"stage": stage.to_dict(), "inputs": [item.to_dict() for item in outputs], "parameters": stage.parameters}).encode("utf-8"))
         provenance = dict(result.provenance)
         provenance.setdefault("stage", stage.id)
         return StageResult(tuple(outputs), result.diagnostics, provenance, result.metrics, cache_key, result.status)
@@ -412,7 +481,7 @@ class PipelineRunner:
                 report.diagnostics = (Diagnostic(severity, f"pipeline.{category}_unavailable", f"{category} {definition.id} is unavailable"),)
             return report
         except Exception as exc:  # noqa: BLE001
-            return ValidationReport("fail", (Diagnostic("error", f"pipeline.{category}_exception", f"{category} {definition.id} failed: {exc}", details={"exception": type(exc).__name__}),))
+            return ValidationReport("fail", (Diagnostic("error", f"pipeline.{category}_exception", f"{category} {definition.id} failed", details={"exception_type": type(exc).__name__, "exception_message": str(exc)}),))
 
     @staticmethod
     def _manifest(spec: PipelineSpec, run_id: str, artifacts: tuple[ArtifactRef, ...], results: Mapping[str, StageResult], diagnostics: Iterable[Diagnostic], failed: bool, toolchain: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -449,12 +518,31 @@ class PipelineRunner:
         return "\n".join(rows) + ("\n" if rows else "")
 
     @staticmethod
-    def _publish(stage_root: Path, target: Path, *, retain_previous: bool) -> None:
+    def _has_publication_marker(path: Path) -> bool:
+        """Return true only for a directory produced by this pipeline."""
+
+        if not path.is_dir() or path.is_symlink():
+            return False
+        marker = path / "manifest.json"
+        if not marker.is_file() or marker.is_symlink():
+            return False
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            return False
+        return isinstance(payload, Mapping) and payload.get("schema") == "docforge.pipeline.manifest.v1"
+
+    @classmethod
+    def _publish(cls, stage_root: Path, target: Path, *, retain_previous: bool) -> None:
         if target.exists() and target.is_symlink():
             raise ValueError("output_dir must not be a symlink")
         backup = target.with_name(target.name + ".previous")
+        for existing, label in ((target, "output_dir"), (backup, "previous publication")):
+            if existing.exists() or existing.is_symlink():
+                if not cls._has_publication_marker(existing):
+                    raise ValueError(f"refusing to replace unmarked {label}: {existing}")
         if backup.exists():
-            shutil.rmtree(backup) if backup.is_dir() and not backup.is_symlink() else backup.unlink()
+            shutil.rmtree(backup)
         if target.exists():
             os.replace(target, backup)
         try:
@@ -466,7 +554,9 @@ class PipelineRunner:
                 os.replace(backup, target)
             raise
         if not retain_previous and backup.exists():
-            shutil.rmtree(backup) if backup.is_dir() and not backup.is_symlink() else backup.unlink()
+            if not cls._has_publication_marker(backup):
+                raise ValueError(f"refusing to remove unmarked previous publication: {backup}")
+            shutil.rmtree(backup)
 
 
 __all__ = ["Stage", "Gate", "Validator", "Registry", "CallableStage", "PipelineRunner", "PipelineResult", "PipelinePreflightError"]

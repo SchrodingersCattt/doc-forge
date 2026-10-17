@@ -8,6 +8,8 @@ are absent.
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -246,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--output-dir", type=Path, default=None, help="Atomic publication directory (default: WORKSPACE/dist)")
     pipeline.add_argument("--run-id", default=None, help="Stable run id for reproducible receipts")
     pipeline.add_argument("--no-publish", action="store_true", help="Build and validate without replacing the publication directory")
+    pipeline.add_argument("--plugin", action="append", default=[], metavar="MODULE:FUNCTION", help="Load a registry plugin (repeatable)")
 
     return parser
 
@@ -300,10 +303,50 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
-    from ..pipeline import PipelineRunner, PipelineSpec
+    from ..pipeline import ArtifactPresenceValidator, CopyArtifactStage, PipelineRunner, PipelineSpec, Registry
+
+    registry = Registry()
+
+    def copy_artifact(context):
+        parameters = context.parameters
+        required = ("source", "artifact_id", "role")
+        missing = [key for key in required if not parameters.get(key)]
+        if missing:
+            raise ValueError(f"copy-artifact parameters missing: {', '.join(missing)}")
+        return CopyArtifactStage(
+            name=context.stage.id,
+            source=str(parameters["source"]),
+            artifact_id=str(parameters["artifact_id"]),
+            role=str(parameters["role"]),
+            output=parameters.get("output"),
+            media_type=str(parameters.get("media_type", "application/octet-stream")),
+            schema=parameters.get("schema"),
+        ).run(context)
+
+    def artifact_presence(context):
+        required = context.parameters.get("required", context.parameters.get("artifacts", ()))
+        return ArtifactPresenceValidator(tuple(str(item) for item in required)).validate(context)
+
+    registry.register_stage("copy-artifact", copy_artifact)
+    registry.register_gate("artifact-presence", artifact_presence)
+    registry.register_validator("artifact-presence", artifact_presence)
+    for plugin in args.plugin:
+        if ":" not in plugin:
+            raise ValueError(f"pipeline plugin must use MODULE:FUNCTION: {plugin}")
+        module_name, function_name = plugin.split(":", 1)
+        hook = getattr(importlib.import_module(module_name), function_name)
+        try:
+            parameters = inspect.signature(hook).parameters
+        except (TypeError, ValueError):
+            parameters = {"registry": object()}
+        loaded = hook(registry) if parameters else hook()
+        if loaded is not None:
+            if not isinstance(loaded, Registry):
+                raise TypeError(f"pipeline plugin {plugin} must return Registry or None")
+            registry = loaded
 
     spec = PipelineSpec.from_file(args.spec)
-    result = PipelineRunner().run(
+    result = PipelineRunner(registry).run(
         spec,
         args.workspace,
         output_dir=args.output_dir,

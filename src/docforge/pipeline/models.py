@@ -35,9 +35,22 @@ def _json(value: Any) -> Any:
         return sorted(values, key=lambda item: json.dumps(item, sort_keys=True, default=str)) if isinstance(value, (set, frozenset)) else values
     if isinstance(value, float) and value != value:
         return "NaN"
-    if isinstance(value, str) and os.path.isabs(value):
-        return "<absolute-path>"
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
+
+
+_POSIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_:/])/(?:[^/\s]+/)*[^/\s]+")
+_WINDOWS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/](?:[^\\/\s]+[\\/]?)*")
+
+
+def _redact_text(value: str) -> str:
+    """Redact absolute paths even when embedded in exception text."""
+
+    if os.path.isabs(value):
+        return "<absolute-path>"
+    value = _POSIX_PATH_RE.sub("<absolute-path>", value)
+    return _WINDOWS_PATH_RE.sub("<absolute-path>", value)
 
 
 def canonical_json(value: Any) -> str:
@@ -48,7 +61,8 @@ def _fingerprint_details(value: Any) -> Any:
     """Drop unstable source coordinates while retaining diagnostic content."""
 
     if isinstance(value, Mapping):
-        return {str(key): _fingerprint_details(item) for key, item in value.items() if str(key) not in {"line", "column", "start_line", "end_line", "start_column", "end_column"}}
+        unstable = {"line", "column", "start_line", "end_line", "start_column", "end_column", "exception_message", "error_message"}
+        return {str(key): _fingerprint_details(item) for key, item in value.items() if str(key) not in unstable}
     if isinstance(value, (list, tuple)):
         return [_fingerprint_details(item) for item in value]
     return _json(value)
@@ -67,14 +81,23 @@ def sha256_file(path: Path) -> str:
 
 
 def _portable_path(value: str | os.PathLike[str], *, label: str = "path") -> str:
-    path = PurePosixPath(str(value).replace("\\", "/"))
-    if path.is_absolute() or str(path).startswith("../") or path == PurePosixPath(".."):
+    raw = str(value).replace("\\", "/")
+    path = PurePosixPath(raw)
+    if path.is_absolute() or re.match(r"^[A-Za-z]:/", raw):
         raise ValueError(f"{label} must be workspace-relative: {value}")
-    normalized = str(path)
-    if normalized in {"", "."}:
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError(f"{label} must be workspace-relative: {value}")
+            parts.pop()
+        else:
+            parts.append(part)
+    normalized = "/".join(parts)
+    if not normalized:
         raise ValueError(f"{label} must not be empty")
-    if "//" in normalized:
-        normalized = str(PurePosixPath(normalized))
     return normalized
 
 
@@ -133,9 +156,11 @@ class Diagnostic:
             raise ValueError("diagnostic severity must be info, warning, or error")
         if not str(self.code).strip():
             raise ValueError("diagnostic code must not be empty")
-        if not str(self.message).strip():
+        message = _redact_text(str(self.message))
+        if not message.strip():
             raise ValueError("diagnostic message must not be empty")
         object.__setattr__(self, "severity", severity)
+        object.__setattr__(self, "message", message)
         # Do not include line numbers, absolute paths, or timestamps in the
         # fingerprint.  A source artifact identity is stable across workspaces.
         basis = {"severity": severity, "code": self.code, "message": self.message, "details": _fingerprint_details(self.details)}
