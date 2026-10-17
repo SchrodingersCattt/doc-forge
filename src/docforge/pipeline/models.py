@@ -503,7 +503,7 @@ def confined_path(root: Path, relative: str | os.PathLike[str], *, allow_missing
     except ValueError as exc:
         raise ValueError(f"path escapes workspace: {relative}") from exc
     if not allow_missing and not candidate.exists():
-        raise FileNotFoundError(candidate)
+        raise FileNotFoundError(portable)
     return candidate
 
 
