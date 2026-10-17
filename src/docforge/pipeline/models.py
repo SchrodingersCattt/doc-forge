@@ -463,19 +463,20 @@ def confined_path(root: Path, relative: str | os.PathLike[str], *, allow_missing
     """Resolve *relative* under *root* and reject traversal/symlink escapes."""
 
     root = root.resolve()
-    candidate = (root / _portable_path(relative)).resolve(strict=False)
+    portable = _portable_path(relative)
+    if reject_symlink:
+        current = root
+        for part in Path(portable).parts:
+            current = current / part
+            if current.is_symlink():
+                # A link is rejected even when it happens to point back inside
+                # the workspace: link targets are not stable across machines.
+                raise ValueError(f"symlink paths are not allowed: {relative}")
+    candidate = (root / portable).resolve(strict=False)
     try:
         candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"path escapes workspace: {relative}") from exc
-    if reject_symlink:
-        current = root
-        for part in Path(_portable_path(relative)).parts:
-            current = current / part
-            if current.is_symlink():
-                # A symlink to a location outside root is always forbidden;
-                # links within root are also rejected for deterministic builds.
-                raise ValueError(f"symlink paths are not allowed: {relative}")
     if not allow_missing and not candidate.exists():
         raise FileNotFoundError(candidate)
     return candidate
