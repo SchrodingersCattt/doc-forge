@@ -240,6 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
     style.add_argument("--config", type=Path, required=True)
     style.add_argument("--baseline", type=Path)
 
+    pipeline = sub.add_parser("pipeline", help="Run a versioned, auditable document pipeline spec")
+    pipeline.add_argument("spec", type=Path, help="JSON (or optional YAML) docforge.pipeline.v1 spec")
+    pipeline.add_argument("--workspace", type=Path, default=Path.cwd(), help="Input workspace root")
+    pipeline.add_argument("--output-dir", type=Path, default=None, help="Atomic publication directory (default: WORKSPACE/dist)")
+    pipeline.add_argument("--run-id", default=None, help="Stable run id for reproducible receipts")
+    pipeline.add_argument("--no-publish", action="store_true", help="Build and validate without replacing the publication directory")
+
     return parser
 
 
@@ -283,11 +290,28 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_check(args)
         if args.command == "gate":
             return _cmd_gate(args)
+        if args.command == "pipeline":
+            return _cmd_pipeline(args)
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def _cmd_pipeline(args: argparse.Namespace) -> int:
+    from ..pipeline import PipelineRunner, PipelineSpec
+
+    spec = PipelineSpec.from_file(args.spec)
+    result = PipelineRunner().run(
+        spec,
+        args.workspace,
+        output_dir=args.output_dir,
+        publish=not args.no_publish,
+        run_id=args.run_id,
+    )
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
+    return 0 if result.success else 1
 
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
