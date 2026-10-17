@@ -268,3 +268,14 @@ def test_cli_builtin_copy_adapter(tmp_path: Path):
     spec_path.write_text(json.dumps(config), encoding="utf-8")
     assert main(["pipeline", str(spec_path), "--workspace", str(workspace), "--output-dir", str(tmp_path / "published")]) == 0
     assert (tmp_path / "published" / "copy.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_callable_stage_and_gate_registrations_are_adapted(tmp_path: Path):
+    def write(context):
+        context.output_path("callable.txt").write_text("ok", encoding="utf-8")
+        return {"artifacts": [ArtifactRef("document", "document", "callable.txt")]}
+
+    registry = Registry().register_stage("callable", write).register_gate("quality", lambda context: {"status": "pass"})
+    pipeline_spec = spec(stages=[{"id": "callable", "kind": "callable", "produces": ["document"]}], gates=[{"id": "quality", "kind": "quality"}])
+    result = PipelineRunner(registry).run(pipeline_spec, tmp_path, output_dir=tmp_path / "callable")
+    assert result.success
