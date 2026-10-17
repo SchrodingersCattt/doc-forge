@@ -39,6 +39,24 @@ and available on `PATH`; docforge never downloads or replaces it at runtime.
 
 ## CLI
 
+### Reusable manuscript pipelines
+
+Cross-document workflows can use the versioned `docforge.pipeline.v1` API
+instead of duplicating path checks, hashes, manifests, and publication logic.
+Declare documents, registered stages, gates, validators, and release policy in
+JSON (or optional YAML), then run the pipeline:
+
+```bash
+docforge pipeline pipeline.json --workspace . --output-dir dist
+```
+
+The runner performs preflight DAG checks, confines paths and symlinks, records
+content hashes and stable diagnostics, and writes a portable manifest,
+checksums, and human report. Required unavailable validators block publication;
+optional unavailable validators are explicit warnings. Successful publication
+replaces the output bundle atomically and retains the previous bundle. See
+[`docs/pipeline.md`](docs/pipeline.md) for the Python extension API.
+
 ```bash
 # Markdown -> DOCX (merged blocks)
 docforge md2docx section_01.md section_02.md -o proposal.docx --title "..."

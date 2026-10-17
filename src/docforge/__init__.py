@@ -43,3 +43,17 @@ Core capabilities
 from __future__ import annotations
 
 __version__ = "0.1.0"
+
+# Pipeline primitives are dependency-free and safe to import from the package
+# root for consumers that use docforge as a library.
+from .pipeline import (  # noqa: E402,F401
+    ArtifactRef,
+    Diagnostic,
+    PipelineResult,
+    PipelineRunner,
+    PipelineSpec,
+    StageResult,
+    ValidationReport,
+)
+
+__all__ = ["__version__", "ArtifactRef", "Diagnostic", "PipelineResult", "PipelineRunner", "PipelineSpec", "StageResult", "ValidationReport"]
