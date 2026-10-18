@@ -148,3 +148,31 @@ def test_roundtrip_redline_failure_does_not_publish_partial_output(tmp_path: Pat
     assert not output.exists()
     assert not audit.exists()
     assert not redline.exists()
+
+
+@pytest.mark.parametrize("target", ["source", "output_redline", "audit_redline"])
+def test_roundtrip_rejects_resolved_path_collisions_even_with_force(tmp_path: Path, target: str) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    output = source if target == "source" else tmp_path / "out.docx"
+    redline = output.with_name("out.tracked.docx")
+    if target == "output_redline":
+        redline = output
+    elif target == "audit_redline":
+        redline = output.with_suffix(".manifest.json")
+    with pytest.raises(ValueError, match="PATH_COLLISION"):
+        roundtrip(source, work, section_map=tmp_path / "map.json", output=output, redline=redline, force=True)
+
+
+def test_roundtrip_public_audit_contains_only_redacted_fields(tmp_path: Path) -> None:
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source package bytes")
+    work = _bundle(tmp_path, source)
+    output = tmp_path / "out.docx"
+    roundtrip(source, work, section_map=tmp_path / "map.json", output=output)
+    payload = json.loads(output.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    text = json.dumps(payload, ensure_ascii=False)
+    assert str(tmp_path) not in text
+    assert "source package bytes" not in text
+    assert set(payload) <= {"artifact_id", "format", "mode", "invariants", "counts", "diagnostics", "unsupported_features"}

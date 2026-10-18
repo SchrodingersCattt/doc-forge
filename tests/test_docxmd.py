@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
@@ -15,6 +16,8 @@ from docforge.docxdiff.redline import create_tracked_docx
 from docforge.docxmd import ExportOptions, build_docx, compare_docx, export_docx, roundtrip
 from docforge.docxmd.inline import display, is_caption, key, parse, write
 from docforge.docxmd.ooxml import W, build, diff, flatten, merge, parse_tokens, format_tokens
+from docforge.docxmd.reader import _sample_text
+from docforge.docxmd.verify import _Model
 
 
 INLINE_SAMPLES = [
@@ -74,6 +77,38 @@ def test_inline_key_and_caption_ignore_emphasis_and_formatting():
     assert is_caption("**Figure 1.** Caption")
     assert is_caption("*Supplementary Fig. S2:* Details")
     assert not is_caption("figure.png")
+
+
+def test_style_sampling_keeps_non_ascii_whitespace_classes_distinct():
+    assert _sample_text(" ") == " "
+    assert _sample_text("\u00a0") == "\u00a0"
+    # U+3000 must not be mistaken for the CJK glyph sample; it is represented
+    # by the dedicated non-ASCII whitespace sample instead.
+    assert _sample_text("\u3000") == "\u2003"
+
+
+def test_semantic_projection_normalizes_property_and_field_transport_order():
+    model = object.__new__(_Model)
+    model.cache = {}
+    model.comment_order = {}
+    model.rels = {}
+    model.styles = SimpleNamespace(visible=lambda *_args: ())
+
+    left = etree.fromstring(
+        f'<w:p xmlns:w="{W}" xmlns:xml="http://www.w3.org/XML/1998/namespace">'
+        '<w:pPr><w:sectPr><w:footerReference w:type="default" w:id="r2"/>'
+        '<w:headerReference w:type="default" w:id="r1"/></w:sectPr></w:pPr>'
+        '<w:r><w:instrText xml:space="preserve"> PAGE  \\* MERGEFORMAT </w:instrText>'
+        '<w:fldData>QUJD\nREVG</w:fldData></w:r></w:p>'
+    )
+    right = etree.fromstring(
+        f'<w:p xmlns:w="{W}" xmlns:xml="http://www.w3.org/XML/1998/namespace">'
+        '<w:pPr><w:sectPr><w:headerReference w:id="r1" w:type="default"/>'
+        '<w:footerReference w:id="r2" w:type="default"/></w:sectPr></w:pPr>'
+        '<w:r><w:instrText>PAGE \\* MERGEFORMAT</w:instrText>'
+        '<w:fldData>QUJD REVG</w:fldData></w:r></w:p>'
+    )
+    assert model.paragraph(left) == model.paragraph(right)
 
 
 def test_caption_and_filename_detection_accepts_letter_labels_and_paths():

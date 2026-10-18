@@ -14,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 
+from ..output import FormatError
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -253,6 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _preflight_docx(*paths: Path | None) -> None:
+    """Reject non-DOCX sources before an exporter creates any directories."""
+
+    from ..output import _detect_format
+
+    for path in paths:
+        if path is not None:
+            _detect_format(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
@@ -295,6 +307,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_gate(args)
         if args.command == "pipeline":
             return _cmd_pipeline(args)
+    except FormatError as exc:
+        # Format failures are intentionally stable and do not expose ZIP or
+        # Pandoc parser text.  They still use the CLI's conventional exit 2.
+        print(f"error [{exc.code}]: {exc}", file=sys.stderr)
+        return 2
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -363,10 +380,14 @@ def _cmd_md2docx(args: argparse.Namespace) -> int:
     from ..output import validate_output_path
 
     validate_output_path(args.output)
+    if args.template is not None:
+        _preflight_docx(args.template)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     if args.roundtrip_manifest is not None:
-        if reuse_unchanged_roundtrip_source(args.roundtrip_manifest, args.output, force=args.force):
+        if reuse_unchanged_roundtrip_source(
+            args.roundtrip_manifest, args.output, force=args.force, validate_format=True,
+        ):
             print(f"roundtrip exact source reused: {args.output}")
             return 0
         if not args.inputs:
@@ -473,6 +494,7 @@ def _load_split(path: Path | None) -> list[dict] | None:
 def _cmd_contract(args: argparse.Namespace) -> int:
     from ..markdown import build_docx_contract
 
+    _preflight_docx(args.template, args.baseline)
     result = build_docx_contract(
         args.inputs,
         template_path=args.template,
@@ -514,6 +536,7 @@ def _guard_bundle(args: argparse.Namespace) -> None:
 def _cmd_md_export(args: argparse.Namespace) -> int:
     from ..docxmd import ExportOptions, export_docx
 
+    _preflight_docx(args.input)
     _guard_bundle(args)
     report = export_docx(args.input, args.bundle, ExportOptions(
         args.doc_id, _load_split(args.split), args.bibliography, args.bib_style, citations=not args.no_citations,
@@ -533,6 +556,7 @@ def _cmd_md_build(args: argparse.Namespace) -> int:
 def _cmd_md_roundtrip(args: argparse.Namespace) -> int:
     from ..docxmd import compare_pdfs, render_pdfs, roundtrip
 
+    _preflight_docx(args.input)
     _guard_bundle(args)
     report = roundtrip(
         args.input, args.bundle, args.doc_id, split=_load_split(args.split),
@@ -555,6 +579,7 @@ def _cmd_md_roundtrip(args: argparse.Namespace) -> int:
 
 
 def _cmd_roundtrip(args: argparse.Namespace) -> int:
+    _preflight_docx(args.input)
     if args.section_map is None:
         from ..markdown import roundtrip_source_docx
 
@@ -592,6 +617,7 @@ def _cmd_roundtrip(args: argparse.Namespace) -> int:
 def _cmd_apply_delta(args: argparse.Namespace) -> int:
     from ..markdown.source_edit import apply_markdown_delta
 
+    _preflight_docx(args.source)
     summary = apply_markdown_delta(
         args.source,
         args.baseline,
@@ -609,6 +635,7 @@ def _cmd_apply_delta(args: argparse.Namespace) -> int:
 def _cmd_export_block_map(args: argparse.Namespace) -> int:
     from ..markdown.source_edit import export_block_map
 
+    _preflight_docx(args.source)
     if args.output.exists() and not args.force:
         raise FileExistsError(args.output)
     export_block_map(args.source, args.output)
@@ -638,6 +665,7 @@ def _cmd_redline(args: argparse.Namespace) -> int:
         raise ValueError("redline requires a baseline and current DOCX (use positional paths or --baseline/--current)")
     if args.output is None:
         raise ValueError("redline requires --output/-o")
+    _preflight_docx(baseline, current)
     validate_output_path(args.output)
     if args.report_path is not None:
         validate_output_path(args.report_path, label="report")
@@ -667,6 +695,7 @@ def _cmd_docx2md(args: argparse.Namespace) -> int:
     from ..markdown import docx_to_markdown
     from ..output import validate_output_path
 
+    _preflight_docx(args.input)
     validate_output_path(args.output)
     validate_output_path(args.split_dir, label="split output directory")
     if args.output is None and args.split_dir is None:
@@ -726,6 +755,7 @@ def _cmd_docx2tex(args: argparse.Namespace) -> int:
     from ..tex import docx_to_tex
     from ..output import validate_output_path
 
+    _preflight_docx(args.input)
     validate_output_path(args.output)
     result = docx_to_tex(
         args.input,
@@ -819,6 +849,7 @@ def _cmd_sourcepack(args: argparse.Namespace) -> int:
 def _cmd_check(args: argparse.Namespace) -> int:
     from ..markdown import verify_navigation_headings, verify_image_relationships, verify_clean_review_state
 
+    _preflight_docx(args.docx)
     verify_navigation_headings(args.docx)
     verify_image_relationships(args.docx)
     if args.verify_clean:

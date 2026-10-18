@@ -57,6 +57,7 @@ from .source_edit import (
     apply_markdown_delta,
     export_block_map,
     export_source_block_map,
+    public_roundtrip_report,
     roundtrip_source_docx,
     source_roundtrip,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "is_filename_alt",
     "export_block_map",
     "export_source_block_map",
+    "public_roundtrip_report",
     "roundtrip_source_docx",
     "source_roundtrip",
 ]

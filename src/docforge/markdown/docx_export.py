@@ -22,8 +22,9 @@ from PIL import Image
 from lxml import etree, html as lxml_html
 
 from .._pandoc import run_pandoc
+from ..roundtrip import PathCollisionError, RoundTripError, SnapshotMismatchError
 from .inline import display, key as inline_key
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
 
 IMAGE_TAG_RE = re.compile(r"<img\b(?P<attrs>[^>]*?)(?:/?)>", re.IGNORECASE)
 IMAGE_ATTR_RE = re.compile(r"\b(?P<name>src|alt)\s*=\s*(['\"])(?P<value>.*?)\2", re.IGNORECASE)
@@ -414,11 +415,27 @@ def _roundtrip_source_path(split_dir: Path) -> Path:
     return split_dir / "roundtrip" / "source.docx"
 
 
+def _confined_bundle_path(root: Path, relative: str, *, label: str) -> Path:
+    """Resolve a manifest path and require it to stay in the bundle."""
+
+    bundle = Path(root).resolve()
+    candidate = (bundle / relative).resolve()
+    try:
+        candidate.relative_to(bundle)
+    except ValueError as exc:
+        raise RoundTripError(
+            f"roundtrip manifest {label} escapes the workdir: {relative}",
+            code="PATH_OUTSIDE_WORKDIR",
+        ) from exc
+    return candidate
+
+
 def reuse_unchanged_roundtrip_source(
     manifest_path: Path,
     output: Path,
     *,
     force: bool = False,
+    validate_format: bool = True,
 ) -> bool:
     """Reuse the source DOCX when a Markdown bundle is byte-for-byte unchanged.
 
@@ -440,16 +457,22 @@ def reuse_unchanged_roundtrip_source(
     source_sha = payload.get("source_copy_sha256")
     if not isinstance(source_name, str) or not isinstance(source_sha, str):
         raise ValueError("roundtrip manifest does not contain a source DOCX snapshot")
-    source = (root / source_name).resolve()
+    source = _confined_bundle_path(root, source_name, label="source_copy")
     if not source.is_file() or _sha256(source) != source_sha:
-        raise ValueError("roundtrip source snapshot is missing or its SHA-256 does not match")
-
+        # Keep this code stable: callers can safely classify the failure
+        # without parsing a path or a low-level hash error.
+        raise SnapshotMismatchError("SNAPSHOT_SHA_MISMATCH: source snapshot is missing or its SHA-256 does not match")
+    output = Path(output).resolve(strict=False)
+    if output == source:
+        raise PathCollisionError("source snapshot and output resolve to the same path")
+    if validate_format:
+        _detect_format(source)
     for name, expected in dict(payload.get("section_sha256", {})).items():
-        path = (root / str(name)).resolve()
+        path = _confined_bundle_path(root, str(name), label="section")
         if not path.is_file() or _sha256(path) != expected:
             return False
     for name, expected in dict(payload.get("media_sha256", {})).items():
-        path = (root / str(name)).resolve()
+        path = _confined_bundle_path(root, str(name), label="media")
         if not path.is_file() or _sha256(path) != expected:
             return False
 
@@ -473,6 +496,8 @@ def docx_to_markdown(
 ) -> MarkdownExportResult:
     """Convert a DOCX to GFM, optionally emitting mapped section files."""
 
+    # Probe before validating/creating any destination or extraction root.
+    _detect_format(input_path)
     validate_output_path(output)
     validate_output_path(split_dir, label="split output directory")
     if not input_path.exists():

@@ -41,7 +41,7 @@ from .citations import (
     materialize_citations,
     replace_block_citations as _replace_block_citations,
 )
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
 from .launcher import (
     accept_docx_revisions,
     append_inline_math,
@@ -2108,6 +2108,7 @@ def assemble_markdown_template(
         raise ValueError("Provide at least one Markdown input")
     if not template_path.is_file():
         raise FileNotFoundError(f"Template DOCX does not exist: {template_path}")
+    _detect_format(template_path)
     if metadata_path is not None and not metadata_path.is_file():
         raise FileNotFoundError(f"Metadata Markdown does not exist: {metadata_path}")
     if bibliography_path is not None and not bibliography_path.is_file():

@@ -37,6 +37,18 @@ from .runner import (
     Validator,
 )
 from .adapters import ArtifactPresenceValidator, CallableGate, CallableValidator, CopyArtifactStage
+from ..output import (
+    INVALID_FORMAT,
+    UNSUPPORTED_FORMAT,
+    FormatError,
+    InvalidFormatError,
+    InputFormat,
+    InvalidFormat,
+    UnsupportedFormat,
+    UnsupportedFormatError,
+    detect_format,
+    _detect_format,
+)
 
 PipelineRegistry = Registry
 
@@ -46,4 +58,6 @@ __all__ = [
     "Stage", "Gate", "Validator", "Registry", "PipelineRegistry", "CallableStage", "PipelineRunner",
     "PipelineResult", "PipelinePreflightError", "canonical_json", "confined_path", "new_run_id", "sha256_bytes", "sha256_file",
     "CallableGate", "CallableValidator", "CopyArtifactStage", "ArtifactPresenceValidator",
+    "INVALID_FORMAT", "UNSUPPORTED_FORMAT", "FormatError", "InvalidFormatError", "InvalidFormat", "InputFormat",
+    "UnsupportedFormat", "UnsupportedFormatError", "detect_format", "_detect_format",
 ]

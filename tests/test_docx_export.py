@@ -781,10 +781,30 @@ def test_redline_stable_bibliography_bracket_labels_and_report(tmp_path: Path) -
     assert report["schema"] == "docforge.redline.v1"
     assert report["actions"]
     assert report["summary"] == summary
+    report_text = json.dumps(report, ensure_ascii=False)
+    assert str(tmp_path) not in report_text
+    assert "Before" not in report_text and "After" not in report_text
+    assert "baseline_text" not in report_text and "current_text" not in report_text
     assert {
         key: sum(item.get("summary_key") == key for item in report["actions"])
         for key in summary
     } == summary
+
+
+def test_redline_reference_content_rejects_formula_brackets_without_reference_style() -> None:
+    from lxml import etree
+
+    from docforge.docxdiff.redline import Block, W, _reference_content
+
+    def block(text: str, style: str = "") -> Block:
+        paragraph = etree.fromstring(
+            f'<w:p xmlns:w="{W}"><w:r><w:t>{text}</w:t></w:r></w:p>'
+        )
+        return Block(paragraph, "p", text, style, False)
+
+    assert _reference_content(block("[1, 3–4] Doe et al.")) == "Doe et al."
+    assert _reference_content(block("[K(ClO4)6] units here.")) is None
+    assert _reference_content(block("[label] Doe et al.", "Bibliography")) == "Doe et al."
 
 
 def test_redline_matches_renumbered_references_by_content() -> None:

@@ -28,6 +28,7 @@ from .common import (
 from .inline import Atom, Text, key as inline_key, normalize, write as write_inline
 from .ooxml import KNOWN_NAMESPACES, PKG_REL, R, W, Token, diff, flatten, format_tokens, merge
 from .styles import StyleSheet
+from ..output import _detect_format
 
 W15 = KNOWN_NAMESPACES["w15"]
 _REFERENCE_HEADING = re.compile(r"^\s*(references?|bibliography|literature cited|参考文献)\s*$", re.I)
@@ -53,12 +54,22 @@ def _sample_text(text: str) -> str:
         sample.append("-")
     if any(0x80 <= ord(char) < 0x2E80 and not char.isspace() for char in text):
         sample.append("é")
-    if any(0x2E80 <= ord(char) and not (0xAC00 <= ord(char) <= 0xD7AF) for char in text):
+    if any(
+        0x2E80 <= ord(char) and not char.isspace()
+        and not (0xAC00 <= ord(char) <= 0xD7AF)
+        for char in text
+    ):
         sample.append("中")
     if any(0x0590 <= ord(char) <= 0x08FF for char in text):
         sample.append("א")
-    if any(char.isspace() for char in text):
+    # Preserve whitespace classes: NBSP and other non-ASCII spaces can carry
+    # a different effective East Asian font/language than an ASCII space.
+    if any(char == "\u00a0" for char in text):
+        sample.append("\u00a0")
+    if any(char.isspace() and ord(char) < 0x80 for char in text):
         sample.append(" ")
+    if any(char.isspace() and ord(char) >= 0x80 and char != "\u00a0" for char in text):
+        sample.append("\u2003")
     return "".join(sample)
 
 
@@ -615,6 +626,7 @@ def _surname_key(text: str, used: set[str]) -> str:
 
 def export_docx(source: Path, bundle: Path, options: ExportOptions) -> dict:
     """Write ``source`` into the Markdown ``bundle`` as document ``options.doc_id``."""
+    _detect_format(source)
     bundle.mkdir(parents=True, exist_ok=True)
     media_dir = bundle / "media" / options.doc_id
     if media_dir.exists():

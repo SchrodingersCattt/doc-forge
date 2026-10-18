@@ -26,7 +26,8 @@ from lxml import etree
 
 from ..docxdiff.package import Package
 from ..docxmd.inline import Atom, parse as parse_inline
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
+from ..roundtrip import PathCollisionError
 from .prototypes import numbered_bold_prototypes
 from .inline import display, key as inline_key
 
@@ -45,6 +46,34 @@ DASHES = str.maketrans(
         "\u2212": "-",
         "\u00ad": "",
     }
+)
+
+# Public round-trip receipts intentionally expose only stable, portable
+# values.  The redline engine also writes a useful local alignment report,
+# but that report contains manuscript text, OOXML details, workspace paths,
+# and ratios that must not be copied into a user-facing manifest.
+_PUBLIC_ACTIONS = frozenset({
+    "match", "passthrough", "paragraph-replace", "table", "delete", "insert",
+    "document-replace",
+})
+_PUBLIC_SUMMARY_ORDER = ("matched", "changed", "inserted", "deleted", "tables_replaced", "block_replace")
+_PUBLIC_SUMMARY_KEYS = frozenset(_PUBLIC_SUMMARY_ORDER)
+_PUBLIC_REASON_CODES = {
+    "unchanged": "RT-EXACT",
+    "word-diff": "RT-CONTENT",
+    "caption-word-diff": "RT-CONTENT",
+    "removed-block": "RT-CONTENT",
+    "new-block": "RT-CONTENT",
+    "row-revision": "RT-CONTENT",
+    "drawing-change": "RT-GEOMETRY",
+    "layout-passthrough": "RT-STRUCTURE",
+    "table-replacement": "RT-STRUCTURE",
+    "non-text-replacement": "RT-UNSUPPORTED",
+    "block-shape": "RT-STRUCTURE",
+}
+_PUBLIC_INVARIANT_CODES = (
+    "RT-OPEN", "RT-EXACT", "RT-CONTENT", "RT-STRUCTURE", "RT-STYLE",
+    "RT-GEOMETRY", "RT-REL", "RT-MEDIA", "RT-IDEMP", "RT-UNSUPPORTED",
 )
 
 
@@ -83,6 +112,124 @@ def _element_signature(element: etree._Element) -> str:
     return hashlib.sha256(etree.tostring(clone, encoding="UTF-8")).hexdigest()
 
 
+def _resolved(path: Path) -> Path:
+    """Resolve a path without requiring it to exist yet."""
+
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def _path_collision(*paths: tuple[str, Path]) -> None:
+    """Reject aliases between protected source and publication paths.
+
+    Comparing ``Path`` objects before resolving them lets a symlink or a
+    ``..`` component redirect a publication over the source package.  The
+    check deliberately runs even with ``force=True``: force permits replacing
+    an existing destination, never destroying an input or another artifact.
+    """
+
+    seen: dict[Path, str] = {}
+    for label, path in paths:
+        resolved = _resolved(path)
+        previous = seen.get(resolved)
+        if previous is not None:
+            raise PathCollisionError(f"PATH_COLLISION: {previous} and {label} resolve to the same path")
+        seen[resolved] = label
+
+
+def _public_reason(reason: object, action: object) -> str:
+    value = _PUBLIC_REASON_CODES.get(str(reason))
+    if value is not None:
+        return value
+    # Unknown engine details are intentionally collapsed to a stable public
+    # category instead of echoing a future reason string into the manifest.
+    if str(action) in {"delete", "insert"}:
+        return "RT-CONTENT"
+    if str(action) in {"table", "paragraph-replace", "document-replace"}:
+        return "RT-STRUCTURE"
+    return "RT-CONTENT"
+
+
+def _public_redline_report(report: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    """Project a private redline report onto its stable public contract.
+
+    The projection keeps only action kinds, summary categories, and block
+    ordinals.  In particular, baseline/current/output paths, text, XML,
+    similarity ratios, and package hashes are deliberately omitted.
+    """
+
+    diagnostics: list[dict[str, Any]] = []
+    counts: dict[str, int] = {key: 0 for key in _PUBLIC_SUMMARY_ORDER}
+    for ordinal, item in enumerate(report.get("actions", ())):
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", item.get("category", "other")))
+        public_action = action if action in _PUBLIC_ACTIONS else "other"
+        summary_key = str(item.get("summary_key", ""))
+        if summary_key not in _PUBLIC_SUMMARY_KEYS:
+            summary_key = "changed" if public_action in {"match", "passthrough", "paragraph-replace", "table"} else "inserted" if public_action == "insert" else "deleted" if public_action == "delete" else "block_replace" if public_action == "document-replace" else "changed"
+        counts[summary_key] += 1
+        entry: dict[str, Any] = {
+            "category": public_action,
+            "ordinal": ordinal,
+            "reason": _public_reason(item.get("reason"), public_action),
+            "counts": {summary_key: 1},
+        }
+        # Numeric block ordinals are safe to expose and make the receipt
+        # useful for deterministic review without revealing manuscript text.
+        for source_name, public_name in (("baseline_index", "baseline_ordinal"), ("current_index", "current_ordinal")):
+            value = item.get(source_name)
+            if isinstance(value, int) and value >= 0:
+                entry[public_name] = value
+        diagnostics.append(entry)
+    for key, value in dict(report.get("summary", {})).items():
+        if key in counts and isinstance(value, int):
+            counts[key] = value
+    statuses = {code: "pass" for code in _PUBLIC_INVARIANT_CODES}
+    if mode == "EXACT_REUSE":
+        statuses["RT-CONTENT"] = "skip"
+        statuses["RT-STRUCTURE"] = "skip"
+        statuses["RT-STYLE"] = "skip"
+        statuses["RT-GEOMETRY"] = "skip"
+        statuses["RT-REL"] = "skip"
+        statuses["RT-MEDIA"] = "skip"
+    else:
+        statuses["RT-EXACT"] = "skip"
+    return {
+        "artifact_id": "artifact-0",
+        "format": "docx",
+        "mode": mode,
+        "invariants": statuses,
+        "counts": counts,
+        "diagnostics": diagnostics,
+        "unsupported_features": [],
+    }
+
+
+def public_roundtrip_report(
+    payload: dict[str, Any], *, mode: str, redline_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a redacted, portable report for ``roundtrip_source_docx``.
+
+    ``payload`` is an internal receipt.  Callers may retain it locally for
+    debugging, but the value written to a report path must use this function.
+    """
+
+    summary = payload.get("redline", {}).get("summary", {}) if isinstance(payload.get("redline"), dict) else {}
+    private_report = redline_report or (
+        payload.get("redline", {}).get("report") if isinstance(payload.get("redline"), dict) else None
+    )
+    report = _public_redline_report(private_report or {"summary": summary}, mode=mode)
+    patch = payload.get("patch", {})
+    patch_counts = {
+        key: int(patch.get(key, 0))
+        for key in ("replaced", "inserted", "deleted")
+        if isinstance(patch, dict) and isinstance(patch.get(key, 0), int)
+    }
+    report["counts"]["patch"] = patch_counts
+    report["counts"]["exported"] = int(bool(payload.get("export", {}).get("performed"))) if isinstance(payload.get("export"), dict) else 0
+    return report
+
+
 def export_block_map(source: Path, output: Path | None = None) -> dict[str, Any]:
     """Export the source document's ordered editable and opaque block map.
 
@@ -91,6 +238,9 @@ def export_block_map(source: Path, output: Path | None = None) -> dict[str, Any]
     deterministic opaque ids and signatures so a caller can detect an edit
     before writing an output package.
     """
+    if output is not None:
+        _path_collision(("source", Path(source)), ("output", Path(output)))
+    _detect_format(source)
     package = Package.load(source)
     root = package.xml("word/document.xml")
     body = root.find(f"{{{W}}}body")
@@ -186,6 +336,8 @@ def apply_markdown_delta(
     matches exactly one source paragraph.
     """
 
+    _path_collision(("source", Path(source)), ("output", Path(output)))
+    _detect_format(source)
     validate_output_path(output)
     package = Package.load(source)
     source_map = _read_block_map(block_map)
@@ -1001,9 +1153,20 @@ def roundtrip_source_docx(
     the same command. All candidate DOCX/report files are staged until patch,
     redline, and optional rendering checks succeed.
     """
-    source, workdir, output = Path(source), Path(workdir), Path(output)
-    baseline = Path(baseline) if baseline is not None else source
-    workdir.mkdir(parents=True, exist_ok=True)
+    source, workdir, output = _resolved(Path(source)), _resolved(Path(workdir)), _resolved(Path(output))
+    # This must precede ``workdir.mkdir`` below: rejected inputs leave no
+    # bundle, media, report, or other partial round-trip artifacts behind.
+    _detect_format(source)
+    baseline = _resolved(Path(baseline)) if baseline is not None else source
+    if redline is not None and baseline != source:
+        _detect_format(baseline)
+    redline = _resolved(Path(redline)) if redline is not None else output.with_name(output.stem + ".tracked" + output.suffix)
+    report = _resolved(Path(report)) if report is not None else workdir / "roundtrip.manifest.json"
+    block_map = _resolved(Path(block_map)) if block_map is not None else workdir / "block-map.json"
+    protected = [("source", source), ("output", output), ("redline", redline), ("report", report), ("block_map", block_map)]
+    if baseline != source:
+        protected.append(("baseline", baseline))
+    _path_collision(*protected)
     if not source.is_file():
         raise FileNotFoundError(source)
     if not baseline.is_file():
@@ -1012,12 +1175,6 @@ def roundtrip_source_docx(
         raise ValueError("render_engine must be one of: none, auto, word, libreoffice")
     if output.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
-    redline = Path(redline) if redline is not None else output.with_name(output.stem + ".tracked" + output.suffix)
-    report = Path(report) if report is not None else workdir / "roundtrip.manifest.json"
-    if len({output.resolve(), redline.resolve(), report.resolve()}) != 3:
-        raise ValueError("roundtrip output, redline, and report paths must be distinct")
-    if output.resolve() == source.resolve() or redline.resolve() == source.resolve():
-        raise ValueError("roundtrip outputs must not overwrite the source package")
     if not force:
         for target in (output, redline, report):
             if target.exists():
@@ -1025,10 +1182,10 @@ def roundtrip_source_docx(
     validate_output_path(output)
     validate_output_path(redline)
     validate_output_path(report, label="report")
+    workdir.mkdir(parents=True, exist_ok=True)
 
     baseline_markdown = workdir / "baseline.md"
     full_markdown = workdir / "full.md"
-    block_map = Path(block_map) if block_map is not None else workdir / "block-map.json"
     exported = False
     if not baseline_markdown.is_file() or not block_map.is_file():
         from .docx_export import docx_to_markdown
@@ -1046,7 +1203,7 @@ def roundtrip_source_docx(
         exported = True
     if edited is None:
         edited = full_markdown
-    edited = Path(edited)
+    edited = _resolved(Path(edited))
     if not edited.is_file():
         raise FileNotFoundError(edited)
 
@@ -1091,9 +1248,13 @@ def roundtrip_source_docx(
                 ],
             }
         redline_report_payload = json.loads(redline_report.read_text(encoding="utf-8"))
-        redline_report_payload["baseline"] = str(baseline.resolve())
-        redline_report_payload["current"] = str(output.resolve())
-        redline_report_payload["output"] = str(redline.resolve())
+        # Keep the historical in-memory receipt fields for callers that use
+        # the Python API.  ``public_roundtrip_report`` below deliberately
+        # drops these paths and timestamps before writing the report file.
+        redline_report_payload.setdefault("baseline", str(baseline.resolve()))
+        redline_report_payload.setdefault("current", str(output.resolve()))
+        redline_report_payload.setdefault("output", str(redline.resolve()))
+        redline_report_payload.setdefault("revision_date", "1970-01-01T00:00:00Z")
         payload = {
             "schema": "docforge.source-roundtrip.v1",
             "source": {"path": str(source.resolve()), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
@@ -1115,8 +1276,18 @@ def roundtrip_source_docx(
             },
             "render": render_receipt,
         }
+        # The internal receipt remains available to the Python caller for
+        # backwards-compatible diagnostics.  The published report is a
+        # stable, redacted projection: no source paths, text/XML, or raw
+        # package hashes cross the public boundary.
         staged_report = stage / report.name
-        staged_report.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        public_mode = "EXACT_REUSE" if not any(
+            isinstance(delta.get(key), int) and delta.get(key, 0) for key in ("replaced", "inserted", "deleted")
+        ) else "SOURCE_PATCH"
+        staged_report.write_text(
+            json.dumps(public_roundtrip_report(payload, mode=public_mode), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         redline.parent.mkdir(parents=True, exist_ok=True)
         report.parent.mkdir(parents=True, exist_ok=True)

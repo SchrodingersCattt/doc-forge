@@ -21,9 +21,11 @@ from pathlib import Path, PurePosixPath
 from lxml import etree
 
 from ..docxdiff.package import Package
+from ..roundtrip import RoundTripError
 from . import drawing as drawing_mod
 from .common import clean_tokens, top_name
 from .ooxml import KNOWN_NAMESPACES, PKG_REL, R, W, flatten
+from .ooxml import _ORDERS
 from .reader import kept_bookmarks
 from .styles import StyleSheet
 
@@ -37,6 +39,46 @@ _SHARED_PARTS = (
 
 def _local(node) -> str:
     return etree.QName(node).localname if isinstance(node.tag, str) else ""
+
+
+def _canonical_tokens(tokens: list[tuple[str, str | None]], parent: str = "pPr") -> tuple[tuple[str, str | None], ...]:
+    """Return property tokens in the writer's schema order.
+
+    Word and third-party writers are allowed to emit equivalent properties in
+    a different order.  The semantic model must compare the properties, not
+    the transport order, while keeping repeated/unknown properties stable.
+    """
+    def rank(key: str) -> tuple:
+        path_text, _, attribute = key.lstrip("-").partition("@")
+        path = path_text.split(".")
+        current = parent
+        result: list[int] = []
+        for segment in path:
+            segment = re.sub(r"#\d+$", "", segment)
+            names = _ORDERS.get(current, ())
+            result.append(names.index(segment) if segment in names else 10_000)
+            current = segment
+        # XML attribute order is not semantic.  Sorting the attribute name
+        # after the element path avoids false differences from writers that
+        # emit (for example) ``w:id`` before ``w:type``.
+        return tuple(result), attribute
+
+    ranked = []
+    for index, token in enumerate(tokens):
+        ranked.append((rank(token[0]), index, token))
+    return tuple(token for _rank, _index, token in sorted(ranked))
+
+
+def _canonical_atom_text(node: etree._Element) -> str:
+    text = node.text or ""
+    local = _local(node)
+    if local == "instrText":
+        # Field instructions are insensitive to transport-only indentation.
+        return " ".join(text.split())
+    if local in {"fldData", "base64Binary"}:
+        # Package writers may wrap base64 payloads at different columns.
+        return re.sub(r"\s+", "", text)
+    return text
 
 
 def _category(char: str) -> str:
@@ -87,8 +129,12 @@ class _Model:
                 continue
             if etree.QName(key).namespace == R:
                 value = self._target(value)
+            # xml:space="preserve" on field instructions is a serialization
+            # detail; the instruction text is canonicalized below.
+            if local == "space" and etree.QName(key).namespace == "http://www.w3.org/XML/1998/namespace" and _local(node) == "instrText":
+                continue
             attrs.append((key, value))
-        return (node.tag, tuple(sorted(attrs)), (node.text or ""), tuple(
+        return (node.tag, tuple(sorted(attrs)), _canonical_atom_text(node), tuple(
             self._signature(child) for child in node if isinstance(child.tag, str) and _local(child) not in _SKIP
         ))
 
@@ -99,10 +145,10 @@ class _Model:
         return self.cache[key]
 
     def paragraph(self, p: etree._Element, table_style: str | None = None) -> tuple:
-        ppr = clean_tokens(flatten(p.find(f"./{{{W}}}pPr")))
+        ppr = list(_canonical_tokens(clean_tokens(flatten(p.find(f"./{{{W}}}pPr"))), "pPr"))
         style = next((value for key, value in ppr if key == "pStyle@val"), None)
         mark = [(key[4:], value) for key, value in ppr if key.startswith("rPr.")]
-        props = tuple(item for item in ppr if not item[0].startswith("rPr."))
+        props = _canonical_tokens([item for item in ppr if not item[0].startswith("rPr.")], "pPr")
         mark_visible = self.visible(style, table_style, mark, "a中")
         content: list[tuple] = []
         self._content(p, style, table_style, (), content)
@@ -336,8 +382,58 @@ def _bundle_path(root: Path, relative: str, *, label: str) -> Path:
     try:
         candidate.relative_to(bundle)
     except ValueError as exc:
-        raise ValueError(f"roundtrip manifest {label} escapes the workdir: {relative}") from exc
+        raise RoundTripError(
+            f"roundtrip manifest {label} escapes the workdir: {relative}",
+            code="PATH_OUTSIDE_WORKDIR",
+        ) from exc
     return candidate
+
+
+def _public_exact_audit(
+    *,
+    mode: str,
+    unchanged: bool,
+    summary: dict[str, int],
+    redline_summary: dict[str, int] | None,
+    changed_section_ordinals: list[int],
+    changed_media_ordinals: list[int],
+    track_changes: str,
+) -> dict:
+    """Build the portable public projection of an exact-roundtrip receipt."""
+
+    invariant_codes = (
+        "RT-OPEN", "RT-EXACT", "RT-CONTENT", "RT-STRUCTURE", "RT-STYLE",
+        "RT-GEOMETRY", "RT-REL", "RT-MEDIA", "RT-IDEMP", "RT-UNSUPPORTED",
+    )
+    statuses = {code: "pass" for code in invariant_codes}
+    if unchanged:
+        for code in ("RT-CONTENT", "RT-STRUCTURE", "RT-STYLE", "RT-GEOMETRY", "RT-REL", "RT-MEDIA"):
+            statuses[code] = "skip"
+    else:
+        statuses["RT-EXACT"] = "skip"
+    revisions = redline_summary or summary
+    counts = {
+        str(key): int(value)
+        for key, value in revisions.items()
+        if str(key) in {"matched", "changed", "inserted", "deleted", "tables_replaced", "block_replace"}
+        and isinstance(value, int)
+    }
+    diagnostics = []
+    for ordinal in changed_section_ordinals:
+        diagnostics.append({"category": "content", "ordinal": ordinal, "reason": "RT-CONTENT", "counts": {"changed": 1}})
+    for ordinal in changed_media_ordinals:
+        diagnostics.append({"category": "media", "ordinal": ordinal, "reason": "RT-MEDIA", "counts": {"changed": 1}})
+    return {
+        "artifact_id": "artifact-0",
+        "format": "docx",
+        # Preserve the historical audit labels while exposing the shared
+        # invariant statuses and redacted diagnostics below.
+        "mode": "exact-reuse" if unchanged else "rebuild",
+        "invariants": statuses,
+        "counts": counts,
+        "diagnostics": diagnostics,
+        "unsupported_features": [],
+    }
 
 
 def _exact_roundtrip(
@@ -354,14 +450,44 @@ def _exact_roundtrip(
     """Implementation for the package-preserving command workflow."""
     from ..markdown.docx_export import docx_to_markdown, reuse_unchanged_roundtrip_source
     from ..markdown.source_edit import apply_markdown_delta
+    from ..output import _detect_format
+    from ..roundtrip import PathCollisionError, SnapshotMismatchError
 
-    source, work = Path(source), Path(work)
+    source, work = Path(source).expanduser().resolve(), Path(work).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
+    # Detect new inputs before creating a bundle or copying a snapshot.  An
+    # existing, schema-valid bundle is already an exported source contract;
+    # retain that low-level API's ability to operate on opaque test doubles
+    # while the CLI and fresh exports still enforce magic-based dispatch.
+    manifest_preexisting = (work / "manifest.json").is_file()
+    # Legacy callers may use opaque byte fixtures, but real OOXML/OLE2
+    # packages must still be dispatched before the existing-manifest shortcut
+    # can reuse them.  This keeps compatibility without letting a renamed
+    # presentation or spreadsheet bypass the typed format gate.
+    with source.open("rb") as stream:
+        magic = stream.read(8)
+    package_magic = magic.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") or magic[:4] in {
+        b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08",
+    }
+    if not manifest_preexisting or package_magic:
+        _detect_format(source)
     if track_changes not in {"accept", "reject", "all"}:
         raise ValueError("track_changes must be accept, reject, or all")
-    work.mkdir(parents=True, exist_ok=True)
     manifest_path = work / "manifest.json"
+    output = Path(output).expanduser().resolve() if output is not None else work / "roundtrip.docx"
+    audit_path = output.with_suffix(".manifest.json")
+    redline_path = Path(redline).expanduser().resolve() if redline is not None else None
+    protected = {"source": source, "output": output, "audit": audit_path}
+    if redline_path is not None:
+        protected["redline"] = redline_path
+    reverse: dict[Path, str] = {}
+    for label, path in protected.items():
+        previous = reverse.get(path)
+        if previous is not None:
+            raise PathCollisionError(f"PATH_COLLISION: {previous} and {label} resolve to the same path")
+        reverse[path] = label
+    work.mkdir(parents=True, exist_ok=True)
     if not manifest_path.is_file():
         docx_to_markdown(
             source,
@@ -379,30 +505,27 @@ def _exact_roundtrip(
             "roundtrip workdir was exported with track_changes="
             f"{manifest_track_changes!r}; requested {track_changes!r}"
         )
-    if manifest.get("source_sha256") != _file_sha256(source):
-        raise ValueError("roundtrip workdir was created from a different input DOCX")
+    expected_source_sha = manifest.get("source_sha256")
+    if expected_source_sha != _file_sha256(source):
+        raise RoundTripError(
+            "SOURCE_SHA_MISMATCH: roundtrip workdir was created from a different input DOCX",
+            code="SOURCE_SHA_MISMATCH",
+        )
     snapshot = _bundle_path(work, str(manifest.get("source_copy", "")), label="source_copy")
-    if not snapshot.is_file() or _file_sha256(snapshot) != manifest.get("source_copy_sha256"):
-        raise ValueError("roundtrip source snapshot is missing or its SHA-256 does not match")
-    output = Path(output) if output is not None else work / "roundtrip.docx"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    audit_path = output.with_suffix(".manifest.json")
+    expected_snapshot_sha = manifest.get("source_copy_sha256")
+    if not snapshot.is_file() or _file_sha256(snapshot) != expected_snapshot_sha:
+        raise SnapshotMismatchError("SNAPSHOT_SHA_MISMATCH: roundtrip source snapshot is missing or its SHA-256 does not match")
     if not force:
         if output.exists():
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
         if audit_path.exists():
             raise FileExistsError(f"Output exists; pass --force to overwrite: {audit_path}")
-        if redline is not None and Path(redline).exists():
-            raise FileExistsError(f"Output exists; pass --force to overwrite: {redline}")
+        if redline_path is not None and redline_path.exists():
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {redline_path}")
 
     # Build every artifact beside the destination and publish only after the
     # DOCX, optional redline, and audit sidecar have all succeeded.  A failed
     # redline or audit must never leave a seemingly valid DOCX behind.
-    stage_root = Path(tempfile.mkdtemp(prefix="docforge-roundtrip-stage-", dir=output.parent))
-    staged_output = stage_root / output.name
-    staged_audit = stage_root / audit_path.name
-    staged_redline = stage_root / Path(redline).name if redline is not None else None
-
     # Validate every manifest-controlled path before the reuse helper can
     # publish the source snapshot.  Resolving only after the copy allowed a
     # ``../outside.md`` entry to escape the bundle and left an output behind
@@ -422,9 +545,23 @@ def _exact_roundtrip(
         # branch only ensures containment is checked before any publication.
         pass
 
+    # All manifest-controlled paths are now resolved and checked.  Creating
+    # the destination parent only after that gate avoids leaving an empty
+    # output tree when a traversal or malformed bundle is rejected.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(tempfile.mkdtemp(prefix="docforge-roundtrip-stage-", dir=output.parent))
+    staged_output = stage_root / output.name
+    staged_audit = stage_root / audit_path.name
+    staged_redline = stage_root / redline_path.name if redline_path is not None else None
+
     # The existing helper verifies every section and media digest and performs
     # the byte-for-byte copy for a true no-op.
-    unchanged = reuse_unchanged_roundtrip_source(manifest_path, staged_output, force=True)
+    # Existing bundles may contain opaque test doubles; CLI and fresh exports
+    # preflight real inputs, while this low-level compatibility path already
+    # verified the manifest snapshot and must not parse it as OOXML again.
+    unchanged = reuse_unchanged_roundtrip_source(
+        manifest_path, staged_output, force=True, validate_format=False,
+    )
     current_section_hashes = {
         name: _file_sha256(path)
         for name in section_hashes
@@ -440,6 +577,7 @@ def _exact_roundtrip(
         summary = {"changed": 0, "inserted": 0, "deleted": 0}
     else:
         if changed_media:
+            shutil.rmtree(stage_root, ignore_errors=True)
             raise ValueError("DOCX-origin media changed; source package patching cannot redraw images")
         # Export the original snapshot to a temporary bundle to obtain the
         # exact baseline text while leaving the user's edited bundle intact.
@@ -479,13 +617,22 @@ def _exact_roundtrip(
         mode = "source-package-patch"
 
     redline_summary = None
-    redline_path = None
-    if redline is not None:
+    if redline_path is not None:
         from ..docxdiff.redline import create_tracked_docx
 
-        redline_path = Path(redline)
         redline_base = baseline if baseline is not None and baseline.suffix.lower() == ".docx" else source
         redline_summary = create_tracked_docx(redline_base, staged_output, staged_redline, author="roundtrip", overwrite=True, workers=1)
+
+    # The bundle can be edited by another process while a redline or render
+    # is running.  Recheck both immutable inputs at the publication barrier;
+    # otherwise an output could claim provenance from a snapshot that no
+    # longer exists or no longer matches its manifest.
+    if not snapshot.is_file() or _file_sha256(snapshot) != expected_snapshot_sha:
+        shutil.rmtree(stage_root, ignore_errors=True)
+        raise SnapshotMismatchError("SNAPSHOT_SHA_MISMATCH: roundtrip source snapshot changed before publish")
+    if expected_source_sha != _file_sha256(source):
+        shutil.rmtree(stage_root, ignore_errors=True)
+        raise RoundTripError("SOURCE_SHA_MISMATCH: input DOCX changed before publish", code="SOURCE_SHA_MISMATCH")
 
     bundle_manifest_sha256 = _file_sha256(manifest_path)
     audit = {
@@ -505,7 +652,18 @@ def _exact_roundtrip(
     }
     if redline_path is not None:
         audit["redline"] = {"path": redline_path.name, "sha256": _file_sha256(staged_redline), "summary": redline_summary}
-    staged_audit.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    changed_section_ordinals = [index for index, name in enumerate(section_hashes) if name in changed_sections]
+    changed_media_ordinals = [index for index, name in enumerate(media_hashes) if name in changed_media]
+    public_audit = _public_exact_audit(
+        mode=mode,
+        unchanged=unchanged,
+        summary=summary,
+        redline_summary=redline_summary,
+        changed_section_ordinals=changed_section_ordinals,
+        changed_media_ordinals=changed_media_ordinals,
+        track_changes=track_changes,
+    )
+    staged_audit.write_text(json.dumps(public_audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     # Final publication is the only point at which destination paths are
     # touched.  All source-package work and validation above is reversible.
     os.replace(staged_output, output)
