@@ -24,6 +24,7 @@ INVARIANTS: tuple[str, ...] = (
     "RT-OPEN", "RT-EXACT", "RT-CONTENT", "RT-STRUCTURE", "RT-STYLE",
     "RT-GEOMETRY", "RT-REL", "RT-MEDIA", "RT-IDEMP", "RT-UNSUPPORTED",
 )
+_COUNT_KEY_RE = re.compile(r"^[a-z_]{1,40}$")
 
 
 class RoundTripMode(str, Enum):
@@ -141,6 +142,21 @@ def confined_path(root: Path, relative: str | os.PathLike[str], *, label: str = 
     return candidate
 
 
+def _redact_counts(value: Any) -> dict[str, int]:
+    """Keep only small, stable integer counters from a public receipt."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if isinstance(key, str)
+        and _COUNT_KEY_RE.fullmatch(key)
+        and isinstance(item, int)
+        and not isinstance(item, bool)
+    }
+
+
 def redact_diagnostic(value: Any, *, _field: str | None = None) -> Any:
     """Keep public diagnostics stable and free of paths, text, XML, and hashes."""
 
@@ -151,7 +167,7 @@ def redact_diagnostic(value: Any, *, _field: str | None = None) -> Any:
             name = str(key)
             if name not in allowed:
                 continue
-            result[name] = redact_diagnostic(item, _field=name)
+            result[name] = _redact_counts(item) if name == "counts" else redact_diagnostic(item, _field=name)
         return result
     if isinstance(value, (list, tuple)):
         return [redact_diagnostic(item, _field=_field) for item in value]
@@ -188,12 +204,38 @@ def redact_report(report: Mapping[str, Any]) -> dict[str, Any]:
     """Return the portable public manifest subset for a contract run."""
 
     allowed = {"artifact_id", "format", "mode", "invariants", "counts", "unsupported_features", "diagnostics"}
-    result = {key: redact_diagnostic(value) for key, value in report.items() if key in allowed}
-    if "invariants" in result and isinstance(result["invariants"], Mapping):
-        result["invariants"] = {str(key): redact_diagnostic(value) for key, value in result["invariants"].items()}
-    if "unsupported_features" in result:
-        features = result["unsupported_features"]
-        result["unsupported_features"] = ["RT-UNSUPPORTED"] if features else []
+    result: dict[str, Any] = {}
+    for key, value in report.items():
+        if key not in allowed:
+            continue
+        if key == "invariants" and isinstance(value, Mapping):
+            invariants: dict[str, Any] = {}
+            for code, item in value.items():
+                code = str(code)
+                if code not in INVARIANTS:
+                    continue
+                if isinstance(item, Mapping):
+                    projected: dict[str, Any] = {"code": code}
+                    if "status" in item:
+                        projected["status"] = redact_diagnostic(item["status"], _field="status")
+                    if "counts" in item:
+                        projected["counts"] = _redact_counts(item["counts"])
+                    if "diagnostics" in item:
+                        projected["diagnostics"] = redact_diagnostic(item["diagnostics"], _field="diagnostics")
+                    invariants[code] = projected
+                else:
+                    invariants[code] = {
+                        "code": code,
+                        "status": redact_diagnostic(item, _field="status"),
+                        "counts": {},
+                    }
+            result[key] = invariants
+        elif key == "counts":
+            result[key] = _redact_counts(value)
+        elif key == "unsupported_features":
+            result[key] = ["RT-UNSUPPORTED"] if value else []
+        else:
+            result[key] = redact_diagnostic(value, _field=key)
     return result
 
 

@@ -69,6 +69,10 @@ def test_projection_comparison_is_semantic_and_redacted() -> None:
         "format": "docx",
         "mode": RoundTripMode.EXACT_REUSE.value,
         "invariants": {key: value.to_dict() for key, value in results.items()},
+        "counts": {"blocks": 12, "secret_count": "not-an-int"},
+        "diagnostics": [
+            {"category": "content", "reason": "RT-CONTENT", "counts": {"changed": 1}, "secret": "text"}
+        ],
         "source": "/private/user.docx",
         "raw_xml": "<w:p>secret</w:p>",
         "sha256": "0" * 64,
@@ -76,6 +80,10 @@ def test_projection_comparison_is_semantic_and_redacted() -> None:
     serialized = json.dumps(report, ensure_ascii=False)
     assert "private" not in serialized and "secret" not in serialized and "0" * 64 not in serialized
     assert report["artifact_id"] == "F-01"
+    assert report["invariants"]["RT-CONTENT"]["status"] == "pass"
+    assert report["invariants"]["RT-CONTENT"]["counts"] == {"equal": 1}
+    assert report["counts"] == {"blocks": 12}
+    assert report["diagnostics"][0]["counts"] == {"changed": 1}
 
 
 def test_docx_projection_canonicalizes_property_and_whitespace_transport() -> None:

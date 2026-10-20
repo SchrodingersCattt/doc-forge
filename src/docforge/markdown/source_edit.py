@@ -149,7 +149,13 @@ def _public_reason(reason: object, action: object) -> str:
     return "RT-CONTENT"
 
 
-def _public_redline_report(report: dict[str, Any], *, mode: str) -> dict[str, Any]:
+def _public_redline_report(
+    report: dict[str, Any],
+    *,
+    mode: str,
+    exact_equal: bool | None = None,
+    patch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Project a private redline report onto its stable public contract.
 
     The projection keeps only action kinds, summary categories, and block
@@ -181,19 +187,42 @@ def _public_redline_report(report: dict[str, Any], *, mode: str) -> dict[str, An
             if isinstance(value, int) and value >= 0:
                 entry[public_name] = value
         diagnostics.append(entry)
-    for key, value in dict(report.get("summary", {})).items():
+    summary = dict(report.get("summary", {}))
+    if patch:
+        # The source patcher reports replacements while the redline engine
+        # reports changed paragraphs.  Fold both into the same public
+        # categories without exposing private operation details.
+        if isinstance(patch.get("replaced"), int):
+            current = summary.get("changed", 0)
+            summary["changed"] = max(current, int(patch["replaced"])) if isinstance(current, int) else int(patch["replaced"])
+        for key in ("inserted", "deleted"):
+            if isinstance(patch.get(key), int):
+                current = summary.get(key, 0)
+                summary[key] = max(current, int(patch[key])) if isinstance(current, int) else int(patch[key])
+    for key, value in summary.items():
         if key in counts and isinstance(value, int):
             counts[key] = value
-    statuses = {code: "pass" for code in _PUBLIC_INVARIANT_CODES}
-    if mode == "EXACT_REUSE":
-        statuses["RT-CONTENT"] = "skip"
-        statuses["RT-STRUCTURE"] = "skip"
-        statuses["RT-STYLE"] = "skip"
-        statuses["RT-GEOMETRY"] = "skip"
-        statuses["RT-REL"] = "skip"
-        statuses["RT-MEDIA"] = "skip"
-    else:
-        statuses["RT-EXACT"] = "skip"
+    # A receipt must never claim that an invariant passed merely because the
+    # report was writable.  Only the checks represented by the evidence below
+    # receive a status; all other dimensions remain explicitly unverified.
+    statuses = {code: "skip" for code in _PUBLIC_INVARIANT_CODES}
+    if mode == "EXACT_REUSE" and exact_equal is not None:
+        statuses["RT-EXACT"] = "pass" if exact_equal else "fail"
+    elif mode != "EXACT_REUSE":
+        if any(
+            isinstance(summary.get(key), int)
+            and not isinstance(summary.get(key), bool)
+            and summary.get(key, 0) > 0
+            for key in ("changed", "inserted", "deleted")
+        ):
+            statuses["RT-CONTENT"] = "pass"
+        if any(
+            isinstance(summary.get(key), int)
+            and not isinstance(summary.get(key), bool)
+            and summary.get(key, 0) > 0
+            for key in ("tables_replaced", "block_replace")
+        ):
+            statuses["RT-STRUCTURE"] = "pass"
     return {
         "artifact_id": "artifact-0",
         "format": "docx",
@@ -218,8 +247,21 @@ def public_roundtrip_report(
     private_report = redline_report or (
         payload.get("redline", {}).get("report") if isinstance(payload.get("redline"), dict) else None
     )
-    report = _public_redline_report(private_report or {"summary": summary}, mode=mode)
     patch = payload.get("patch", {})
+    source = payload.get("source", {})
+    output = payload.get("output", {})
+    exact_equal = None
+    if mode == "EXACT_REUSE" and isinstance(source, dict) and isinstance(output, dict):
+        source_sha = source.get("sha256")
+        output_sha = output.get("sha256")
+        if isinstance(source_sha, str) and isinstance(output_sha, str):
+            exact_equal = source_sha == output_sha
+    report = _public_redline_report(
+        private_report or {"summary": summary},
+        mode=mode,
+        exact_equal=exact_equal,
+        patch=patch if isinstance(patch, dict) else None,
+    )
     patch_counts = {
         key: int(patch.get(key, 0))
         for key in ("replaced", "inserted", "deleted")

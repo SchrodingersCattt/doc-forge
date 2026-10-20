@@ -12,9 +12,11 @@ from docforge.markdown.source_edit import (
     _copy_paragraph_properties,
     _list_headings,
     _map_blocks,
+    _public_redline_report,
     _run_properties,
     apply_markdown_delta,
     export_block_map,
+    public_roundtrip_report,
     roundtrip_source_docx,
 )
 
@@ -111,6 +113,40 @@ def test_roundtrip_exports_patches_and_redlines_source_package(tmp_path):
     assert "docforge-roundtrip-" not in json.dumps(report)
     assert output.exists() and tracked.exists()
     assert Document(output).tables[0].cell(0, 0).text == "opaque table"
+
+
+def test_public_redline_report_only_publishes_evaluated_invariants():
+    report = _public_redline_report(
+        {"summary": {"changed": 1, "tables_replaced": 1}},
+        mode="SOURCE_PATCH",
+    )
+    assert report["invariants"]["RT-CONTENT"] == "pass"
+    assert report["invariants"]["RT-STRUCTURE"] == "pass"
+    for code, status in report["invariants"].items():
+        if code not in {"RT-CONTENT", "RT-STRUCTURE"}:
+            assert status == "skip"
+
+
+def test_public_roundtrip_report_requires_matching_exact_reuse_hashes():
+    mismatch = public_roundtrip_report(
+        {
+            "source": {"sha256": "source"},
+            "output": {"sha256": "output"},
+            "redline": {"summary": {}},
+        },
+        mode="EXACT_REUSE",
+    )
+    assert mismatch["invariants"]["RT-EXACT"] == "fail"
+
+    match = public_roundtrip_report(
+        {
+            "source": {"sha256": "same"},
+            "output": {"sha256": "same"},
+            "redline": {"summary": {}},
+        },
+        mode="EXACT_REUSE",
+    )
+    assert match["invariants"]["RT-EXACT"] == "pass"
 
 
 def test_roundtrip_cli_parser_routes_source_package_mode_without_duplicate_command():
