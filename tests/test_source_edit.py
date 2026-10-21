@@ -120,11 +120,18 @@ def test_public_redline_report_only_publishes_evaluated_invariants():
         {"summary": {"changed": 1, "tables_replaced": 1}},
         mode="SOURCE_PATCH",
     )
-    assert report["invariants"]["RT-CONTENT"] == "pass"
-    assert report["invariants"]["RT-STRUCTURE"] == "pass"
-    for code, status in report["invariants"].items():
-        if code not in {"RT-CONTENT", "RT-STRUCTURE"}:
-            assert status == "skip"
+    assert all(status == "skip" for status in report["invariants"].values())
+
+
+def test_public_redline_report_keeps_patch_and_redline_evidence_separate():
+    report = _public_redline_report(
+        {"summary": {"changed": 0, "tables_replaced": 0}},
+        mode="SOURCE_PATCH",
+        patch={"replaced": 3, "inserted": 1, "deleted": 0},
+    )
+    assert report["invariants"]["RT-CONTENT"] == "skip"
+    assert report["counts"]["changed"] == 0
+    assert report["counts"]["patch"] == {"replaced": 3, "inserted": 1, "deleted": 0}
 
 
 def test_public_roundtrip_report_requires_matching_exact_reuse_hashes():

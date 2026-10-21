@@ -85,6 +85,9 @@ def test_projection_comparison_is_semantic_and_redacted() -> None:
     assert report["counts"] == {"blocks": 12}
     assert report["diagnostics"][0]["counts"] == {"changed": 1}
 
+    assert redact_report({"artifact_id": "/private/Thesis draft.docx"})["artifact_id"] == "REDACTED"
+    assert redact_report({"artifact_id": "F-01"})["artifact_id"] == "F-01"
+
 
 def test_docx_projection_canonicalizes_property_and_whitespace_transport() -> None:
     from lxml import etree

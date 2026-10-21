@@ -25,6 +25,24 @@ INVARIANTS: tuple[str, ...] = (
     "RT-GEOMETRY", "RT-REL", "RT-MEDIA", "RT-IDEMP", "RT-UNSUPPORTED",
 )
 _COUNT_KEY_RE = re.compile(r"^[a-z_]{1,40}$")
+_SYNTHETIC_ID_RE = re.compile(r"^[A-Za-z]{1,8}-\d{1,6}$")
+_PUBLIC_ACTIONS = frozenset({
+    "match", "passthrough", "paragraph-replace", "table", "delete", "insert",
+    "document-replace",
+})
+_PUBLIC_REASON_CODES = {
+    "unchanged": "RT-EXACT",
+    "word-diff": "RT-CONTENT",
+    "caption-word-diff": "RT-CONTENT",
+    "removed-block": "RT-STRUCTURE",
+    "new-block": "RT-STRUCTURE",
+    "row-revision": "RT-STRUCTURE",
+    "drawing-change": "RT-MEDIA",
+    "layout-passthrough": "RT-STRUCTURE",
+    "table-replacement": "RT-STRUCTURE",
+    "non-text-replacement": "RT-UNSUPPORTED",
+    "block-shape": "RT-STRUCTURE",
+}
 
 
 class RoundTripMode(str, Enum):
@@ -175,6 +193,8 @@ def redact_diagnostic(value: Any, *, _field: str | None = None) -> Any:
         return value
     if isinstance(value, str):
         cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value)[:80]
+        if _field == "artifact_id" and not _SYNTHETIC_ID_RE.fullmatch(cleaned):
+            return "REDACTED"
         if _field == "reason" and not re.fullmatch(r"[A-Z][A-Z0-9_.:-]{1,79}", cleaned):
             return "REDACTED"
         if _field == "category" and cleaned not in {
@@ -198,6 +218,53 @@ def redact_diagnostic(value: Any, *, _field: str | None = None) -> Any:
             return "REDACTED"
         return cleaned
     return None
+
+
+def public_reason(reason: object, action: object) -> str:
+    """Map private alignment reasons to the shared public invariant taxonomy."""
+
+    value = _PUBLIC_REASON_CODES.get(str(reason))
+    if value is not None:
+        return value
+    if str(action) in {"delete", "insert", "table", "paragraph-replace", "document-replace"}:
+        return "RT-STRUCTURE"
+    return "RT-CONTENT"
+
+
+def redact_alignment_actions(
+    alignment_report: Sequence[Mapping[str, Any]],
+    summary: Mapping[str, int],
+    *,
+    include_summary_key: bool = True,
+) -> list[dict[str, Any]]:
+    """Redact alignment actions using the shared reason and action policy."""
+
+    public: list[dict[str, Any]] = []
+    summary_keys = {str(key) for key in summary}
+    for ordinal, item in enumerate(alignment_report):
+        if not isinstance(item, Mapping):
+            continue
+        summary_key = str(item.get("summary_key", ""))
+        if summary_key not in summary_keys:
+            continue
+        action = str(item.get("action", item.get("category", "other")))
+        entry: dict[str, Any] = {
+            "category": action if action in _PUBLIC_ACTIONS else "other",
+            "ordinal": ordinal,
+            "reason": public_reason(item.get("reason"), action),
+            "counts": {summary_key: 1},
+        }
+        if include_summary_key:
+            entry["summary_key"] = summary_key
+        for source_key, public_key in (
+            ("baseline_index", "baseline_ordinal"),
+            ("current_index", "current_ordinal"),
+        ):
+            value = item.get(source_key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                entry[public_key] = value
+        public.append(entry)
+    return public
 
 
 def redact_report(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -278,5 +345,6 @@ def exact_reuse(source: Path, output: Path, *, snapshot: SourceSnapshot | None =
 __all__ = [
     "INVARIANTS", "RoundTripMode", "RoundTripError", "SnapshotMismatchError", "PathCollisionError",
     "SourceSnapshot", "InvariantResult", "RoundTripAdapter", "sha256_file", "ensure_distinct_paths",
-    "confined_path", "redact_diagnostic", "redact_report", "compare_projection", "exact_reuse",
+    "confined_path", "redact_diagnostic", "redact_report", "public_reason", "redact_alignment_actions",
+    "compare_projection", "exact_reuse",
 ]

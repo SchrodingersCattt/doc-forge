@@ -32,6 +32,7 @@ from lxml import etree
 
 from .package import Package
 from ..output import _detect_format, validate_output_path
+from ..roundtrip import redact_alignment_actions
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
@@ -2313,61 +2314,11 @@ def _balance_bookmarks(root: etree._Element) -> None:
         node.getparent().remove(node)
 
 
-# Alignment reports can be stored beside deliverables and are therefore part
-# of the public artifact surface.  Keep only stable, aggregate identifiers in
-# that report; paragraph text, XML fragments, ratios, authors, and filesystem
-# paths belong to the private execution trace.
-_PUBLIC_ACTIONS = frozenset({
-    "match", "passthrough", "paragraph-replace", "table", "delete", "insert",
-    "document-replace",
-})
-_PUBLIC_REASON_CODES = {
-    "unchanged": "RT-EXACT",
-    "word-diff": "RT-CONTENT",
-    "caption-word-diff": "RT-CONTENT",
-    "layout-passthrough": "RT-STRUCTURE",
-    "drawing-change": "RT-MEDIA",
-    "row-revision": "RT-STRUCTURE",
-    "table-replacement": "RT-STRUCTURE",
-    "removed-block": "RT-STRUCTURE",
-    "new-block": "RT-STRUCTURE",
-    "non-text-replacement": "RT-STRUCTURE",
-    "block-shape": "RT-STRUCTURE",
-}
-
-
 def _public_alignment_report(
     alignment_report: list[dict[str, object]], summary: dict[str, int]
 ) -> list[dict[str, object]]:
-    """Project private alignment records into a redacted public report."""
-    public: list[dict[str, object]] = []
-    for ordinal, item in enumerate(alignment_report):
-        summary_key = item.get("summary_key")
-        if summary_key not in summary:
-            # The initial pairing trace has no rendered summary key.  It is
-            # useful for debugging but is not a public rendering decision.
-            continue
-        action = item.get("action")
-        category = action if action in _PUBLIC_ACTIONS else "other"
-        reason = item.get("reason")
-        entry: dict[str, object] = {
-            "category": category,
-            "ordinal": ordinal,
-            "reason": _PUBLIC_REASON_CODES.get(str(reason), "RT-CONTENT"),
-            "counts": {str(summary_key): 1},
-            # Retain this historical field so existing consumers can verify
-            # aggregate counts without exposing any source text.
-            "summary_key": summary_key,
-        }
-        for source_key, public_key in (
-            ("baseline_index", "baseline_ordinal"),
-            ("current_index", "current_ordinal"),
-        ):
-            value = item.get(source_key)
-            if isinstance(value, int):
-                entry[public_key] = value
-        public.append(entry)
-    return public
+    """Project private alignment records into the shared public report."""
+    return redact_alignment_actions(alignment_report, summary)
 
 
 def create_tracked_docx(

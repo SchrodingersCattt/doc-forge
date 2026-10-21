@@ -27,7 +27,7 @@ from lxml import etree
 from ..docxdiff.package import Package
 from ..docxmd.inline import Atom, parse as parse_inline
 from ..output import _detect_format, validate_output_path
-from ..roundtrip import PathCollisionError
+from ..roundtrip import PathCollisionError, redact_alignment_actions
 from .prototypes import numbered_bold_prototypes
 from .inline import display, key as inline_key
 
@@ -52,25 +52,8 @@ DASHES = str.maketrans(
 # values.  The redline engine also writes a useful local alignment report,
 # but that report contains manuscript text, OOXML details, workspace paths,
 # and ratios that must not be copied into a user-facing manifest.
-_PUBLIC_ACTIONS = frozenset({
-    "match", "passthrough", "paragraph-replace", "table", "delete", "insert",
-    "document-replace",
-})
 _PUBLIC_SUMMARY_ORDER = ("matched", "changed", "inserted", "deleted", "tables_replaced", "block_replace")
 _PUBLIC_SUMMARY_KEYS = frozenset(_PUBLIC_SUMMARY_ORDER)
-_PUBLIC_REASON_CODES = {
-    "unchanged": "RT-EXACT",
-    "word-diff": "RT-CONTENT",
-    "caption-word-diff": "RT-CONTENT",
-    "removed-block": "RT-CONTENT",
-    "new-block": "RT-CONTENT",
-    "row-revision": "RT-CONTENT",
-    "drawing-change": "RT-GEOMETRY",
-    "layout-passthrough": "RT-STRUCTURE",
-    "table-replacement": "RT-STRUCTURE",
-    "non-text-replacement": "RT-UNSUPPORTED",
-    "block-shape": "RT-STRUCTURE",
-}
 _PUBLIC_INVARIANT_CODES = (
     "RT-OPEN", "RT-EXACT", "RT-CONTENT", "RT-STRUCTURE", "RT-STYLE",
     "RT-GEOMETRY", "RT-REL", "RT-MEDIA", "RT-IDEMP", "RT-UNSUPPORTED",
@@ -136,19 +119,6 @@ def _path_collision(*paths: tuple[str, Path]) -> None:
         seen[resolved] = label
 
 
-def _public_reason(reason: object, action: object) -> str:
-    value = _PUBLIC_REASON_CODES.get(str(reason))
-    if value is not None:
-        return value
-    # Unknown engine details are intentionally collapsed to a stable public
-    # category instead of echoing a future reason string into the manifest.
-    if str(action) in {"delete", "insert"}:
-        return "RT-CONTENT"
-    if str(action) in {"table", "paragraph-replace", "document-replace"}:
-        return "RT-STRUCTURE"
-    return "RT-CONTENT"
-
-
 def _public_redline_report(
     report: dict[str, Any],
     *,
@@ -163,42 +133,21 @@ def _public_redline_report(
     similarity ratios, and package hashes are deliberately omitted.
     """
 
-    diagnostics: list[dict[str, Any]] = []
-    counts: dict[str, int] = {key: 0 for key in _PUBLIC_SUMMARY_ORDER}
+    normalized_actions: list[dict[str, Any]] = []
+    counts: dict[str, Any] = {key: 0 for key in _PUBLIC_SUMMARY_ORDER}
     for ordinal, item in enumerate(report.get("actions", ())):
         if not isinstance(item, dict):
             continue
         action = str(item.get("action", item.get("category", "other")))
-        public_action = action if action in _PUBLIC_ACTIONS else "other"
         summary_key = str(item.get("summary_key", ""))
         if summary_key not in _PUBLIC_SUMMARY_KEYS:
-            summary_key = "changed" if public_action in {"match", "passthrough", "paragraph-replace", "table"} else "inserted" if public_action == "insert" else "deleted" if public_action == "delete" else "block_replace" if public_action == "document-replace" else "changed"
+            summary_key = "changed" if action in {"match", "passthrough", "paragraph-replace", "table"} else "inserted" if action == "insert" else "deleted" if action == "delete" else "block_replace" if action == "document-replace" else "changed"
         counts[summary_key] += 1
-        entry: dict[str, Any] = {
-            "category": public_action,
-            "ordinal": ordinal,
-            "reason": _public_reason(item.get("reason"), public_action),
-            "counts": {summary_key: 1},
-        }
-        # Numeric block ordinals are safe to expose and make the receipt
-        # useful for deterministic review without revealing manuscript text.
-        for source_name, public_name in (("baseline_index", "baseline_ordinal"), ("current_index", "current_ordinal")):
-            value = item.get(source_name)
-            if isinstance(value, int) and value >= 0:
-                entry[public_name] = value
-        diagnostics.append(entry)
+        normalized = dict(item)
+        normalized["action"] = action
+        normalized["summary_key"] = summary_key
+        normalized_actions.append(normalized)
     summary = dict(report.get("summary", {}))
-    if patch:
-        # The source patcher reports replacements while the redline engine
-        # reports changed paragraphs.  Fold both into the same public
-        # categories without exposing private operation details.
-        if isinstance(patch.get("replaced"), int):
-            current = summary.get("changed", 0)
-            summary["changed"] = max(current, int(patch["replaced"])) if isinstance(current, int) else int(patch["replaced"])
-        for key in ("inserted", "deleted"):
-            if isinstance(patch.get(key), int):
-                current = summary.get(key, 0)
-                summary[key] = max(current, int(patch[key])) if isinstance(current, int) else int(patch[key])
     for key, value in summary.items():
         if key in counts and isinstance(value, int):
             counts[key] = value
@@ -208,21 +157,19 @@ def _public_redline_report(
     statuses = {code: "skip" for code in _PUBLIC_INVARIANT_CODES}
     if mode == "EXACT_REUSE" and exact_equal is not None:
         statuses["RT-EXACT"] = "pass" if exact_equal else "fail"
-    elif mode != "EXACT_REUSE":
-        if any(
-            isinstance(summary.get(key), int)
-            and not isinstance(summary.get(key), bool)
-            and summary.get(key, 0) > 0
-            for key in ("changed", "inserted", "deleted")
-        ):
-            statuses["RT-CONTENT"] = "pass"
-        if any(
-            isinstance(summary.get(key), int)
-            and not isinstance(summary.get(key), bool)
-            and summary.get(key, 0) > 0
-            for key in ("tables_replaced", "block_replace")
-        ):
-            statuses["RT-STRUCTURE"] = "pass"
+    diagnostics = redact_alignment_actions(
+        normalized_actions,
+        {key: 0 for key in _PUBLIC_SUMMARY_ORDER},
+        include_summary_key=False,
+    )
+    if patch:
+        patch_counts = {
+            key: int(patch[key])
+            for key in ("replaced", "inserted", "deleted")
+            if isinstance(patch.get(key), int) and not isinstance(patch.get(key), bool)
+        }
+        if patch_counts:
+            counts["patch"] = patch_counts
     return {
         "artifact_id": "artifact-0",
         "format": "docx",
