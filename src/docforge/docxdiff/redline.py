@@ -31,7 +31,8 @@ from pathlib import Path
 from lxml import etree
 
 from .package import Package
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
+from ..roundtrip import redact_alignment_actions
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
@@ -78,6 +79,13 @@ MATH_ROOT_NAMES = frozenset({"oMath", "oMathPara"})
 DRAWING_ROOT_NAMES = frozenset({"drawing"})
 WP14 = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
 REFERENCE_MATCH_RATIO = 0.96
+# An unstyled paragraph is treated as a bibliography entry only when its
+# leading bracket is a numeric citation.  Formulae and chemical expressions
+# commonly begin with brackets too (for example ``[K(ClO4)6] units``), and
+# treating those as references prevents otherwise valid in-place rewrites.
+NUMERIC_REFERENCE_MARKER = re.compile(
+    r"\s*\[\s*\d+(?:\s*[,;]\s*\d+|\s*[-–—]\s*\d+)*\s*\]\s+\S"
+)
 MATH_PUA_START = 0xE000
 MATH_PUA_SIZE = 0x1900
 # Internal citation links are ordinary runs plus a w:hyperlink wrapper.
@@ -514,7 +522,7 @@ def _reference_content(block: Block) -> str | None:
     if block.kind != "p":
         return None
     style = block.style.casefold()
-    numbered = re.match(r"\s*\[[^\]]+\]\s+\S", block.text) is not None
+    numbered = NUMERIC_REFERENCE_MARKER.match(block.text) is not None
     if "reference" not in style and "bibliograph" not in style and not numbered:
         return None
     match = re.match(
@@ -2306,6 +2314,13 @@ def _balance_bookmarks(root: etree._Element) -> None:
         node.getparent().remove(node)
 
 
+def _public_alignment_report(
+    alignment_report: list[dict[str, object]], summary: dict[str, int]
+) -> list[dict[str, object]]:
+    """Project private alignment records into the shared public report."""
+    return redact_alignment_actions(alignment_report, summary)
+
+
 def create_tracked_docx(
     base_path: Path,
     current_path: Path,
@@ -2334,6 +2349,8 @@ def create_tracked_docx(
     :class:`SparseRedlineError` before writing ``output_path``. Neither ratio
     caching nor worker count changes the result.
     """
+    _detect_format(base_path)
+    _detect_format(current_path)
     validate_output_path(output_path)
     validate_output_path(report_path, label="report")
     base_package = Package.load(base_path)
@@ -2642,13 +2659,7 @@ def create_tracked_docx(
             json.dumps(
                 {
                     "schema": "docforge.redline.v1",
-                    "baseline": str(base_path),
-                    "current": str(current_path),
-                    "output": str(output_path),
-                    "accept_baseline": accept_baseline,
-                    "revision_author": author,
-                    "revision_date": context.date,
-                    "actions": alignment_report,
+                    "actions": _public_alignment_report(alignment_report, summary),
                     "summary": summary,
                 },
                 ensure_ascii=False,

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
 from .blocks import Block
 from .launcher import parse_markdown
 from .template import (
@@ -268,6 +268,7 @@ def build_docx_contract(
     validate_output_path(output)
     if not template_path.is_file():
         raise FileNotFoundError(template_path)
+    _detect_format(template_path)
     if not metadata_path.is_file():
         raise FileNotFoundError(metadata_path)
     if output.resolve() == template_path.resolve():

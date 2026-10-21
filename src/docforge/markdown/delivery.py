@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 
 from lxml import etree
 
-from ..output import validate_output_path
+from ..output import _detect_format, validate_output_path
 from .docx_export import docx_to_markdown, load_section_map, split_markdown_sections
 from .template import AssemblyResult, assemble_markdown_template, write_assembly_sidecars
 
@@ -830,6 +830,9 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
             reviewed_path = _path(reviewed, base, label="reviewed_docx")
             if not reviewed_path.is_file():
                 raise FileNotFoundError(reviewed_path)
+            # Probe reviewed sources while still in the read-only preflight
+            # phase, before the transactional delivery directory is created.
+            _detect_format(reviewed_path)
             if not accept_revisions and _docx_has_revisions(reviewed_path):
                 raise ValueError(f"{key} reviewed DOCX contains unapplied revisions; pass --accept-revisions")
         output = delivery_dir / _output_name(entry, key, payload, timestamp=timestamp)
@@ -841,6 +844,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
         template = _path(entry.get("template", shared.get("template")), base, label=f"{key}.template")
         if not template.is_file():
             raise FileNotFoundError(template)
+        _detect_format(template)
         for field in ("metadata", "metadata_path", "bibliography"):
             value = entry.get(field, shared.get(field))
             if value is not None and not _path(value, base, label=f"{key}.{field}").is_file():

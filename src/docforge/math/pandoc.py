@@ -20,7 +20,10 @@ MATH_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NAMESPACES = {"m": MATH_NAMESPACE, "w": WORD_NAMESPACE}
 PANDOC_VERSION = "2.9.2.1"
-SUPPORTED_PANDOC_VERSIONS = {"2.9.2.1", "3.9.0.1"}
+# Keep the versions whose OMML output is covered by the normalizer.  3.1.11.1
+# is the current long-term package on several Linux distributions and is
+# compatible with the same structural checks as the older pinned toolchains.
+SUPPORTED_PANDOC_VERSIONS = {"2.9.2.1", "3.1.11.1", "3.9.0.1"}
 _NAMED_OPERATORS = ("clip", "tanh")
 _ALIGNMENT_ENV_RE = re.compile(
     r"\\begin\{(?:aligned|alignedat|align|alignat|gather|gathered|multline|split|cases|array|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|smallmatrix)\*?\}"

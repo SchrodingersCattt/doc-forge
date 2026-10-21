@@ -56,4 +56,15 @@ from .pipeline import (  # noqa: E402,F401
     ValidationReport,
 )
 
-__all__ = ["__version__", "ArtifactRef", "Diagnostic", "PipelineResult", "PipelineRunner", "PipelineSpec", "StageResult", "ValidationReport"]
+__all__ = [
+    "__version__", "ArtifactRef", "Diagnostic", "PipelineResult", "PipelineRunner", "PipelineSpec",
+    "StageResult", "ValidationReport", "INVARIANTS", "InvariantResult", "PathCollisionError",
+    "RoundTripError", "RoundTripMode", "SnapshotMismatchError", "SourceSnapshot", "compare_projection",
+    "exact_reuse", "redact_report",
+]
+
+# Shared redacted cross-format round-trip contract.
+from .roundtrip import (  # noqa: E402,F401
+    INVARIANTS, InvariantResult, PathCollisionError, RoundTripError, RoundTripMode,
+    SnapshotMismatchError, SourceSnapshot, compare_projection, exact_reuse, redact_report,
+)

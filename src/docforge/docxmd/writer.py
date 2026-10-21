@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from lxml import etree
 
 from ..docxdiff.package import Package
+from ..output import _detect_format
 from . import drawing as drawing_mod
 from .common import ATTR_LINE, Attrs, format_citation_numbers, parse_attrs, run_tokens_for
 from .inline import MILESTONES, Atom, Text, parse as parse_inline
@@ -246,7 +247,9 @@ class _Writer:
     def __init__(self, bundle: Path, document: dict) -> None:
         self.bundle = bundle
         self.document = document
-        self.package = Package.load(bundle / document["template"])
+        template = bundle / document["template"]
+        _detect_format(template)
+        self.package = Package.load(template)
         self.root = self.package.xml("word/document.xml")
         self.nsmap = dict(self.root.nsmap)
         for prefix, uri in KNOWN_NAMESPACES.items():
