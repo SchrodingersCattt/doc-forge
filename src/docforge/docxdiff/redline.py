@@ -859,6 +859,12 @@ def _mark_paragraph(
         if rpr is None:
             rpr = etree.SubElement(result_ppr, f"{{{W}}}rPr")
         rpr.insert(0, etree.Element(f"{{{W}}}del", attrib=context.attrs()))
+        # Word still applies w:sectPr on paragraph-mark deletions for live layout
+        # while revisions are shown. Drop section properties from deleted
+        # paragraphs so column breaks come only from surviving current content
+        # (and the final body sectPr), not from baseline-only deletion markup.
+        for sectpr in list(result_ppr.findall("./w:sectPr", NS)):
+            result_ppr.remove(sectpr)
         # A paragraph-mark deletion does not hide drawings. Word keeps rendering
         # the old figure beside the inserted replacement, so drop the picture
         # from the deleted paragraph and leave the deletion on the paragraph mark.
