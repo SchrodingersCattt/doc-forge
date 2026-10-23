@@ -916,10 +916,12 @@ def _base_relationships(base_package: Package, current_package: Package):
     current = current_package.xml(rel_name)
     sources = {rel.get("Id"): rel for rel in original}
     used = {rel.get("Id") for rel in current}
-    copied: dict[str, str] = {}
+    # Maps baseline rId -> new rId, or None when the target was intentionally dropped.
+    copied: dict[str, str | None] = {}
 
     def carry(paragraph: etree._Element) -> etree._Element:
         result = copy.deepcopy(paragraph)
+        drop: list[etree._Element] = []
         for node in result.iter():
             for attr in (f"{{{R}}}id", f"{{{R}}}embed", f"{{{R}}}link"):
                 old_id = node.get(attr)
@@ -929,30 +931,56 @@ def _base_relationships(base_package: Package, current_package: Package):
                     raise ValueError(f"Missing baseline relationship: {old_id}")
                 if old_id not in copied:
                     rel = copy.deepcopy(sources[old_id])
-                    number = 1
-                    while f"rId{number}" in used:
-                        number += 1
-                    new_id = f"rId{number}"
-                    used.add(new_id)
-                    rel.set("Id", new_id)
                     if rel.get("TargetMode") != "External":
                         target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
+                        # Only media payloads can be safely re-homed into the
+                        # current package. Header/footer/other part refs from
+                        # deleted baseline runs are dropped so redline can
+                        # finish (AML baselines may cite word/header*.xml).
+                        # Never leave the reference element without r:id —
+                        # Word refuses to open sectPr header/footer refs that
+                        # lack the attribute.
                         if not target.startswith("word/media/") or target not in base_package.parts:
-                            raise ValueError(f"Unsupported baseline relationship target: {target}")
-                        suffix = posixpath.splitext(target)[1]
-                        new_target = f"media/redline_base_{number}{suffix}"
-                        current_package.parts[f"word/{new_target}"] = base_package.parts[target]
-                        rel.set("Target", new_target)
-                    current.append(rel)
-                    copied[old_id] = new_id
-                node.set(attr, copied[old_id])
+                            copied[old_id] = None
+                        else:
+                            number = 1
+                            while f"rId{number}" in used:
+                                number += 1
+                            new_id = f"rId{number}"
+                            used.add(new_id)
+                            rel.set("Id", new_id)
+                            suffix = posixpath.splitext(target)[1]
+                            new_target = f"media/redline_base_{number}{suffix}"
+                            current_package.parts[f"word/{new_target}"] = base_package.parts[target]
+                            rel.set("Target", new_target)
+                            current.append(rel)
+                            copied[old_id] = new_id
+                    else:
+                        number = 1
+                        while f"rId{number}" in used:
+                            number += 1
+                        new_id = f"rId{number}"
+                        used.add(new_id)
+                        rel.set("Id", new_id)
+                        current.append(rel)
+                        copied[old_id] = new_id
+                mapped = copied[old_id]
+                if mapped is None:
+                    node.attrib.pop(attr, None)
+                    if etree.QName(node).localname in ("headerReference", "footerReference"):
+                        drop.append(node)
+                    continue
+                node.set(attr, mapped)
+        for node in drop:
+            parent = node.getparent()
+            if parent is not None:
+                parent.remove(node)
         return result
 
     def save() -> None:
         current_package.set_xml(rel_name, current)
 
     return carry, save
-
 
 def _drawing_payloads(paragraph: etree._Element, package: Package) -> list[bytes]:
     rels = {rel.get("Id"): rel for rel in package.xml("word/_rels/document.xml.rels")}
@@ -1188,6 +1216,17 @@ def _enable_tracking(package: Package) -> None:
     package.set_xml(name, root)
 
 
+def _strip_incomplete_header_footer_refs(root: etree._Element) -> None:
+    """Remove header/footer references that lack r:id (Word will not open them)."""
+    for local in ("headerReference", "footerReference"):
+        for element in list(root.findall(f".//{{{W}}}{local}")):
+            if element.get(f"{{{R}}}id"):
+                continue
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+
+
 def _validate_package_relationships(package: Package) -> None:
     """Reject package-local relationship ids copied from another DOCX."""
     document = package.xml("word/document.xml")
@@ -1203,6 +1242,10 @@ def _validate_package_relationships(package: Package) -> None:
         for element in document.findall(path):
             rid = element.get(f"{{{R}}}id") or element.get(f"{{{R}}}embed")
             if not rid:
+                if expected in ("header", "footer"):
+                    raise AssertionError(
+                        f"{etree.QName(element).localname} is missing r:id"
+                    )
                 continue
             rel_type = by_id.get(rid, "")
             if not rel_type.endswith(f"/{expected}"):
@@ -1539,6 +1582,7 @@ def create_tracked_docx(
         missing = {key: value for key, value in original_markers.items() if final_markers.get(key) != value}
         if missing:
             raise AssertionError(f"Comment anchors were not preserved: {missing}")
+    _strip_incomplete_header_footer_refs(current_root)
     current_package.set_xml("word/document.xml", current_root)
     save_base_relationships()
     _copy_comment_parts(base_package, current_package)
