@@ -116,6 +116,26 @@ def test_diagnostic_fingerprint_ignores_unstable_location():
     assert one.fingerprint == two.fingerprint
 
 
+def test_exception_message_redaction_preserves_closing_quotes():
+    """Absolute paths inside quoted exception text must not swallow the quote."""
+    diagnostic = Diagnostic(
+        "error",
+        "pipeline.stage_exception",
+        "stage failed",
+        details={
+            "exception_message": "No such file: '/workspace/secret/input.md'",
+            "windows_message": r"No such file: 'C:\Users\me\secret\input.md'",
+            "double_quoted_posix": 'No such file: "/workspace/secret/input.md"',
+            "double_quoted_windows": r'No such file: "C:\Users\me\secret\input.md"',
+        },
+    )
+    details = diagnostic.to_dict()["details"]
+    assert details["exception_message"] == "No such file: '<absolute-path>'"
+    assert details["windows_message"] == "No such file: '<absolute-path>'"
+    assert details["double_quoted_posix"] == 'No such file: "<absolute-path>"'
+    assert details["double_quoted_windows"] == 'No such file: "<absolute-path>"'
+
+
 def test_confined_path_rejects_traversal_and_symlinks(tmp_path: Path):
     with pytest.raises(ValueError):
         confined_path(tmp_path, "../escape.txt")

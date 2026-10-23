@@ -40,8 +40,10 @@ def _json(value: Any) -> Any:
     return value
 
 
-_POSIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_:/])/(?:[^/\s]+/)*[^/\s]+")
-_WINDOWS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/](?:[^\\/\s]+[\\/]?)*")
+# Stop before whitespace or surrounding quotes so messages like
+# "missing: '/tmp/x'" keep their closing quote after redaction.
+_POSIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_:/])/(?:[^/\s'\"]+/)*[^/\s'\"]+")
+_WINDOWS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/](?:[^\\/\s'\"]+[\\/]?)*")
 
 
 def _redact_text(value: str) -> str:
