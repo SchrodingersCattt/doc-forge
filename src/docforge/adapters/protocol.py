@@ -6,6 +6,8 @@ so a conversion report and a pipeline report share one finding schema.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping, Protocol
@@ -112,12 +114,16 @@ class LossReport:
     def errors(self) -> tuple[Diagnostic, ...]:
         return tuple(item for item in self.diagnostics if item.severity == "error")
 
+    @property
+    def losses(self) -> tuple[Diagnostic, ...]:
+        """Semantic losses. ``error`` severity is always a loss; warnings are losses only when categorized."""
+
+        return tuple(item for item in self.diagnostics if is_loss(item))
+
     def allows_publication(self) -> bool:
-        if self.policy == "drop":
+        if self.policy in {"drop", "warn"}:
             return True
-        if self.policy == "warn":
-            return True
-        return not self.errors
+        return not self.losses
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -184,18 +190,78 @@ def default_loss_policy(fidelity: Fidelity, explicit: LossPolicy | None) -> Loss
     return "error" if fidelity == "preserve" else "warn"
 
 
+def is_loss(item: Diagnostic) -> bool:
+    """Return whether a diagnostic describes omitted or rejected meaning."""
+
+    return item.severity == "error" or str(item.details.get("category", "")) == "loss"
+
+
+def export_losses(document: SemanticDocument, capabilities: FormatCapabilities) -> tuple[tuple[Diagnostic, ...], tuple[str, ...]]:
+    """Diagnostics for blocks the writer cannot represent."""
+
+    supported = set(capabilities.node_kinds) | {
+        "list_item", "table_row", "table_cell", "caption", "thematic_break", "reference_entry",
+    }
+    diagnostics: list[Diagnostic] = []
+    dropped: list[str] = []
+    for block in document.walk():
+        if block.kind in supported:
+            continue
+        dropped.append(block.id)
+        diagnostics.append(finding(
+            "warning",
+            f"{capabilities.format_id}.unsupported_block",
+            f"{block.kind} is omitted from {capabilities.format_id} export",
+            category="loss",
+            block=block.id,
+            kind=block.kind,
+        ))
+    return tuple(diagnostics), tuple(dropped)
+
+
+def require_valid_document(document: SemanticDocument) -> None:
+    """Refuse publication when the semantic tree is internally inconsistent."""
+
+    errors = document.validate()
+    if not errors:
+        return
+    raise ConversionError(
+        "semantic document failed validation",
+        code="SEMANTIC_INVALID",
+        diagnostics=tuple(finding("error", "semantic.invalid", item) for item in errors),
+    )
+
+
+def publish_bytes(path: Path, payload: bytes, *, force: bool) -> None:
+    """Replace ``path`` only after the candidate bytes are complete."""
+
+    path = Path(path)
+    if path.exists() and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=path.suffix, dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def ensure_publishable(report: LossReport) -> None:
     if report.allows_publication():
         return
     raise ConversionError(
         "conversion loss policy rejected unsupported constructs",
         code="LOSS_POLICY",
-        diagnostics=report.errors,
+        diagnostics=report.losses,
     )
 
 
 __all__ = [
     "ConversionError", "ExecutionMode", "Fidelity", "FormatCapabilities", "FormatReader",
     "FormatWriter", "LossPolicy", "LossReport", "ReadOptions", "ReadResult", "SourceContext",
-    "WriteOptions", "WritePlan", "WriteResult", "default_loss_policy", "ensure_publishable", "finding",
+    "WriteOptions", "WritePlan", "WriteResult", "default_loss_policy", "ensure_publishable",
+    "export_losses", "finding", "is_loss", "publish_bytes", "require_valid_document",
 ]

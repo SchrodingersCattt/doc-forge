@@ -130,6 +130,11 @@ def latex_to_omml(source: str) -> etree._Element:
         raise MathConversionError("display equation is empty")
     _pandoc_version()
     backend_source = _normalize_backend_source(source)
+    # Pandoc's Markdown reader closes a $$ fence at a blank line and then
+    # returns success with no display math.
+    backend_source = "\n".join(line for line in backend_source.splitlines() if line.strip())
+    if not backend_source.strip():
+        raise MathConversionError("display equation is empty")
     markdown = f"$$\n{backend_source}\n$$\n"
     with tempfile.TemporaryDirectory(prefix="docforge-math-") as directory:
         root = Path(directory)

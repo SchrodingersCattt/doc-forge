@@ -14,7 +14,7 @@ from pathlib import Path
 from ..pipeline.models import Diagnostic
 from ..semantic import BlockNode, DocumentMetadata, Provenance, Reference, SemanticDocument
 from .inlines import citation_keys, parse_latex_inlines
-from .markdown import render_latex
+from .markdown import copy_figure_files, render_latex
 from .protocol import (
     FormatCapabilities,
     LossReport,
@@ -24,7 +24,11 @@ from .protocol import (
     WriteOptions,
     WritePlan,
     WriteResult,
+    ensure_publishable,
+    export_losses,
     finding,
+    publish_bytes,
+    require_valid_document,
 )
 
 
@@ -84,27 +88,21 @@ class LatexWriter:
     format_id = "latex"
 
     def plan(self, document: SemanticDocument, *, source, options: WriteOptions) -> WritePlan:
-        dropped = tuple(block.id for block in document.walk() if block.kind == "opaque")
-        diagnostics = tuple(
-            finding("warning", "latex.opaque_omitted", "opaque block omitted from LaTeX export", block=block.id)
-            for block in document.walk() if block.kind == "opaque"
-        )
+        diagnostics, dropped = export_losses(document, _CAPABILITIES)
         return WritePlan("latex", "REBUILD", document, source, options, LossReport(options.loss_policy, diagnostics, dropped))
 
     def write(self, plan: WritePlan, output: Path) -> WriteResult:
         from ..pipeline.models import ValidationReport
 
         output = Path(output)
+        require_valid_document(plan.document)
+        ensure_publishable(plan.loss_report)
         if output.exists() and not plan.options.force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(render_latex(plan.document), encoding="utf-8")
-        errors = plan.document.validate()
-        status = "pass" if not errors else "fail"
-        return WriteResult(
-            output, "REBUILD", plan.loss_report,
-            ValidationReport(status, tuple(finding("error", "semantic.invalid", item) for item in errors)),
-        )
+        text = render_latex(plan.document)
+        copy_figure_files(plan.document, plan.origin, output)
+        publish_bytes(output, text.encode("utf-8"), force=plan.options.force)
+        return WriteResult(output, "REBUILD", plan.loss_report, ValidationReport("pass"))
 
 
 class _Counter:
@@ -172,6 +170,7 @@ def _parse_body(text: str, filename: str, counter: _Counter, diagnostics: list[D
             diagnostics.append(finding(
                 "warning", "latex.unsupported_command",
                 f"unsupported command \\{command} kept as text",
+                category="loss",
                 command=command,
             ))
         block = BlockNode(counter.next("b"), "paragraph", inlines=inlines, provenance=Provenance(filename))
@@ -319,7 +318,10 @@ def _environment(env: str, body: str, filename: str, counter: _Counter, diagnost
         if caption:
             children.append(BlockNode(counter.next("b"), "caption", inlines=parse_latex_inlines(caption), attrs=(("kind", "table"),), provenance=provenance))
         return children
-    diagnostics.append(finding("warning", "latex.unsupported_environment", f"unsupported environment {env}", environment=env))
+    diagnostics.append(finding(
+        "warning", "latex.unsupported_environment", f"unsupported environment {env}",
+        category="loss", environment=env,
+    ))
     return [BlockNode(counter.next("b"), "opaque", attrs=(("environment", env), ("tex", body.strip())), provenance=provenance)]
 
 
@@ -341,7 +343,10 @@ def _figure(body: str, provenance: Provenance, counter: _Counter, diagnostics: l
     graphic = re.search(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", body)
     path = graphic.group(1).strip() if graphic else ""
     if not graphic:
-        diagnostics.append(finding("warning", "latex.figure_missing_graphic", "figure has no includegraphics"))
+        diagnostics.append(finding(
+            "warning", "latex.figure_missing_graphic", "figure has no includegraphics",
+            category="loss",
+        ))
     caption = _command_arg(body, "caption")
     children = []
     if caption:

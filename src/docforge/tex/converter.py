@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os, re, tempfile, zipfile
 from contextvars import ContextVar
+from io import BytesIO
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -963,7 +964,9 @@ def _normalize_display_math_source(s: str) -> str:
     s = s.replace(r"\,", " ")
     s = re.sub(r"\\qquad\b", "    ", s)
     s = re.sub(r"\\quad\b", "  ", s)
-    return s.strip()
+    # A spacing command alone becomes a blank line. Pandoc's Markdown reader
+    # would end a $$ display there and drop the rest of the equation.
+    return "\n".join(line for line in s.splitlines() if line.strip()).strip()
 
 
 def _starts_lowercase_continuation(text: str) -> bool:
@@ -1004,19 +1007,32 @@ def add_display_math(doc: Document, math_tex: str, resolver: CitationResolver, e
 #  Figure insertion
 # ═══════════════════════════════════════════════════════════════════════════
 
+_FIGURE_SUFFIXES = (".png", ".jpg", ".jpeg", ".pdf")
+
+
 def _find_figure(name: str) -> Path | None:
     base = name.split(".")[0] if "." in name else name
     for prefix in ("figures/", "figures\\"):
         if base.startswith(prefix):
             base = base[len(prefix):]
     context=_context()
-    for ext in (".png", ".jpg", ".jpeg"):
+    for ext in _FIGURE_SUFFIXES:
         path=context.figure_dir/f"{base}{ext}"
         if path.exists(): return path
     if "." in name:
         path=context.project_root/name
-        if path.exists() and path.suffix.lower() in (".png", ".jpg", ".jpeg"): return path
+        if path.exists() and path.suffix.lower() in _FIGURE_SUFFIXES: return path
     return None
+
+
+def _picture_source(path: Path):
+    """Return a python-docx picture source. PDF pages are rasterized to PNG."""
+
+    if path.suffix.lower() != ".pdf":
+        return str(path)
+    from ..markdown.template import _word_compatible_image_bytes
+
+    return BytesIO(_word_compatible_image_bytes(path))
 
 
 def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
@@ -1038,11 +1054,11 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
         img = _find_figure(one_path)
         if img:
             run = p.add_run()
-            run.add_picture(str(img), width=Inches(width_inches))
+            run.add_picture(_picture_source(img), width=Inches(width_inches))
             if idx < len(fig_paths) - 1:
                 run.add_break()
         else:
-            run = p.add_run(f"[Figure: {one_path} - not found as PNG/JPG]")
+            run = p.add_run(f"[Figure: {one_path} - not found as PNG, JPG, or PDF]")
             run.font.color.rgb = RGBColor(0xCC, 0, 0)
             run.italic = True
 

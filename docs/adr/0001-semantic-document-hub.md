@@ -18,7 +18,9 @@ Blocks: paragraph, heading, list, list item, table, table row, table cell, figur
 
 Inlines: text, emph, strong, code, link, math, break, subscript, superscript, underline, strike, span, citation, opaque.
 
-Unsupported source constructs become diagnostics. `loss_policy=error` and `fidelity=preserve` refuse to publish when a warning or error would drop meaning. Semantic conversion defaults to `warn`.
+Unsupported source constructs become diagnostics. A diagnostic is a loss when its severity is `error` or its category is `loss`. `loss_policy=error` and `fidelity=preserve` refuse to publish a loss before replacing an output. Informational warnings do not block publication. Semantic conversion defaults to `warn`.
+
+DOCX projection walks `w:body` in order, including nested tables and drawings. `restyle` publishes only after the staged package passes `audit`. `StyleProfile.template` is not applied. A new style is attached only through `RoleSpec.select`; otherwise the role is unused.
 
 ## Non-goals
 

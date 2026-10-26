@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 from pathlib import Path
 
 from ..pipeline.models import Diagnostic
@@ -20,6 +21,7 @@ from ..semantic import (
     Reference,
     ResourceDescriptor,
     SemanticDocument,
+    text_node,
 )
 from .inlines import citation_keys, parse_markdown_inlines, write_latex_inlines, write_markdown_inlines
 from .protocol import (
@@ -30,7 +32,11 @@ from .protocol import (
     WriteOptions,
     WritePlan,
     WriteResult,
+    ensure_publishable,
+    export_losses,
     finding,
+    publish_bytes,
+    require_valid_document,
 )
 
 
@@ -113,24 +119,24 @@ class MarkdownWriter:
     def plan(self, document: SemanticDocument, *, source, options: WriteOptions) -> WritePlan:
         from .protocol import LossReport
 
+        diagnostics, dropped = export_losses(document, _CAPABILITIES)
         return WritePlan(
             "markdown", "REBUILD", document, source, options,
-            LossReport(options.loss_policy),
+            LossReport(options.loss_policy, diagnostics, dropped),
         )
 
     def write(self, plan: WritePlan, output: Path) -> WriteResult:
         from ..pipeline.models import ValidationReport
 
         output = Path(output)
+        require_valid_document(plan.document)
+        ensure_publishable(plan.loss_report)
         if output.exists() and not plan.options.force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
         text = render_markdown(plan.document)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(text, encoding="utf-8")
-        errors = plan.document.validate()
-        status = "pass" if not errors else "fail"
-        diagnostics = tuple(finding("error", "semantic.invalid", item) for item in errors)
-        return WriteResult(output, "REBUILD", plan.loss_report, ValidationReport(status, diagnostics))
+        copy_figure_files(plan.document, plan.origin, output)
+        publish_bytes(output, text.encode("utf-8"), force=plan.options.force)
+        return WriteResult(output, "REBUILD", plan.loss_report, ValidationReport("pass"))
 
 
 def render_markdown(document: SemanticDocument) -> str:
@@ -143,20 +149,57 @@ def render_markdown(document: SemanticDocument) -> str:
 
 
 def render_latex(document: SemanticDocument) -> str:
-    lines = ["\\documentclass{article}", "\\begin{document}"]
+    body: list[str] = []
     if document.metadata.title:
-        lines.append("\\title{" + _escape_title(document.metadata.title) + "}")
-        lines.append("\\maketitle")
+        body.append("\\title{" + write_latex_inlines((text_node(document.metadata.title),)) + "}")
+        body.append("\\maketitle")
     for block in document.blocks:
         rendered = _render_latex_block(block)
         if rendered:
-            lines.append(rendered)
-    lines.append("\\end{document}")
-    return "\n\n".join(lines).rstrip() + "\n"
+            body.append(rendered)
+    rendered_body = "\n\n".join(body)
+    preamble = ["\\documentclass{article}"]
+    if "textasciitilde" in rendered_body or "textasciicircum" in rendered_body:
+        preamble.append("\\usepackage{textcomp}")
+    if "\\includegraphics" in rendered_body:
+        preamble.append("\\usepackage{graphicx}")
+    if "\\href{" in rendered_body:
+        preamble.append("\\usepackage{hyperref}")
+    return "\n".join([*preamble, "\\begin{document}", "", rendered_body, "\\end{document}", ""])
 
 
-def _escape_title(text: str) -> str:
-    return text.replace("\\", "\\textbackslash{}").replace("&", "\\&").replace("%", "\\%").replace("_", "\\_")
+def copy_figure_files(document: SemanticDocument, origin: Path | None, output: Path) -> None:
+    """Copy figure files next to ``output``, keeping the stored relative path."""
+
+    if origin is None:
+        return
+    source_root = Path(origin).resolve().parent
+    output_root = Path(output).resolve().parent
+    for block in document.walk():
+        if block.kind != "figure":
+            continue
+        relative = block.attr("path")
+        if not relative:
+            resource = document.resource(block.attr("resource"))
+            relative = resource.path if resource is not None else ""
+        if not relative or relative.startswith(("/", "\\")) or ".." in Path(relative).parts:
+            continue
+        source = (source_root / relative).resolve()
+        try:
+            source.relative_to(source_root)
+        except ValueError:
+            continue
+        if not source.is_file():
+            continue
+        destination = (output_root / relative).resolve()
+        try:
+            destination.relative_to(output_root)
+        except ValueError:
+            continue
+        if destination == source:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
 
 def _render_block(block: BlockNode) -> str:
@@ -241,7 +284,7 @@ def _render_latex_block(block: BlockNode) -> str:
         lines = ["\\begin{figure}", f"\\includegraphics{{{path}}}", f"\\caption{{{caption}}}", "\\end{figure}"]
         return "\n".join(lines)
     if block.kind == "thematic_break":
-        return ""
+        return r"\noindent\rule{\textwidth}{0.4pt}"
     return write_latex_inlines(block.inlines)
 
 
@@ -316,7 +359,10 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
                 relative = path.resolve().relative_to(source.parent.resolve()).as_posix()
             except ValueError:
                 relative = path.name
-                diagnostics.append(finding("warning", "resource.path_reduced", "image path was reduced to its file name", name=path.name))
+                diagnostics.append(finding(
+                    "warning", "resource.path_reduced", "image path was reduced to its file name",
+                    category="loss", name=path.name,
+                ))
             sha = hashlib.sha256(path.read_bytes()).hexdigest()
             suffix = path.suffix.casefold()
             media = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}.get(suffix, media)
@@ -330,8 +376,11 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
             provenance=provenance,
         )
         return figure, [ResourceDescriptor(resource_id, media, sha, relative)]
-    diagnostics.append(finding("warning", "markdown.unsupported_block", f"unsupported markdown block kind: {block.kind}"))
+    diagnostics.append(finding(
+        "warning", "markdown.unsupported_block", f"unsupported markdown block kind: {block.kind}",
+        category="loss",
+    ))
     return BlockNode(counter.block(), "opaque", attrs=(("origin", block.kind),), provenance=provenance), []
 
 
-__all__ = ["MarkdownReader", "MarkdownWriter", "render_latex", "render_markdown"]
+__all__ = ["MarkdownReader", "MarkdownWriter", "copy_figure_files", "render_latex", "render_markdown"]

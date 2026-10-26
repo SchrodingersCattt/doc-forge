@@ -2,6 +2,11 @@
 
 A profile is format-independent. A DOCX template can supply baseline style
 names, but the profile itself is the requested typography and layout.
+
+``template`` is stored and rejected by ``restyle_docx`` until applying a
+template is implemented. ``RoleSpec.select`` names an existing Word style
+whose paragraphs should receive this role. A role that matches no paragraph
+is unused.
 """
 
 from __future__ import annotations
@@ -76,6 +81,7 @@ class ParagraphSpec:
 @dataclass(frozen=True)
 class RoleSpec:
     word_style: str | None = None
+    select: str | None = None
     font: FontSpec = field(default_factory=FontSpec)
     paragraph: ParagraphSpec = field(default_factory=ParagraphSpec)
 
@@ -83,6 +89,8 @@ class RoleSpec:
         payload: dict[str, object] = {}
         if self.word_style:
             payload["word_style"] = self.word_style
+        if self.select:
+            payload["select"] = self.select
         font = self.font.explicit()
         paragraph = self.paragraph.explicit()
         if font:
@@ -196,11 +204,12 @@ def load_profile(source: StyleProfile | Path | str | Mapping[str, object]) -> St
 def _role(name: object, spec: object) -> RoleSpec:
     if not isinstance(spec, Mapping):
         raise StyleProfileError(f"role {name} must be a mapping")
-    unknown = set(spec) - {"word_style", "font", "paragraph"}
+    unknown = set(spec) - {"word_style", "select", "font", "paragraph"}
     if unknown:
         raise StyleProfileError(f"role {name} has unknown fields: {sorted(unknown)}")
     return RoleSpec(
         word_style=str(spec["word_style"]) if spec.get("word_style") else None,
+        select=str(spec["select"]) if spec.get("select") else None,
         font=_font(spec.get("font") or {}),
         paragraph=_paragraph(spec.get("paragraph") or {}),
     )

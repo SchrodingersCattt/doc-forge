@@ -25,7 +25,7 @@ _ALIGN = {"left": "left", "center": "center", "right": "right", "justify": "both
 
 
 def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str, *, force: bool = False, preserve_content: bool = True) -> dict[str, object]:
-    """Apply a style profile to a DOCX and publish only if content checks pass."""
+    """Apply a style profile to a DOCX and publish only if content and package checks pass."""
 
     source, output = Path(source), Path(output)
     if source.resolve() == output.resolve():
@@ -33,6 +33,11 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
     if output.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
     loaded = load_profile(profile)
+    if loaded.template:
+        raise ConversionError(
+            "StyleProfile.template is not applied by restyle; remove it until template application is implemented",
+            code="STYLE_TEMPLATE",
+        )
     with zipfile.ZipFile(source) as package:
         names = package.namelist()
         original = {name: package.read(name) for name in names}
@@ -42,6 +47,7 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
     document = etree.fromstring(original["word/document.xml"])
     before = _content_stream(document)
     applied: list[str] = []
+    unused: list[str] = []
     for role_name, role in loaded.roles.items():
         style = _find_style(styles, role.word_style or role_name)
         if style is None:
@@ -49,11 +55,23 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
                 raise ConversionError(f"style role has no Word style: {role_name}", code="STYLE_MISSING")
             style = _create_style(styles, role.word_style or role_name)
         _apply_style(style, role)
-        style_id = style.get(_q("styleId"))
+        style_id = style.get(_q("styleId")) or ""
+        matched = 0
         for paragraph in document.xpath(".//w:p", namespaces=NS):
-            if _paragraph_style(paragraph, styles) == style_id:
-                _apply_direct(paragraph, role, loaded.policy.direct_formatting)
-        applied.append(role_name)
+            if role.select:
+                chosen = _paragraph_matches_select(paragraph, styles, role.select)
+                if chosen and style_id:
+                    _set_paragraph_style(paragraph, style_id)
+            else:
+                chosen = _paragraph_style(paragraph, styles) == style_id
+            if not chosen:
+                continue
+            matched += 1
+            _apply_direct(paragraph, role, loaded.policy.direct_formatting)
+        if matched:
+            applied.append(role_name)
+        else:
+            unused.append(role_name)
     _apply_page(document, loaded)
     after = _content_stream(document)
     if preserve_content and before != after:
@@ -73,10 +91,20 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
                 outgoing.writestr(info, payload)
         if preserve_content and paragraph_texts(source) != paragraph_texts(temporary):
             raise ConversionError("restyle changed document text", code="CONTENT_CHANGED")
+        from ..adapters.docx import audit_docx
+
+        validation = audit_docx(temporary)
+        if not validation.ok:
+            raise ConversionError("restyle audit failed", code="AUDIT_FAILED", diagnostics=validation.diagnostics)
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
-    return {"execution_mode": "SOURCE_PATCH", "roles": applied, "content_unchanged": before == after}
+    return {
+        "execution_mode": "SOURCE_PATCH",
+        "roles": applied,
+        "unused": unused,
+        "content_unchanged": before == after,
+    }
 
 
 def resolved_paragraph_styles(path: Path) -> tuple[dict[str, object], ...]:
@@ -266,6 +294,40 @@ def _apply_page(document: etree._Element, profile: StyleProfile) -> None:
                 if side not in {"top", "bottom", "left", "right"}:
                     raise ConversionError(f"unsupported margin side: {side}", code="STYLE_PAGE")
                 margins.set(_q(side), str(int(round(float(value) * 56.6929133858))))
+
+
+def _paragraph_matches_select(paragraph: etree._Element, styles: etree._Element, select: str) -> bool:
+    wanted = select.casefold()
+    current_id = _paragraph_style(paragraph, styles)
+    if current_id is None:
+        return wanted == "normal"
+    current = _find_style(styles, current_id)
+    if current is None:
+        return current_id.casefold() == wanted
+    return wanted in _style_keys(current)
+
+
+def _style_keys(style: etree._Element) -> set[str]:
+    keys = set()
+    style_id = style.get(_q("styleId"))
+    if style_id:
+        keys.add(style_id.casefold())
+    name = style.find(_q("name"))
+    if name is not None and name.get(_q("val")):
+        keys.add((name.get(_q("val")) or "").casefold())
+    return keys
+
+
+def _set_paragraph_style(paragraph: etree._Element, style_id: str) -> None:
+    properties = paragraph.find(_q("pPr"))
+    if properties is None:
+        properties = etree.Element(_q("pPr"))
+        paragraph.insert(0, properties)
+    marker = properties.find(_q("pStyle"))
+    if marker is None:
+        marker = etree.Element(_q("pStyle"))
+        properties.insert(0, marker)
+    marker.set(_q("val"), style_id)
 
 
 def _paragraph_style(paragraph: etree._Element, styles: etree._Element) -> str | None:

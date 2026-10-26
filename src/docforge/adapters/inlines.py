@@ -111,7 +111,7 @@ def _write_latex(node: InlineNode) -> str:
         body = node.text
         return f"$${body}$$" if node.attr("display") == "true" else f"${body}$"
     if node.kind == "link":
-        return "\\href{" + node.attr("href") + "}{" + (inner or _escape_latex(node.text)) + "}"
+        return "\\href{" + _escape_latex_url(node.attr("href")) + "}{" + (inner or _escape_latex(node.text)) + "}"
     if node.kind == "subscript":
         return "\\textsubscript{" + (inner or _escape_latex(node.text)) + "}"
     if node.kind == "superscript":
@@ -126,13 +126,24 @@ def _write_latex(node: InlineNode) -> str:
 
 
 def _escape_latex(text: str) -> str:
+    sentinel = "\ue000"
     return (
-        text.replace("\\", "\\textbackslash{}")
-        .replace("&", "\\&")
-        .replace("%", "\\%")
-        .replace("#", "\\#")
-        .replace("_", "\\_")
+        text.replace("\\", sentinel)
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("$", r"\$")
+        .replace("&", r"\&")
+        .replace("%", r"\%")
+        .replace("#", r"\#")
+        .replace("_", r"\_")
+        .replace("~", r"\textasciitilde{}")
+        .replace("^", r"\textasciicircum{}")
+        .replace(sentinel, r"\textbackslash{}")
     )
+
+
+def _escape_latex_url(text: str) -> str:
+    return text.replace("\\", r"\textbackslash{}").replace("%", r"\%").replace("#", r"\#").replace("_", r"\_")
 
 
 _TEX_CMD = re.compile(r"\\([A-Za-z]+)\*?")
