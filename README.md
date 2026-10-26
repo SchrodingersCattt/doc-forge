@@ -1,219 +1,97 @@
 # docforge
 
-Assemble Markdown, LaTeX, and AI-generated art into auditable Word documents.
-
-`docforge` is a project-agnostic Python toolkit distilled from document
-tooling that previously lived inside individual research repositories. It
-keeps the three properties those scripts had:
-
-- a thin CLI that runs standalone from a checkout without installation;
-- explicit input/output paths instead of a hard-coded repository layout;
-- auditability: line-level revisions, sha256 sidecars, and manifest CSVs
-  accompany every generated artifact.
-
-## Why "docforge"
-
-The package covers more than papers: grant proposals, reports, and
-manuscripts all follow the same pattern — plain-text sources in, a Word
-document out, with provenance that survives review. *forge* (手工锻造)
-captures the deterministic, artifact-producing nature of the toolchain
-better than paper-specific names such as "tex2docx" or "papertools".
+Build a Word document from Markdown or LaTeX. A build can write a sha256 sidecar beside the file, and `redline` can record the edits as Word tracked changes.
 
 ## Install
 
 ```bash
 pip install -e .            # core (python-docx, lxml, Pillow)
-pip install -e ".[plot]"    # + matplotlib figure style helpers
-pip install -e ".[aigc]"    # + OpenAI-compatible / Google image backends
-pip install -e ".[tex]"     # + numpy for TeX rendering
+pip install -e ".[plot]"    # matplotlib
+pip install -e ".[aigc]"    # OpenAI-compatible and Google image clients
+pip install -e ".[tex]"     # numpy, used when rendering TeX
 ```
 
 Python 3.10+.
 
-Default typography is black throughout. The document title is centered at 小二 (18 pt). Heading styles keep their own size and alignment.
+`md2docx` and `tex2docx` call Pandoc to turn display mathematics into Word OMML. Supported Pandoc versions for that step are 2.9.2.1, 3.1.11.1, and 3.9.0.1. `docx2md` and `docx2tex` also call `pandoc`. Install Pandoc and leave it on `PATH`.
 
-The `md2docx` and `tex2docx` commands require Pandoc 2.9.2.1 to compile
-display mathematics into native Word OMML. The `docx2md` and `docx2tex`
-commands also require the external `pandoc` command. Pandoc must be installed
-and available on `PATH`; docforge never downloads or replaces it at runtime.
+## Commands
 
-## CLI
+Details are in `docforge <command> --help`.
 
-### Reusable manuscript pipelines
-
-Cross-document workflows can use the versioned `docforge.pipeline.v1` API
-instead of duplicating path checks, hashes, manifests, and publication logic.
-Declare documents, registered stages, gates, validators, and release policy in
-JSON (or optional YAML), then run the pipeline:
-
-```bash
-docforge pipeline pipeline.json --workspace . --output-dir dist
-```
-
-The runner performs preflight DAG checks, confines paths and symlinks, records
-content hashes and stable diagnostics, and writes a portable manifest,
-checksums, and human report. Required unavailable validators block publication;
-optional unavailable validators are explicit warnings. Successful publication
-replaces the output bundle atomically and retains the previous bundle. See
-[`docs/pipeline.md`](docs/pipeline.md) for the Python extension API.
+- `md2docx` — Markdown to DOCX
+- `tex2docx` — LaTeX to DOCX, with an optional second TeX file and a BibTeX file
+- `docx2md` — DOCX to Markdown via Pandoc
+- `docx2tex` — DOCX to LaTeX via Pandoc
+- `redline` — a DOCX of Word tracked changes against a reviewed file
+- `md-export`, `md-build`, `md-roundtrip` — a reversible Markdown bundle; see [docs/docxmd-syntax.md](docs/docxmd-syntax.md)
+- `roundtrip` — copy an unchanged DOCX, or patch its package; see [docs/roundtrip-contract.md](docs/roundtrip-contract.md)
+- `apply-delta` — apply matched paragraph edits onto a source DOCX
+- `export-block-map` — write paragraph indices and opaque block ids
+- `contract` — build one template DOCX and its audit files
+- `deliver` — build the DOCX files listed in a `docforge.delivery.v1` profile; see `docforge deliver --help`
+- `aigc` — images from Markdown prompt files
+- `sourcepack` — a TeX source ZIP from an allowlist
+- `check` — check a DOCX
+- `gate abbr`, `gate references`, `gate style` — source checks from a JSON config
+- `pipeline` — run a `docforge.pipeline.v1` spec; see [docs/pipeline.md](docs/pipeline.md)
 
 ```bash
-# Markdown -> DOCX (merged blocks)
-docforge md2docx section_01.md section_02.md -o proposal.docx --title "..."
+docforge md2docx main.md -o main.docx --template template.docx \
+  --metadata metadata.md --bibliography references.json
 
-# Markdown -> DOCX using an existing Word template and ordered references
-docforge md2docx 01.abstract.md 02.main.md -o main.docx \
-  --template journal-template.docx --metadata 00.metadata.md \
-  --bibliography 07.references.json --style template \
-  --font "Times New Roman" --east-asia-font "Times New Roman" \
-  --line-numbers on --columns two --figure-span column --force
+docforge tex2docx main.tex --si si.tex --bib references.bib -o main.docx
 
-# Supporting information can request a readable one-column body
-docforge md2docx 06.supporting-information.md -o si.docx \
-  --template journal-template.docx --metadata 00.metadata.md \
-  --bibliography 07.references.json --citation-base main.manifest.json \
-  --style template --font "Times New Roman" --east-asia-font "Times New Roman" \
-  --line-numbers on --columns one --figure-span column --numbering-prefix S --force
-
-# Word tracked-changes redline against a reviewed DOCX
-docforge redline reviewed.docx fresh.docx -o fresh_tracked.docx
-
-# Reversible DOCX <-> Markdown bundle (docs/docxmd-syntax.md): export, edit, rebuild, redline
-docforge md-export reviewed.docx md --id main --split split.json --bibliography 07.references.json
-docforge md-roundtrip reviewed.docx md --id main --split split.json --render word
-docforge md-build md --id main -o revised.docx
-docforge redline reviewed.docx revised.docx -o revised_tracked.docx
-
-# DOCX-origin Markdown edit: patch the source package, then create a redline
-docforge roundtrip reviewed.docx --workdir source-bundle \
-  --output revised.docx --redline revised.tracked.docx --force
-
-# LaTeX manuscript -> DOCX (main + optional SI + bib)
-docforge tex2docx main.tex --si si.tex --bib ref.bib -o main.docx
-
-# DOCX -> Markdown / LaTeX (Pandoc must be installed)
 docforge docx2md reviewed.docx -o reviewed.md --track-changes accept
-docforge docx2tex reviewed.docx -o reviewed.tex --track-changes accept
 
-# DOCX -> mapped section Markdown with extracted media
-docforge docx2md reviewed.docx --split-dir sections \
-  --section-map section-map.json --force
+docforge redline reviewed.docx current.docx -o current_tracked.docx
 
-# Exact no-op roundtrip from an audited Markdown bundle
-docforge md2docx --roundtrip-manifest sections/manifest.json \
-  -o reviewed-roundtrip.docx --force
+docforge md-export reviewed.docx md --id main --split split.json --bibliography references.json
+docforge md-build md --id main -o revised.docx
 
-When `docx2md` writes a split bundle, the manifest includes a portable source
-DOCX snapshot and SHA-256 values for the snapshot, sections, and media. The
-`md2docx --roundtrip-manifest` command verifies every value and reuses the
-source package byte-for-byte when no Markdown or media file changed. If a file
-changed, it requires explicit Markdown inputs and continues through the normal
-renderer, so the resulting DOCX can be reviewed with `redline`.
-
-# Generate figures from front-matter Markdown prompts (auditable sidecars)
 docforge aigc figures/_prompts --backend litellm --all
 docforge aigc figures/_prompts --dry-run
 
-# Auditable TeX source ZIP from an explicit allowlist
 docforge sourcepack . --allow main.tex --allow si.tex --glob-dir figures -o dist/tex_source.zip
 
-# Validate a generated DOCX
 docforge check output.docx --verify-clean
 
-# One-pass semantic DOCX contract (atomic output + audit manifest)
-docforge contract 01.main.md -o main.docx --template template.docx \
-  --metadata 00.metadata.md --bibliography references.json --force
+docforge contract main.md -o main.docx --template template.docx \
+  --metadata metadata.md --bibliography references.json --force
 
-# Project-neutral source gates
-docforge gate abbr main.tex SI.tex --config gates.json --project paper
+docforge gate abbr main.tex si.tex --config gates.json --project paper
 docforge gate references --root . --config reference-gate.json
+
+docforge pipeline pipeline.json --workspace . --output-dir dist
 ```
 
-All paths are explicit; nothing is inferred from the current directory.
+## Templates, math, figures, and citations
 
-The delivery command accepts a versioned `docforge.delivery.v1` profile whose
-canonical shape is an `artifacts` list. Each artifact provides `id`, `inputs`,
-`template`, optional `metadata` and `bibliography`, and an `output` name. The
-older `article`/`supplement` keys, `si`, `supporting_information`,
-`sources`/`markdown`, `delivery_names`, and `review`/`reviewed` fields remain
-supported as compatibility aliases and are normalized before building.
-`--accept-revisions` requires a reviewed DOCX, `section_map`, confined
-`source_dir`, and a `source_paragraph_map` (the compatibility alias
-`revision_map` is also accepted). Each map entry must identify the source
-`path`/`file`, source `start_line`/`end_line` and hash, plus the reviewed
-`start_line`/`end_line` and `reviewed_paragraph` identity and hash. Conversion
-happens in a scratch directory only as a candidate for those mapped ranges;
-unmapped reviewed paragraphs, identity/hash mismatches, and path mismatches
-abort before publishing. Outputs and source updates are committed together,
-and all document, sidecar, aggregate-manifest, and source destinations are
-checked for collisions first. The aggregate manifest records each source
-paragraph's `path`, `start_line`, `end_line`, and `hash`. An `output_pattern`
-may use `{role}` and UTC `{timestamp}` and is confined to the delivery
-directory. Source files are snapshotted with their relative media tree while
-staging, and multiple ranges in one file are applied from the end of the file
-so their original coordinates remain valid.
+Template assembly replaces the sample body. It keeps the template's styles, section geometry, headers, footers, numbering, and embedded assets, including figures already in the template.
 
-Template assembly replaces sample body content while retaining the supplied
-template's styles, section geometry, headers, footers, numbering, and embedded assets.
+A line that begins with `! ` or `！ ` is omitted. `--keep-comments` keeps that line as a `[TODO: ...]` note.
 
-Inline figures use ordinary Markdown plus a following caption paragraph, for example:
-`![Figure 1](figures/structure.png)` followed by `Figure 1. Caption text.`.
-When the template contains figure sections, docforge reuses their inline drawing
-slots and the surrounding one-column/two-column section properties; the image
-and caption remain separate Word paragraphs. Figure slots are detected from
-each image paragraph and its following Figure/Scheme/Chart caption, even when
-an SI template keeps sample prose and multiple figure pairs in one section.
+Inline math such as `$t_{\mathrm{chem}}$` becomes Word runs: variables are italic, `\mathrm{...}` text and numerals are upright, and `^` / `_` are superscript or subscript. A display block between `$$` lines is OMML and receives the next equation number, such as `(1)`. `--numbering-prefix S` applies that prefix to figure captions, `Table:` captions, and those equation numbers.
 
-Inline TeX formulae use ordinary Word runs rather than OMML, so variables are
-italic, ``\mathrm{...}`` text and numerals are upright, and ``^``/``_`` become
-true Word superscript/subscript run properties. For example,
-``$t_{\mathrm{chem}}$`` renders as an italic *t* with an upright subscript.
-A standalone display block delimited by ``$$`` is rendered as native OMML and
-receives an automatic sequential number, e.g. ``$$`` / ``k = Ae^{-E_a/RT}`` /
-``$$`` becomes equation (1). The tabulated number is retargeted to the active
-body-column width when a template is used. Unicode chemical scripts in ordinary
-text are converted to the same Word run properties during the final audit.
+A figure is an image paragraph plus the caption paragraph that follows:
 
-Lines beginning with `! ` or `！ ` are treated as source comments and omitted by
-default; `--keep-comments` preserves them as TODO notes. Figure width is explicit:
-`--figure-span column|page` sets the document default, and an image option such as
-`![Figure 1|span=page](figure.png)` overrides it. `span=column` keeps a figure in
-the active text column. In a two-column portrait body, `span=page` inserts
-continuous section transitions around a temporary one-column section so the
-figure and caption span the printable text width without forcing a page break.
-`orientation=portrait|landscape` is independent of span; landscape figures require
-`span=page`. The older image-level `columns=single|double` syntax remains a
-deprecated compatibility alias. `--columns one|two` continues to control body
-sections rather than individual figures.
+```markdown
+![Figure 1](figures/structure.png)
 
-For SI output, pass --numbering-prefix S to apply the S prefix to figure captions, explicit Table: captions, and display-equation numbers.
+Figure 1. Caption text.
+```
 
-For a Supporting Information build, pass the main manifest with
-`--citation-base`: citations present in the main document reuse their numeric
-labels; keys that occur only in SI receive `S1`, `S2`, and so on. The main and SI
-bibliographies therefore share a single ordered JSON source while keeping SI-only
-entries visibly separate. Citation-base builds render only SI-only bibliography
-entries by default; pass `--bibliography-scope all` to repeat shared entries.
-`--metadata` reads simple level-one Markdown fields (`TITLE`, `AUTHOR`,
-`AFFILIATION`, `Acknowledgement`, and `Code Availability`). Citation tokens
-(`\\cite{key}` and `\\citep{key}`) are converted to numbered references from
-the insertion order of the JSON bibliography. Unknown keys fail the build.
-Each template output receives adjacent `.manifest.json` and `.sha256` audit
-files. The manifest records the bibliography source, formatter profile, and
-numbering policy.
+`--figure-span column|page` sets the default width. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
+
+`--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.
+
+`--metadata` reads these level-one fields: `TITLE`, `AUTHOR`, `AFFILIATION`, `Acknowledgement`, and `Code Availability`.
 
 ## Bibliography and gates
 
-`docforge.bibliography` provides a normalized `BibliographyEntry` model,
-JSON/BibTeX loaders, one citation resolver, inherited citation maps, and
-formatter profiles (`markdown` and `plain`). Markdown and TeX adapters use
-these same resolver semantics. Citation numbering is explicit: choose
-`first-citation` or `source-order`; supplement builds may inherit a map from a
-main-document manifest.
+`docforge.bibliography` loads JSON or BibTeX into `BibliographyEntry` records, resolves citations, and formats them with the `markdown` or `plain` profile. Numbering is `first-citation` or `source-order`. A later build can inherit the number map from a manifest. The Markdown and TeX adapters use that resolver.
 
-The source gates are intentionally configuration-driven. An abbreviation
-configuration can be shared by several projects without putting project names
-or sample terms in the package:
+Abbreviation lists stay in configuration:
 
 ```json
 {
@@ -224,38 +102,28 @@ or sample terms in the package:
 }
 ```
 
-`docforge gate abbr` reports undefined or single-use abbreviations and
-`docforge gate style` applies configurable rules with stable fingerprints and
-an optional baseline. `docforge gate references` checks TeX figure/table
-labels and references from an explicit project configuration.
+`docforge gate abbr` reports an abbreviation that is undefined or used once. `docforge gate style` checks the rules in its config and can compare them with a baseline. `docforge gate references` checks TeX figure and table labels from its config.
 
 ## Library layout
 
 | Module | Purpose |
-| ------ | ------- |
-| `docforge.markdown` | Conservative Markdown block parser + python-docx renderer (headings, lists, tables, code, math → native OMML equations, images, `<u>**..**</u>` bold-underline tokens), template-section preservation, unicode-script conversion, navigation/typography verification |
-| `docforge.docxdiff` | Build a DOCX whose final view is the current document with all edits as native Word revisions (`w:ins`/`w:del`/`w:move*`/`w:rPrChange`), carrying review comments, comment parts, and package validation |
-| `docforge.tex` | LaTeX subset → styled DOCX: sections, floats, tables, algorithms, math, BibTeX parsing, cross-reference label maps (`main.tex` ↔ `si.tex` with `externaldocument` prefixes) |
-| `docforge.aigc` | Front-matter Markdown prompt files → image generation (OpenAI-compatible LiteLLM or Google GenAI) with a JSON sidecar recording prompt sha256, provider metadata, and artifact hash |
-| `docforge.sourcepack` | Whitelisted, SHA-256-manifested TeX source ZIP (`SOURCE_PACKAGE_MANIFEST.csv` + README inside the archive) |
-| `docforge.plotting` | Shared Matplotlib visual system: restrained palette, mm-based figure sizes, panel labels, schematic boxes/arrows/status chips, PDF/SVG/600-dpi PNG output |
-| `docforge.cli` | Thin `docforge` entry point; feature modules are imported lazily per subcommand |
+| --- | --- |
+| `docforge.markdown` | Markdown blocks to DOCX: headings, lists, tables, code, images, inline math, and OMML display equations. Can fill a template. |
+| `docforge.docxdiff` | Tracked-changes DOCX (`w:ins`, `w:del`, `w:move*`, `w:rPrChange`), including existing review comments. |
+| `docforge.tex` | A LaTeX subset to DOCX: sections, floats, tables, algorithms, math, and BibTeX. A second TeX file can supply cross-references. |
+| `docforge.aigc` | Prompt files to images (OpenAI-compatible or Google), with a JSON sidecar. |
+| `docforge.sourcepack` | An allowlisted TeX ZIP that includes `SOURCE_PACKAGE_MANIFEST.csv`. |
+| `docforge.plotting` | Matplotlib helpers for figure size, colors, and PDF, SVG, or PNG export. |
+| `docforge.cli` | The `docforge` command. Each subcommand imports its module when invoked. |
 
-Reverse conversion is exposed as `docforge.markdown.docx_to_markdown` and
-`docforge.tex.docx_to_tex`; both invoke the installed `pandoc` command. The
-Markdown exporter can additionally split the converted document using an
-ordered JSON section map and writes a `manifest.json` beside the section files.
+`docx2md` and `docx2tex` call the installed `pandoc`. With `--split-dir`, `docx2md` can also write one Markdown file per section and a `manifest.json`.
 
-## Auditability conventions
+## Audit files
 
-- Every generated image carries a `.json` sidecar with `prompt.sha256`,
-  provider/endpoint metadata, and the artifact's own sha256.
-- Every source ZIP embeds `SOURCE_PACKAGE_MANIFEST.csv` (`Path, Size_bytes, SHA256`).
-- Every tracked-diff DOCX is validated so that accepting all revisions
-  reproduces the fresh document exactly (text and non-text layout controls),
-  and relationship ids cannot leak across packages.
-- Clean DOCX outputs reject residual review metadata and em dashes; numeric
-  ranges must use en dashes.
+- `aigc` writes a `.json` sidecar next to each image. The sidecar stores the prompt file's sha256, provider metadata, and the image sha256.
+- `sourcepack` stores `SOURCE_PACKAGE_MANIFEST.csv` in the ZIP, with columns `Path`, `Size_bytes`, and `SHA256`.
+- `redline` checks the tracked package: relationship ids stay in that package, and accepting the revisions is compared with the current document.
+- `check --verify-clean` rejects leftover comments and unaccepted revisions. Template assembly runs the same check. Markdown text converts an em dash to an en dash; `gate style` can flag an em dash or a hyphen used as a numeric range.
 
 ## Development
 
@@ -267,45 +135,3 @@ pytest
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-
-
-## Template assembly arguments
-
-Metadata keeps authors and contact lines separate. Use an EMAILS heading, or put
-email lines in the AUTHOR section, with one marker-preserving address per line.
-At most two contact lines are accepted, and docforge does not infer a
-corresponding-author mapping.
-
-The template assembly CLI accepts --font and --east-asia-font for explicit
-generated-run font overrides. `--body-font-size`, `--abstract-font-size`,
-`--caption-font-size`, and `--reference-font-size` set generated text sizes in
-points while leaving heading and metadata sizes under template control.
---style template preserves the styles discovered
-from the supplied DOCX; alternatively --style PATH.json supplies a semantic
-role-to-existing-style mapping such as {"body": "TA_Main_Text1"}. The
---line-numbers option is template, on, or off and applies to every retained
-front, body, figure, and terminal section. --heading-before sets explicit
-heading spacing before in points. --no-title removes level-one headings from the
-Markdown inputs while retaining the metadata title block and generated terminal
-headings. Generated Acknowledgments, Author Contributions, Code Availability,
-and References headings share the same unnumbered Heading 1 formatting. Word
-line numbering remains active when requested. `--figure-span column|page` sets
-the default figure placement, while per-image `span=` takes precedence. These
-rendering arguments are written to the assembly manifest.
-
-`--native-toc` inserts a native Word TOC field for heading levels 1–3 after the
-template front matter. `--restart-heading-numbering` adds decimal H2 labels
-that restart at 1 after every H1; H3 remains unnumbered. Generated headings are flush left; template
-body-paragraph indentation remains unchanged unless `--body-first-line-chars`
-sets an explicit first-line indent in character units.
-`--page-break-before-h1` starts each Markdown H1 on a new page. Template-backed
-figures default to portrait placement. Request a landscape page explicitly with
-an image option such as `![Figure S1|span=page|orientation=landscape](figure.png)`.
-
-The generic rule is level-based rather than filename-based: any input Markdown
-file may contain level-one headings, and --no-title removes them uniformly.
-References are generated from the ordered bibliography JSON; when
---citation-base points to the main manifest, citations shared with the main
-document retain their numeric labels and SI-only entries receive S1, S2, and
-so on.
