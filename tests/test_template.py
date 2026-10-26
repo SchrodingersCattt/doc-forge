@@ -33,10 +33,11 @@ from docforge.markdown.blocks import Block
 from docforge.output import validate_output_path
 
 
-def test_output_path_rejects_final_token(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="forbidden token 'final'"):
-        validate_output_path(tmp_path / "main-final.docx")
+def test_output_path_allows_generic_final_names(tmp_path: Path) -> None:
+    validate_output_path(tmp_path / "paper_final.docx")
     validate_output_path(tmp_path / "main-manuscript.docx")
+    with pytest.raises(ValueError, match="forbidden token 'final'"):
+        validate_output_path(tmp_path / "paper_final.docx", forbid_tokens=("final",))
 
 
 def test_template_writer_uses_canonical_escape_codec(tmp_path: Path) -> None:

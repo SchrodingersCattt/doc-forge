@@ -39,17 +39,22 @@ _DISPLAY_ENV_RE = re.compile(
 
 
 def set_sizes(body_pt: float | None = None, caption_pt: float | None = None) -> None:
-    """Set body and caption sizes, including defaults bound when functions were defined."""
+    """Set body and caption sizes for later calls that omit an explicit size.
+
+    Sizes are module globals read when a helper is called. They are not written
+    into function default tuples, so the active size does not depend on which
+    ``Pt`` object was captured at import time.
+    """
+
     global PT_BODY, PT_CAPTION
-    import types
-    swaps: dict[int, object] = {}
     if body_pt is not None:
-        swaps[id(PT_BODY)] = PT_BODY = Pt(body_pt)
+        PT_BODY = Pt(body_pt)
     if caption_pt is not None:
-        swaps[id(PT_CAPTION)] = PT_CAPTION = Pt(caption_pt)
-    for function in [v for v in globals().values() if isinstance(v, types.FunctionType)]:
-        if function.__defaults__:
-            function.__defaults__ = tuple(swaps.get(id(d), d) for d in function.__defaults__)
+        PT_CAPTION = Pt(caption_pt)
+
+
+def _active_pt(size, fallback):
+    return fallback if size is None else size
 DOCX_NBSP="\u00A0"
 
 @dataclass(frozen=True)
@@ -332,7 +337,8 @@ def _tex_hl_name(c: str) -> str:
     return OOXML_HL_MAP.get(c, "yellow")
 
 
-def _apply_span(run, span: Span, font_size=PT_BODY, font_name=FONT_BODY):
+def _apply_span(run, span: Span, font_size=None, font_name=FONT_BODY):
+    font_size = _active_pt(font_size, PT_BODY)
     face = FONT_MONO if span.mono else font_name
     size = Pt(9) if span.mono and font_size.pt > 9 else font_size
     run.text = _normalize_docx_whitespace(span.text)
@@ -387,7 +393,8 @@ def add_bookmark(paragraph, name: str):
     paragraph._p.append(end)
 
 
-def _append_superscript_run(paragraph, text: str, font_size=PT_BODY, font_name=FONT_BODY):
+def _append_superscript_run(paragraph, text: str, font_size=None, font_name=FONT_BODY):
+    font_size = _active_pt(font_size, PT_BODY)
     run = paragraph.add_run(text)
     run.font.size = font_size
     run.font.name = font_name
@@ -396,9 +403,10 @@ def _append_superscript_run(paragraph, text: str, font_size=PT_BODY, font_name=F
 
 
 def _append_internal_hyperlink(paragraph, text: str, anchor: str,
-                               font_size=PT_BODY, font_name=FONT_BODY,
+                               font_size=None, font_name=FONT_BODY,
                                superscript: bool = True):
     """Append an internal Word hyperlink run."""
+    font_size = _active_pt(font_size, PT_BODY)
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("w:anchor"), anchor)
     hyperlink.set(qn("w:history"), "1")
@@ -438,9 +446,10 @@ def _append_internal_hyperlink(paragraph, text: str, anchor: str,
 
 
 def _append_citation(paragraph, keys_str: str, resolver: CitationResolver,
-                     font_size=PT_BODY, font_name=FONT_BODY,
+                     font_size=None, font_name=FONT_BODY,
                      use_inherited: bool = True,
                      force_superscript: bool | None = None):
+    font_size = _active_pt(font_size, PT_BODY)
     for text, target_label in resolver.citation_parts(keys_str, use_inherited=use_inherited):
         is_superscript = True if force_superscript is None else force_superscript
         if target_label:
@@ -467,9 +476,10 @@ def _append_citation(paragraph, keys_str: str, resolver: CitationResolver,
 
 
 def add_rich_text(paragraph, tex: str, resolver: CitationResolver | None = None,
-                  font_size=PT_BODY, font_name=FONT_BODY,
+                  font_size=None, font_name=FONT_BODY,
                   citations_superscript: bool = True):
     """Tokenize *tex* and append formatted runs to *paragraph*."""
+    font_size = _active_pt(font_size, PT_BODY)
     def resolve_label(key: str) -> str:
         context = _context()
         value = context.label_map.get(key)

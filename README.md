@@ -35,6 +35,9 @@ Details are in `docforge <command> --help`.
 - `check` — check a DOCX
 - `gate abbr`, `gate references`, `gate style` — source checks from a JSON config
 - `pipeline` — run a `docforge.pipeline.v1` spec; see [docs/pipeline.md](docs/pipeline.md)
+- `convert`, `restyle`, `audit` — semantic conversion, DOCX restyle, and package audit; see [docs/migration.md](docs/migration.md)
+
+`md2docx` and `tex2docx` stay the renderers for those pairs. `convert` calls them for Markdown or LaTeX to DOCX, and `restyle` edits an existing DOCX package from a `docforge.style.v1` profile.
 
 ```bash
 docforge md2docx main.md -o main.docx --template template.docx \

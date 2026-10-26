@@ -35,111 +35,14 @@ def _author_short(raw: str) -> str:
     return f"{first} et al."
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  Citation resolver
-# ═══════════════════════════════════════════════════════════════════════════
-
-class CitationResolver:
-    def __init__(self, bib: dict[str, dict],
-                 inherited_numbers: dict[str, int] | None = None,
-                 local_prefix: str = ""):
-        self.bib = bib
-        self.order: list[str] = []
-        self._key2num: dict[str, int] = {}
-        self.inherited_numbers = inherited_numbers or {}
-        self.local_prefix = local_prefix
-
-    def resolve(self, keys_str: str, use_inherited: bool = True) -> str:
-        return _compress_labels(self.labels_for(keys_str, use_inherited=use_inherited))
-
-    def labels_for(self, keys_str: str, use_inherited: bool = True) -> list[str]:
-        keys = [k.strip() for k in keys_str.split(",")]
-        labels = []
-        for k in keys:
-            if not k:
-                continue
-            labels.append(self._label_for_key(k, use_inherited=use_inherited))
-        return labels
-
-    def citation_parts(self, keys_str: str, use_inherited: bool = True) -> list[tuple[str, str | None]]:
-        """Return display chunks for an in-text citation.
-
-        Each tuple is (text, target_label). Separators have target_label=None;
-        ranges link to their first reference.
-        """
-        labels = self.labels_for(keys_str, use_inherited=use_inherited)
-        if not labels:
-            return []
-        groups = _group_labels(labels)
-        parts: list[tuple[str, str | None]] = []
-        for gi, group in enumerate(groups):
-            if gi > 0:
-                parts.append((",", None))
-            if len(group) <= 2:
-                for li, item in enumerate(group):
-                    if li > 0:
-                        parts.append((",", None))
-                    parts.append((item[2], item[2]))
-            else:
-                parts.append((f"{group[0][2]}–{group[-1][2]}", group[0][2]))
-        return parts
-
-    def _label_for_key(self, key: str, use_inherited: bool = True) -> str:
-        if use_inherited and key in self.inherited_numbers:
-            return str(self.inherited_numbers[key])
-        if key not in self._key2num:
-            self._key2num[key] = len(self.order) + 1
-            self.order.append(key)
-        return f"{self.local_prefix}{self._key2num[key]}"
-
-    def reference_list(self) -> list[str]:
-        return [ref for _, ref in self.reference_items()]
-
-    def reference_items(self) -> list[tuple[str, str]]:
-        refs: list[str] = []
-        items: list[tuple[str, str]] = []
-        seen = set()
-        for key in self.order:
-            if key in seen or key not in self.bib:
-                continue
-            seen.add(key)
-            e = self.bib[key]
-            author = _author_short(e.get("author", ""))
-            title = plain_tex(e.get("title", ""))
-            journal = plain_tex(e.get("journal", e.get("booktitle", "")))
-            vol = e.get("volume", "")
-            pages = plain_tex(e.get("pages", ""))
-            year = e.get("year", "")
-            doi = e.get("doi", "")
-            parts = [f"{author}.", f"{title}."]
-            if journal:
-                j = journal
-                if vol:
-                    j += f" {vol}"
-                if pages:
-                    j += f", {pages}"
-                j += f" ({year})."
-                parts.append(j)
-            elif year:
-                parts.append(f"({year}).")
-            if doi:
-                parts.append(f"https://doi.org/{doi}")
-            label = f"{self.local_prefix}{self._key2num[key]}"
-            items.append((label, " ".join(parts)))
-        return items
-
-    def citation_numbers(self) -> dict[str, int]:
-        return dict(self._key2num)
-
-
 class CitationResolver(SharedCitationResolver):
     """Use the shared numbering logic and TeX-aware reference formatting."""
 
     def citation_parts(self, keys: str, use_inherited: bool = True) -> list[tuple[str, str | None]]:
         """Collapse consecutive labels and link each range to its first reference.
 
-        Two or more consecutive numbers become an en-dash range, matching the
-        PAP-H2 citation formatter: ``5,6`` is ``5–6`` and ``2,5,6,7,8`` is ``2,5–8``.
+        Two or more consecutive numbers become an en-dash range:
+        ``5,6`` is ``5–6`` and ``2,5,6,7,8`` is ``2,5–8``.
         """
         labels = self.labels_for(keys, use_inherited=use_inherited)
         parts: list[tuple[str, str | None]] = []

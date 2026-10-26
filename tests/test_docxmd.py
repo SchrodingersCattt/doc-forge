@@ -266,6 +266,36 @@ def test_comment_ids_follow_markdown(tmp_path):
     assert refs == {"7", "8"}
 
 
+def test_non_numeric_comment_skips_numbers_already_used(tmp_path):
+    source = tmp_path / "source.docx"
+    _sample_docx(source)
+    bundle = tmp_path / "md"
+    export_docx(source, bundle, ExportOptions("main"))
+    text = (bundle / "main.md").read_text(encoding="utf-8")
+    text = text.replace(
+        "Some **bold**",
+        '<comment-start id="note"/>note<comment-end id="note"/> '
+        '<comment-start id="c0"/>**bold**<comment-end id="c0"/>',
+        1,
+    )
+    text += (
+        '\n::: comment {: id=c0 author=a date=2026-01-01T00:00:00Z}\nZero\n:::\n'
+        '\n::: comment {: id=note author=b date=2026-01-01T00:00:00Z}\nNote\n:::\n'
+    )
+    (bundle / "main.md").write_text(text, encoding="utf-8")
+    built = tmp_path / "built.docx"
+    build_docx(bundle, "main", built)
+    with zipfile.ZipFile(built) as package:
+        comments = etree.fromstring(package.read("word/comments.xml"))
+    bodies = {
+        node.get(f"{{{W}}}id"): "".join(node.itertext())
+        for node in comments.findall(f"{{{W}}}comment")
+    }
+    assert set(bodies) == {"0", "1"}
+    assert "Zero" in bodies["0"]
+    assert "Note" in bodies["1"]
+
+
 def test_redline_follows_moved_comment(tmp_path):
     source = tmp_path / "source.docx"
     _sample_docx(source)

@@ -150,12 +150,26 @@ def detect_format(path: Path) -> InputFormat:
     return _detect_format(path)
 
 
-def validate_output_path(path: Path | None, *, label: str = "output") -> None:
-    """Reject publish paths containing the forbidden ``final`` token."""
+def validate_output_path(
+    path: Path | None,
+    *,
+    label: str = "output",
+    forbid_tokens: tuple[str, ...] = (),
+) -> None:
+    """Check a publish path.
+
+    Core format handling does not apply manuscript naming rules. Pass
+    ``forbid_tokens`` from an opt-in delivery policy to reject names that
+    contain those tokens.
+    """
+
     if path is None:
         return
-    if "final" in path.name.casefold():
-        raise ValueError(f"{label} path contains forbidden token 'final': {path}")
+    folded = path.name.casefold()
+    for token in forbid_tokens:
+        needle = token.casefold()
+        if needle and needle in folded:
+            raise ValueError(f"{label} path contains forbidden token {token!r}: {path.name}")
 
 
 __all__ = [

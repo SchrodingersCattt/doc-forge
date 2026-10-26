@@ -291,6 +291,30 @@ class TokenizeTests(unittest.TestCase):
         )
 
 
+class SizeTests(unittest.TestCase):
+    def test_set_sizes_reads_current_global(self) -> None:
+        from docforge.tex import converter
+
+        original_body = converter.PT_BODY
+        original_caption = converter.PT_CAPTION
+        try:
+            converter.set_sizes(body_pt=13, caption_pt=8)
+            self.assertEqual(converter.PT_BODY.pt, 13)
+            self.assertEqual(converter.PT_CAPTION.pt, 8)
+            self.assertIsNone(converter.add_rich_text.__defaults__[0])
+            document = Document()
+            paragraph = document.add_paragraph()
+            converter.add_rich_text(paragraph, "Hi")
+            self.assertEqual(paragraph.runs[0].font.size.pt, 13)
+            converter.set_sizes(body_pt=15)
+            paragraph = document.add_paragraph()
+            converter.add_rich_text(paragraph, "Again")
+            self.assertEqual(paragraph.runs[0].font.size.pt, 15)
+        finally:
+            converter.PT_BODY = original_body
+            converter.PT_CAPTION = original_caption
+
+
 class BibTests(unittest.TestCase):
     def test_parse_bib(self) -> None:
         with TemporaryDirectory() as directory:

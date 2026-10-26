@@ -232,22 +232,6 @@ def _is_filled_metadata(value: str) -> bool:
     return value.strip().upper() not in {"", "TODO", "TBD", "TBA"}
 
 
-def _load_template_document(path: Path) -> DocumentType:
-    """Load a template's accepted view before python-docx inspects it.
-
-    python-docx intentionally exposes only ordinary ``w:p``/``w:r`` nodes;
-    text inside ``w:ins`` is therefore invisible while discovering template
-    roles and prototypes.  Materialize the reviewed package in a temporary
-    copy first, leaving the caller's template untouched and ensuring the
-    generated clean DOCX has no dependency on a revision-aware reader.
-    """
-    with tempfile.TemporaryDirectory(prefix="docforge-template-") as directory:
-        accepted = Path(directory) / path.name
-        shutil.copyfile(path, accepted)
-        accept_docx_revisions(accepted)
-        return Document(accepted)
-
-
 def _append_metadata_paragraphs(nodes: list, template, style_id: str, text: str, *, prototype=None) -> None:
     for paragraph in text.split("\n\n"):
         if paragraph.strip():
