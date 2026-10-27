@@ -25,7 +25,15 @@ _PAGE_TWIPS = {"A4": ("11906", "16838"), "LETTER": ("12240", "15840")}
 _ALIGN = {"left": "left", "center": "center", "right": "right", "justify": "both"}
 
 
-def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str, *, force: bool = False, preserve_content: bool = True) -> dict[str, object]:
+def restyle_docx(
+    source: Path,
+    output: Path,
+    profile: StyleProfile | Path | str,
+    *,
+    force: bool = False,
+    preserve_content: bool = True,
+    drop_historical_defaults: bool = False,
+) -> dict[str, object]:
     """Apply a style profile to a DOCX and publish only if content and package checks pass."""
 
     source, output = Path(source), Path(output)
@@ -45,6 +53,8 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
     imported: list[str] = []
     if template_styles is not None:
         imported = _import_template_styles(styles, template_styles, _template_style_names(loaded, document))
+    if drop_historical_defaults:
+        _drop_historical_direct_defaults(document)
     before = _content_stream(document)
     applied: list[str] = []
     unused: list[str] = []
@@ -241,6 +251,29 @@ def _replace_style(styles: etree._Element, new_style: etree._Element) -> None:
             styles.insert(parent_index, new_style)
             return
     styles.append(new_style)
+
+
+def _drop_historical_direct_defaults(document: etree._Element) -> None:
+    """Remove legacy renderer stamps so a StyleProfile is the style authority.
+
+    This is for a document this process just rebuilt. It drops direct run
+    size, forced black, and non-code fonts. Bold, italic, and scripts stay.
+    """
+
+    for run in document.xpath(".//w:r", namespaces=NS):
+        properties = run.find(_q("rPr"))
+        if properties is None:
+            continue
+        fonts = properties.find(_q("rFonts"))
+        if fonts is not None and (fonts.get(_q("ascii")) or "") != "Consolas":
+            properties.remove(fonts)
+        color = properties.find(_q("color"))
+        if color is not None and not color.get(_q("themeColor")):
+            value = (color.get(_q("val")) or "").upper()
+            if value in {"000000", "AUTO"}:
+                properties.remove(color)
+        _drop(properties, "sz")
+        _drop(properties, "szCs")
 
 
 def _find_style(styles: etree._Element, name: str) -> etree._Element | None:

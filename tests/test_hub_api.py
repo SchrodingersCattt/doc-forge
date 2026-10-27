@@ -179,6 +179,48 @@ def test_style_profile_yaml_and_restyle_keeps_text(tmp_path: Path) -> None:
     assert cli_main(["restyle", str(source), str(tmp_path / "cli.docx"), "--profile", str(profile_path), "--force"]) == 0
 
 
+def test_convert_style_profile_beats_historical_run_defaults(tmp_path: Path) -> None:
+    source = tmp_path / "body.md"
+    source.write_text("Body sentence.\n", encoding="utf-8")
+    legacy = tmp_path / "legacy.docx"
+    convert(source, legacy, force=True)
+    legacy_runs = [row for row in _direct_run_rows(legacy) if row["text"] == "Body sentence."]
+    assert legacy_runs
+    assert legacy_runs[0]["sz"] == "24"
+    assert legacy_runs[0]["color"] == "000000"
+    styled = tmp_path / "styled.docx"
+    result = convert(source, styled, style={
+        "schema": "docforge.style.v1",
+        "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 15, "color": "0000FF", "latin": "Georgia"}}},
+        "policy": {"missing_style": "error", "direct_formatting": "clear_conflicting"},
+    }, force=True)
+    assert result.execution_mode == "SOURCE_PATCH"
+    body = next(item for item in resolved_paragraph_styles(styled) if item["text"] == "Body sentence.")
+    assert body["size_pt"] == 15
+    assert body["latin"] == "Georgia"
+    assert body["direct_size"] is False
+    styled_runs = [row for row in _direct_run_rows(styled) if row["text"] == "Body sentence."]
+    assert styled_runs
+    assert styled_runs[0]["sz"] is None
+    assert (styled_runs[0]["color"] or "").upper() != "000000"
+
+
+def _direct_run_rows(path: Path) -> list[dict[str, str | None]]:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = etree.fromstring(zipfile.ZipFile(path).read("word/document.xml"))
+    rows = []
+    for run in root.findall(f".//{{{namespace}}}r"):
+        properties = run.find(f"{{{namespace}}}rPr")
+        size = properties.find(f"{{{namespace}}}sz") if properties is not None else None
+        color = properties.find(f"{{{namespace}}}color") if properties is not None else None
+        rows.append({
+            "text": "".join(node.text or "" for node in run.findall(f"{{{namespace}}}t")),
+            "sz": size.get(f"{{{namespace}}}val") if size is not None else None,
+            "color": color.get(f"{{{namespace}}}val") if color is not None else None,
+        })
+    return rows
+
+
 def test_direct_formatting_policies(tmp_path: Path) -> None:
     source = _fixture(tmp_path / "direct.docx")
     preserved = tmp_path / "preserved.docx"

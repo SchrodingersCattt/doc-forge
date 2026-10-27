@@ -670,10 +670,15 @@ def _remove_run_emphasis(element, *, preserve_math: bool = False) -> None:
                 properties.remove(node)
 
 
-def _format_caption_runs(element, points: float = 10) -> None:
-    """Apply 10 pt roman caption text and bold only the leading label run."""
+def _format_caption_runs(element, points: float | None = 10) -> None:
+    """Apply roman caption text and bold only the leading label run.
+
+    ``points`` is the historical 10 pt stamp when the caller does not pass a
+    size. A StyleProfile authority passes ``None`` so that stamp is skipped.
+    """
     _remove_run_emphasis(element, preserve_math=True)
-    _override_run_size(element, points)
+    if points is not None:
+        _override_run_size(element, points)
     first = next(
         (
             run for run in element.iter(qn("w:r"))
@@ -690,6 +695,12 @@ def _format_caption_runs(element, points: float = 10) -> None:
     for tag in ("b", "bCs"):
         marker = OxmlElement("w:" + tag)
         properties.append(marker)
+
+
+def _caption_points(explicit: float | None, implicit: bool) -> float | None:
+    if explicit is not None:
+        return explicit
+    return 10.0 if implicit else None
 
 
 def _override_heading_before(element, style_ids: set[str], points: float | None) -> None:
@@ -1560,6 +1571,7 @@ def _clone_rendered_block(
     number_prefix: str = "",
     body_font_size: float | None = None,
     caption_font_size: float | None = None,
+    implicit_typography: bool = True,
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
@@ -1580,13 +1592,16 @@ def _clone_rendered_block(
             f"**{label}** {body}".strip(),
             prototype=p.get("caption"),
         )
-        _format_caption_runs(paragraph, caption_font_size or 10)
+        _format_caption_runs(paragraph, _caption_points(caption_font_size, implicit_typography))
         return [paragraph]
     if block.kind in {"paragraph", "reference"}:
         role = "reference" if block.kind == "reference" else "body"
         paragraph = _new_paragraph(target, styles[role], block.text, prototype=p.get(role))
         if block.kind == "paragraph":
-            _override_run_size(paragraph, body_font_size or 11)
+            if body_font_size is not None:
+                _override_run_size(paragraph, body_font_size)
+            elif implicit_typography:
+                _override_run_size(paragraph, 11)
         return [paragraph]
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
@@ -1657,6 +1672,7 @@ def _clone_figure(
     section_width_twips: int | None = None,
     number_prefix: str = "",
     caption_font_size: float | None = None,
+    implicit_typography: bool = True,
 ) -> list:
     image_path = Path(image.path)
     if not image_path.is_file():
@@ -1734,7 +1750,7 @@ def _clone_figure(
     )
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
     _set_paragraph_flag(cap, "w:keepLines")
-    _format_caption_runs(cap, caption_font_size or 10)
+    _format_caption_runs(cap, _caption_points(caption_font_size, implicit_typography))
     return [paragraph, cap]
 
 
@@ -2084,6 +2100,7 @@ def assemble_markdown_template(
     caption_font_size: float | None = None,
     reference_font_size: float | None = None,
     force: bool = False,
+    style_authority: object | None = None,
 ) -> AssemblyResult:
     validate_output_path(output)
     if output.exists() and not force:
@@ -2349,6 +2366,7 @@ def assemble_markdown_template(
                 number_prefix=numbering_prefix,
                 body_font_size=body_font_size,
                 caption_font_size=caption_font_size,
+                implicit_typography=style_authority is None,
             )
             if block.kind == "heading":
                 for node in nodes:
@@ -2453,6 +2471,7 @@ def assemble_markdown_template(
                 section_width_twips=_section_width_twips(render_section),
                 number_prefix=numbering_prefix,
                 caption_font_size=caption_font_size,
+                implicit_typography=style_authority is None,
             )
         )
         if resolved_span == "page" and page_span_requires_breaks:
@@ -2527,10 +2546,12 @@ def assemble_markdown_template(
         styles["heading_3"],
         styles["references_heading"],
     }
+    implicit_typography = style_authority is None
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
-        _force_run_black(node)
+        if implicit_typography:
+            _force_run_black(node)
         style_node = node.find(qn("w:pPr"))
         style_ref = style_node.find(qn("w:pStyle")) if style_node is not None else None
         style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
@@ -2548,7 +2569,7 @@ def assemble_markdown_template(
             styles["caption"],
             styles["reference"],
         }
-        if style_id == styles["title"] and style_id not in shared_roles:
+        if implicit_typography and style_id == styles["title"] and style_id not in shared_roles:
             title_style = _style(template, style_id)
             if title_style.font.size is None:
                 _override_run_size(node, 18)
@@ -2563,11 +2584,24 @@ def assemble_markdown_template(
     citation_converted = materialize_citations(template, citation_style)
     normalize_document_typography(template)
     output.parent.mkdir(parents=True, exist_ok=True)
-    template.save(output)
-    accept_docx_revisions(output)
-    remove_docx_comments(output)
-    _prune_images(output)
-    convert_unicode_scripts_in_docx(output)
+    staged = output
+    authority_dir: Path | None = None
+    if style_authority is not None:
+        authority_dir = Path(tempfile.mkdtemp(prefix=".style-authority-", dir=output.parent))
+        staged = authority_dir / output.name
+    try:
+        template.save(staged)
+        accept_docx_revisions(staged)
+        remove_docx_comments(staged)
+        _prune_images(staged)
+        convert_unicode_scripts_in_docx(staged)
+        if style_authority is not None:
+            from ..style.engine import restyle_docx
+
+            restyle_docx(staged, output, style_authority, force=True, preserve_content=True)
+    finally:
+        if authority_dir is not None:
+            shutil.rmtree(authority_dir, ignore_errors=True)
     # ``section_sources`` records which template region supplied each section
     # for auditability. A page-span figure may intentionally change columns
     # or orientation, so verification uses the adjusted section XML emitted

@@ -169,13 +169,17 @@ def restyle(
     preserve_content: bool = True,
     loss_policy: str | None = None,
     force: bool = False,
+    drop_historical_defaults: bool = False,
 ) -> WriteResult:
     """Restyle a DOCX from a StyleProfile without rewriting its text."""
 
     from .style.engine import restyle_docx
 
     policy = default_loss_policy("preserve", loss_policy)  # type: ignore[arg-type]
-    summary = restyle_docx(Path(source), Path(output), profile, force=force, preserve_content=preserve_content)  # type: ignore[arg-type]
+    summary = restyle_docx(
+        Path(source), Path(output), profile, force=force, preserve_content=preserve_content,
+        drop_historical_defaults=drop_historical_defaults,
+    )  # type: ignore[arg-type]
     diagnostics = [
         finding("info", "style.applied", "style role applied to matching paragraphs", role=str(role))
         for role in summary.get("roles") or []
@@ -307,7 +311,9 @@ def _legacy_docx(source: Path, output: Path, *, source_format: str, policy: str,
             run_md2docx(md2docx_namespace(source, staged, force=True, title=title), echo=False)
         else:
             run_tex2docx(tex2docx_namespace(source, staged, si=si, bib=bib, target=target, force=True), echo=False)
-        return restyle(staged, output, profile=style, loss_policy=policy, force=force)
+        return restyle(
+            staged, output, profile=style, loss_policy=policy, force=force, drop_historical_defaults=True,
+        )
 
 
 def _write_semantic(
@@ -351,7 +357,9 @@ def _write_semantic(
                 return WriteResult(output, "REBUILD", report, audit(output))
             interim = Path(directory) / "interim.docx"
             run_md2docx(md2docx_namespace(staged, interim, force=True), echo=False)
-            return restyle(interim, output, profile=style, loss_policy=policy, force=force)
+            return restyle(
+                interim, output, profile=style, loss_policy=policy, force=force, drop_historical_defaults=True,
+            )
     writer = MarkdownWriter() if target == "markdown" else LatexWriter()
     result = writer.write(replace_plan_report(plan, report), output)
     return WriteResult(result.output, "REBUILD", report, result.validation)
