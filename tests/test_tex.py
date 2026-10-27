@@ -130,6 +130,93 @@ class TokenizeTests(unittest.TestCase):
             r"V_{\mathrm{det}} + \eta^{2} + ( x )   y    z      q",
         )
 
+    def test_spacing_only_lines_stay_inside_one_display(self) -> None:
+        source = "\n".join([
+            r"\begin{equation}",
+            "a = 1",
+            r"\quad",
+            "b = 2",
+            r"\qquad",
+            "c = 3",
+            r"\end{equation}",
+        ])
+        normalized = _normalize_display_math_source(source)
+        self.assertEqual(
+            [line.strip() for line in normalized.splitlines()],
+            [r"\begin{equation}", "a = 1", "b = 2", "c = 3", r"\end{equation}"],
+        )
+        with patch("docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"):
+            equation = latex_to_omml("a = 1\n\n\\quad\n\nb = 2")
+        texts = "".join(equation.xpath(
+            ".//m:t/text()",
+            namespaces={"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"},
+        )).replace(" ", "")
+        self.assertIn("a=1", texts)
+        self.assertIn("b=2", texts)
+
+    def test_quad_separated_display_survives_tex2docx(self) -> None:
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\begin{document}",
+            r"\begin{equation}",
+            "a = 1",
+            r"\quad",
+            "b = 2",
+            r"\qquad",
+            "c = 3",
+            r"\end{equation}",
+            r"\end{document}",
+        ])
+        with TemporaryDirectory() as directory, patch(
+            "docforge.math.pandoc._pandoc_version", return_value="3.9.0.1"
+        ):
+            output = Path(directory) / "quad.docx"
+            latex_to_docx(source, output=output)
+            root = etree.fromstring(zipfile.ZipFile(output).read("word/document.xml"))
+        ns = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
+        self.assertEqual(len(root.xpath("//m:oMathPara", namespaces=ns)), 1)
+        texts = "".join(root.xpath(".//m:t/text()", namespaces=ns)).replace(" ", "")
+        self.assertIn("a=1", texts)
+        self.assertIn("b=2", texts)
+        self.assertIn("c=3", texts)
+
+    def test_pdf_figure_is_embedded(self) -> None:
+        try:
+            import fitz  # noqa: F401
+        except ImportError:
+            self.skipTest("PyMuPDF is required to rasterize PDF figures")
+        from PIL import Image
+
+        from docforge.tex.converter import validate_docx_package
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            figures.mkdir()
+            pdf = figures / "plot.pdf"
+            Image.new("RGB", (32, 32), (200, 10, 10)).save(pdf, "PDF")
+            source = "\n".join([
+                r"\documentclass{article}",
+                r"\begin{document}",
+                r"\begin{figure}",
+                r"\caption{Plot}",
+                r"\includegraphics{figures/plot.pdf}",
+                r"\end{figure}",
+                r"\end{document}",
+            ])
+            tex = root / "main.tex"
+            tex.write_text(source, encoding="utf-8")
+            output = root / "figures.docx"
+            latex_to_docx(source, fig_dir=figures, output=output)
+            package = zipfile.ZipFile(output)
+            document = package.read("word/document.xml")
+            self.assertNotIn(b"[Figure:", document)
+            self.assertIn(b"a:blip", document)
+            self.assertTrue(any(name.startswith("word/media/") for name in package.namelist()))
+            package.close()
+            summary = validate_docx_package(output, tex)
+        self.assertEqual(summary["figures"], 1)
+
     def test_starred_equations_do_not_shift_label_numbers(self) -> None:
         source = r"""
         \begin{equation*}x = 0\label{eq:unpublished}\end{equation*}
@@ -289,6 +376,30 @@ class TokenizeTests(unittest.TestCase):
             unpaired_quote_errors("Both \u20181/80' ratios"),
             [],
         )
+
+
+class SizeTests(unittest.TestCase):
+    def test_set_sizes_reads_current_global(self) -> None:
+        from docforge.tex import converter
+
+        original_body = converter.PT_BODY
+        original_caption = converter.PT_CAPTION
+        try:
+            converter.set_sizes(body_pt=13, caption_pt=8)
+            self.assertEqual(converter.PT_BODY.pt, 13)
+            self.assertEqual(converter.PT_CAPTION.pt, 8)
+            self.assertIsNone(converter.add_rich_text.__defaults__[0])
+            document = Document()
+            paragraph = document.add_paragraph()
+            converter.add_rich_text(paragraph, "Hi")
+            self.assertEqual(paragraph.runs[0].font.size.pt, 13)
+            converter.set_sizes(body_pt=15)
+            paragraph = document.add_paragraph()
+            converter.add_rich_text(paragraph, "Again")
+            self.assertEqual(paragraph.runs[0].font.size.pt, 15)
+        finally:
+            converter.PT_BODY = original_body
+            converter.PT_CAPTION = original_caption
 
 
 class BibTests(unittest.TestCase):

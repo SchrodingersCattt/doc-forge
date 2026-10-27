@@ -259,7 +259,11 @@ class _Writer:
         self.styles = StyleSheet(etree.fromstring(styles) if styles else None)
         texts = [(bundle / name).read_text(encoding="utf-8") for name in document["parts"]]
         self.parts = [parse_part(text) for text in texts]
-        self._numbered_comments = {int(value) for text in texts for value in re.findall(r'id="?c(\d+)', text)}
+        self._numbered_comments = {
+            int(value)
+            for text in texts
+            for value in re.findall(r'\bid="?c(\d+)\b', text)
+        }
         header = next((part.document for part in self.parts if part.document), None)
         if header is None:
             raise ValueError("The first part must carry the <!-- docforge:document --> header")

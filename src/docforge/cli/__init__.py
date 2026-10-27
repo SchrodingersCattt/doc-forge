@@ -252,6 +252,42 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--no-publish", action="store_true", help="Build and validate without replacing the publication directory")
     pipeline.add_argument("--plugin", action="append", default=[], metavar="MODULE:FUNCTION", help="Load a registry plugin (repeatable)")
 
+    convert = sub.add_parser("convert", help="Convert Markdown, LaTeX, and DOCX through the semantic hub")
+    convert.add_argument("source", type=Path)
+    convert.add_argument("output", type=Path)
+    convert.add_argument("--fidelity", choices=("semantic", "preserve"), default="semantic")
+    convert.add_argument("--loss-policy", choices=("error", "warn", "drop"), default=None)
+    convert.add_argument("--style", type=Path, help="StyleProfile JSON or YAML applied when the output is DOCX")
+    convert.add_argument("--title", default=None)
+    convert.add_argument("--si", type=Path, help="Second TeX file used by tex2docx")
+    convert.add_argument("--bib", type=Path, help="BibTeX file used by tex2docx")
+    convert.add_argument("--target", choices=("main", "si"), default="main")
+    convert.add_argument("--force", action="store_true")
+
+    restyle = sub.add_parser("restyle", help="Apply a StyleProfile to a DOCX without changing its text")
+    restyle.add_argument("source", type=Path)
+    restyle.add_argument("output", type=Path)
+    restyle.add_argument("--profile", type=Path, required=True)
+    restyle.add_argument("--loss-policy", choices=("error", "warn", "drop"), default=None)
+    restyle.add_argument("--force", action="store_true")
+
+    audit = sub.add_parser("audit", help="Audit a DOCX package and its relationships")
+    audit.add_argument("docx", type=Path)
+
+    export = sub.add_parser("export", help="Export a DOCX to a reversible bundle or semantic Markdown")
+    export.add_argument("input", type=Path)
+    export.add_argument("--bundle", type=Path, required=True)
+    export.add_argument("--fidelity", choices=("preserve", "semantic"), default="preserve")
+    export.add_argument("--id", dest="doc_id", default="main")
+    export.add_argument("--force", action="store_true")
+
+    build = sub.add_parser("build", help="Build a DOCX from an exported bundle")
+    build.add_argument("bundle", type=Path)
+    build.add_argument("output", type=Path)
+    build.add_argument("--fidelity", choices=("preserve", "semantic"), default="preserve")
+    build.add_argument("--id", dest="doc_id", default="main")
+    build.add_argument("--force", action="store_true")
+
     return parser
 
 
@@ -273,6 +309,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "md2docx":
             return _cmd_md2docx(args)
+        if args.command == "convert":
+            return _cmd_convert(args)
+        if args.command == "restyle":
+            return _cmd_restyle(args)
+        if args.command == "audit":
+            return _cmd_audit(args)
+        if args.command == "export":
+            return _cmd_export(args)
+        if args.command == "build":
+            return _cmd_build(args)
         if args.command == "contract":
             return _cmd_contract(args)
         if args.command == "docx2md":
@@ -375,116 +421,9 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
 
 
 def _cmd_md2docx(args: argparse.Namespace) -> int:
-    from ..markdown import parse_markdown, render_blocks_to_doc, convert_unicode_scripts_in_docx
-    from ..markdown import reuse_unchanged_roundtrip_source
-    from ..output import validate_output_path
+    from ..adapters.legacy import run_md2docx
 
-    validate_output_path(args.output)
-    if args.template is not None:
-        _preflight_docx(args.template)
-    if args.output.exists() and not args.force:
-        raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
-    if args.roundtrip_manifest is not None:
-        if reuse_unchanged_roundtrip_source(
-            args.roundtrip_manifest, args.output, force=args.force, validate_format=True,
-        ):
-            print(f"roundtrip exact source reused: {args.output}")
-            return 0
-        if not args.inputs:
-            raise ValueError("Markdown inputs are required when the roundtrip bundle has changed")
-    if not args.inputs and args.roundtrip_manifest is None:
-        raise ValueError("md2docx requires Markdown inputs or --roundtrip-manifest")
-    if args.template is not None:
-        from ..markdown import assemble_markdown_template, write_assembly_sidecars
-
-        if args.metadata is None:
-            raise ValueError("Template assembly requires --metadata")
-        result = assemble_markdown_template(
-            args.inputs,
-            template_path=args.template,
-            output=args.output,
-            metadata_path=args.metadata,
-            bibliography_path=args.bibliography,
-            citation_base_path=args.citation_base,
-            citation_format=args.citation_format,
-            title=args.title or "",
-            keep_comments=args.keep_comments,
-            skip_images=args.skip_images,
-            columns=args.columns,
-            figure_span=args.figure_span,
-            font_family=args.font_family,
-            east_asia_font=args.east_asia_font,
-            style_profile=args.style_profile,
-            line_numbers=args.line_numbers,
-            include_title=True,
-            strip_level_one_headings=args.no_title,
-            heading_before=args.heading_before,
-            native_toc=args.native_toc,
-            restart_heading_numbering=args.restart_heading_numbering,
-            body_first_line_chars=args.body_first_line_chars,
-            page_break_before_h1=args.page_break_before_h1,
-            body_font_size=args.body_font_size,
-            abstract_font_size=args.abstract_font_size,
-            caption_font_size=args.caption_font_size,
-            reference_font_size=args.reference_font_size,
-            numbering_prefix=args.numbering_prefix,
-            bibliography_scope=args.bibliography_scope,
-            citation_numbering=args.citation_numbering,
-            bibliography_profile=args.bibliography_profile,
-            include_metadata_back_matter=not args.omit_metadata_back_matter,
-            force=args.force,
-        )
-        manifest, checksum = write_assembly_sidecars(
-            result,
-            inputs=args.inputs,
-            template_path=args.template,
-            metadata_path=args.metadata,
-            bibliography_path=args.bibliography,
-            citation_base_path=args.citation_base,
-            command=args._command_argv,
-        )
-        print(result.output)
-        print(manifest)
-        print(checksum)
-        return 0
-    if (
-        args.metadata is not None
-        or args.bibliography is not None
-        or args.citation_base is not None
-        or args.style_profile != "template"
-        or args.line_numbers != "template"
-        or args.figure_span != "column"
-        or args.body_font_size is not None
-        or args.abstract_font_size is not None
-        or args.caption_font_size is not None
-        or args.reference_font_size is not None
-    ):
-        raise ValueError("Metadata, bibliography, style, line-number, figure-span, and typography options require --template")
-    blocks = [
-        block
-        for path in args.inputs
-        for block in parse_markdown(path, strip_comments=not args.keep_comments)
-    ]
-    if args.skip_images:
-        blocks = [block for block in blocks if block.kind != "image"]
-    if args.no_title:
-        blocks = [
-            block for block in blocks
-            if not (block.kind == "heading" and block.level == 1)
-        ]
-    doc = render_blocks_to_doc(
-        blocks,
-        title=args.title,
-        number_prefix=args.numbering_prefix,
-        heading_before=args.heading_before,
-        font_family=args.font_family,
-        east_asia_font=args.east_asia_font,
-    )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(args.output))
-    convert_unicode_scripts_in_docx(args.output)
-    print(args.output)
-    return 0
+    return run_md2docx(args)
 
 
 def _load_split(path: Path | None) -> list[dict] | None:
@@ -719,35 +658,79 @@ def _cmd_docx2md(args: argparse.Namespace) -> int:
 
 
 def _cmd_tex2docx(args: argparse.Namespace) -> int:
-    from ..tex import build_validated_docx, convert_files
-    from ..output import validate_output_path
+    from ..adapters.legacy import run_tex2docx
 
-    validate_output_path(args.output)
-    if args.output.exists() and not args.force:
-        raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
-    source = args.main if args.target == "main" else args.si
-    if source is None:
-        raise ValueError("--target si requires --si")
+    return run_tex2docx(args)
 
-    def build(path: Path) -> None:
-        convert_files(
-            args.main,
-            si_path=args.si,
-            bib_path=args.bib,
-            output=path,
-            target=args.target,
-            citation_prefix="S" if args.target == "si" else "",
-            float_prefix="S" if args.target == "si" else "",
-        )
 
-    build_validated_docx(
+def _cmd_convert(args: argparse.Namespace) -> int:
+    from ..api import convert
+
+    result = convert(
+        args.source,
         args.output,
-        source,
-        build,
-        atomic=True,
-        auxiliary_tex_path=args.si if args.target == "main" else args.main,
+        fidelity=args.fidelity,
+        loss_policy=args.loss_policy,
+        style=args.style,
+        force=args.force,
+        title=args.title,
+        si=args.si,
+        bib=args.bib,
+        target=args.target,
     )
-    print(args.output)
+    print(result.output)
+    print(result.execution_mode)
+    return 0
+
+
+def _cmd_restyle(args: argparse.Namespace) -> int:
+    from ..api import restyle
+
+    result = restyle(args.source, args.output, profile=args.profile, loss_policy=args.loss_policy, force=args.force)
+    print(result.output)
+    print(result.execution_mode)
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    from ..api import audit
+
+    report = audit(args.docx)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    return 0 if report.ok else 1
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    if args.fidelity == "preserve":
+        export_args = argparse.Namespace(
+            input=args.input,
+            bundle=args.bundle,
+            doc_id=args.doc_id,
+            split=None,
+            bibliography="references.json",
+            bib_style=None,
+            no_citations=False,
+            force=args.force,
+        )
+        return _cmd_md_export(export_args)
+    from ..markdown import docx_to_markdown
+
+    _preflight_docx(args.input)
+    output = args.bundle / f"{args.doc_id}.md"
+    docx_to_markdown(args.input, output=output, force=args.force)
+    print(output)
+    return 0
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    if args.fidelity == "preserve":
+        return _cmd_md_build(args)
+    from ..adapters.legacy import md2docx_namespace, run_md2docx
+
+    source = args.bundle / f"{args.doc_id}.md"
+    if not source.is_file():
+        raise ValueError("semantic build expects a Markdown file named after the document id")
+    run_md2docx(md2docx_namespace(source, args.output, force=args.force))
     return 0
 
 

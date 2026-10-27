@@ -1328,15 +1328,21 @@ def remap_heading_style_ids(element, target: DocumentType) -> None:
         outline.set(qn("w:val"), str(level - 1))
 
 
-def replace_report_and_resume(template: DocumentType, generated: DocumentType) -> None:
-    """Splice generated body blocks between marker paragraphs in the template."""
+def replace_report_and_resume(
+    template: DocumentType,
+    generated: DocumentType,
+    *,
+    start_marker: str = "报告正文",
+    end_markers: tuple[str, ...] = ("依托单位推荐意见", "依托单位：中山大学", "附件信息"),
+) -> None:
+    """Splice generated body blocks between marker paragraphs in the template.
+
+    The default markers keep the historical zero-argument call working.
+    Pass ``start_marker`` and ``end_markers`` for any other template.
+    """
     body = template._element.body
-    start = find_body_index(body, "报告正文")
-    end = find_body_index_after(
-        body,
-        start,
-        ("依托单位推荐意见", "依托单位：中山大学", "附件信息"),
-    )
+    start = find_body_index(body, start_marker)
+    end = find_body_index_after(body, start, end_markers)
     preserved_end = list(body.iterchildren())[end]
     remove_range(body, start, end)
 

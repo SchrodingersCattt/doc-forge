@@ -225,8 +225,19 @@ def _output_name(entry: Mapping[str, Any], key: str, profile: Mapping[str, Any],
     name = _safe_relative(value, label=f"delivery {key}")
     if name.suffix.lower() != ".docx":
         name = name.with_suffix(name.suffix + ".docx" if name.suffix else ".docx")
-    validate_output_path(name, label=f"delivery {key}")
+    validate_output_path(name, label=f"delivery {key}", forbid_tokens=_forbid_tokens(profile))
     return name
+
+
+def _forbid_tokens(profile: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = profile.get("forbid_name_tokens", ())
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(item) for item in raw)
+    raise ValueError("forbid_name_tokens must be a string or a list of strings")
 
 
 def _sha256_text(value: str) -> str:
@@ -916,7 +927,7 @@ def deliver(profile: Mapping[str, Any] | Path | str, *, accept_revisions: bool =
                 article_manifest = stage_manifest
         aggregate = stage_delivery / aggregate_rel
         final_aggregate = delivery_dir / aggregate_rel
-        validate_output_path(final_aggregate, label="delivery manifest")
+        validate_output_path(final_aggregate, label="delivery manifest", forbid_tokens=_forbid_tokens(payload))
         review_sections = [item for item in source_records if item.get("reviewed_paragraph") is not None]
         aggregate.write_text(json.dumps({"schema": "docforge.delivery.v1", "generated_at_utc": datetime.now(timezone.utc).isoformat(), "profile": source, "accept_revisions": accept_revisions, "delivery_dir": str(delivery_dir), "artifacts": [{"name": x.name, "output": str(x.output), "manifest": str(x.manifest), "checksum": str(x.checksum), "inputs": [str(p) for p in x.inputs]} for x in built], "source_paragraph_map": source_records, "sections": review_sections}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         for manifest in stage_manifests:

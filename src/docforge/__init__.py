@@ -68,3 +68,7 @@ from .roundtrip import (  # noqa: E402,F401
     INVARIANTS, InvariantResult, PathCollisionError, RoundTripError, RoundTripMode,
     SnapshotMismatchError, SourceSnapshot, compare_projection, exact_reuse, redact_report,
 )
+from .semantic import SemanticDocument  # noqa: E402,F401
+from .api import audit, convert, read, restyle, write  # noqa: E402,F401
+
+__all__ += ["SemanticDocument", "audit", "convert", "read", "restyle", "write"]
