@@ -184,6 +184,11 @@ def restyle(
         finding("info", "style.unused", "style role matched no paragraphs", role=str(role))
         for role in summary.get("unused") or []
     )
+    if summary.get("template"):
+        diagnostics.append(finding(
+            "info", "style.template", "style definitions imported from the profile template",
+            template=Path(str(summary["template"])).name,
+        ))
     if summary.get("page"):
         diagnostics.append(finding("info", "style.page", "page setup applied"))
     if not diagnostics:

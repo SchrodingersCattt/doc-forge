@@ -7,6 +7,7 @@ byte-identical inside the new package.
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import zipfile
@@ -33,11 +34,7 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
     if output.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
     loaded = load_profile(profile)
-    if loaded.template:
-        raise ConversionError(
-            "StyleProfile.template is not applied by restyle; remove it until template application is implemented",
-            code="STYLE_TEMPLATE",
-        )
+    template_styles = _load_template_styles(loaded) if loaded.template else None
     with zipfile.ZipFile(source) as package:
         names = package.namelist()
         original = {name: package.read(name) for name in names}
@@ -45,6 +42,9 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
         raise ConversionError("DOCX is missing styles or document part", code="DOCX_INVALID")
     styles = etree.fromstring(original["word/styles.xml"])
     document = etree.fromstring(original["word/document.xml"])
+    imported: list[str] = []
+    if template_styles is not None:
+        imported = _import_template_styles(styles, template_styles, _template_style_names(loaded, document))
     before = _content_stream(document)
     applied: list[str] = []
     unused: list[str] = []
@@ -105,6 +105,8 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
         "unused": unused,
         "page": page_applied,
         "content_unchanged": before == after,
+        "template": loaded.template,
+        "imported_styles": imported,
     }
 
 
@@ -155,6 +157,90 @@ def _content_stream(document: etree._Element) -> list[str]:
 
 def _q(tag: str) -> str:
     return f"{{{W}}}{tag}"
+
+
+def _template_path(profile: StyleProfile) -> Path:
+    raw = Path(profile.template or "")
+    if raw.is_absolute():
+        return raw
+    base = profile.template_base or Path.cwd()
+    return base / raw
+
+
+def _load_template_styles(profile: StyleProfile) -> etree._Element:
+    """Read ``word/styles.xml`` from the profile template. Fail before any publish."""
+
+    authored = profile.template or ""
+    path = _template_path(profile)
+    from ..output import detect_format
+
+    try:
+        detect_format(path)
+    except FileNotFoundError as exc:
+        raise ConversionError(f"style template is missing: {authored}", code="STYLE_TEMPLATE") from exc
+    except Exception as exc:
+        raise ConversionError(f"style template is not a usable DOCX: {authored}", code="STYLE_TEMPLATE") from exc
+    try:
+        with zipfile.ZipFile(path) as package:
+            if "word/styles.xml" not in package.namelist():
+                raise ConversionError(f"style template has no styles part: {authored}", code="STYLE_TEMPLATE")
+            payload = package.read("word/styles.xml")
+        return etree.fromstring(payload)
+    except ConversionError:
+        raise
+    except (OSError, zipfile.BadZipFile, etree.XMLSyntaxError) as exc:
+        raise ConversionError(f"style template is not a usable DOCX: {authored}", code="STYLE_TEMPLATE") from exc
+
+
+def _template_style_names(profile: StyleProfile, document: etree._Element) -> list[str]:
+    names: list[str] = []
+    for role_name, role in profile.roles.items():
+        names.append(role.word_style or role_name)
+        if role.select:
+            names.append(role.select)
+    if names:
+        return names
+    for paragraph in document.xpath(".//w:p", namespaces=NS):
+        properties = paragraph.find(_q("pPr"))
+        marker = properties.find(_q("pStyle")) if properties is not None else None
+        if marker is not None and marker.get(_q("val")):
+            names.append(marker.get(_q("val")) or "")
+    return names or ["Normal"]
+
+
+def _import_template_styles(document_styles: etree._Element, template_styles: etree._Element, names: list[str]) -> list[str]:
+    """Copy named template styles and their basedOn/link chain into the document."""
+
+    imported: list[str] = []
+    pending = [name for name in names if name]
+    seen: set[str] = set()
+    while pending:
+        name = pending.pop(0)
+        if name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        source = _find_style(template_styles, name)
+        if source is None:
+            continue
+        for tag in ("basedOn", "link"):
+            node = source.find(_q(tag))
+            if node is not None and node.get(_q("val")):
+                pending.append(node.get(_q("val")) or "")
+        copied = copy.deepcopy(source)
+        _replace_style(document_styles, copied)
+        imported.append(copied.get(_q("styleId")) or name)
+    return imported
+
+
+def _replace_style(styles: etree._Element, new_style: etree._Element) -> None:
+    style_id = new_style.get(_q("styleId"))
+    for existing in styles.findall(_q("style")):
+        if style_id and existing.get(_q("styleId")) == style_id:
+            parent_index = list(styles).index(existing)
+            styles.remove(existing)
+            styles.insert(parent_index, new_style)
+            return
+    styles.append(new_style)
 
 
 def _find_style(styles: etree._Element, name: str) -> etree._Element | None:

@@ -1,18 +1,16 @@
 """StyleProfile v1.
 
-A profile is format-independent. A DOCX template can supply baseline style
-names, but the profile itself is the requested typography and layout.
-
-``template`` is stored and rejected by ``restyle_docx`` until applying a
-template is implemented. ``RoleSpec.select`` names an existing Word style
-whose paragraphs should receive this role. A role that matches no paragraph
-is unused.
+A profile is format-independent. ``template`` is an optional DOCX whose
+style definitions are the baseline for the styles the profile names.
+``restyle_docx`` copies those definitions, then applies role overrides.
+``RoleSpec.select`` names an existing Word style whose paragraphs should
+receive this role. A role that matches no paragraph is unused.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -135,6 +133,7 @@ class StyleProfile:
     policy: StylePolicy = field(default_factory=StylePolicy)
     template: str | None = None
     schema: str = STYLE_SCHEMA
+    template_base: Path | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.schema != STYLE_SCHEMA:
@@ -198,7 +197,8 @@ def load_profile(source: StyleProfile | Path | str | Mapping[str, object]) -> St
     payload = json.loads(text) if text.lstrip().startswith("{") else _yaml(text)
     if not isinstance(payload, dict):
         raise StyleProfileError("style profile must be a mapping")
-    return StyleProfile.from_dict(payload)
+    # Relative template paths are resolved next to the profile file.
+    return replace(StyleProfile.from_dict(payload), template_base=path.expanduser().resolve().parent)
 
 
 def _role(name: object, spec: object) -> RoleSpec:

@@ -247,17 +247,78 @@ def test_created_style_is_attached_to_selected_paragraphs(tmp_path: Path) -> Non
     assert caption["text"] == "Caption text"
 
 
-def test_restyle_rejects_template_without_replacing_output(tmp_path: Path) -> None:
-    source = _fixture(tmp_path / "styled.docx")
-    output = tmp_path / "kept.docx"
-    output.write_bytes(b"SENTINEL")
-    with pytest.raises(ConversionError, match="template"):
-        restyle_docx(source, output, {
-            "schema": "docforge.style.v1",
-            "template": "template.docx",
-            "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 12}}},
-        }, force=True)
-    assert output.read_bytes() == b"SENTINEL"
+def test_style_template_is_the_style_source_and_fails_closed(tmp_path: Path) -> None:
+    template = _house_template(tmp_path / "house.docx")
+    source = tmp_path / "plain.docx"
+    document = Document()
+    document.add_paragraph("Keep me")
+    document.save(source)
+    output = tmp_path / "from-template.docx"
+    summary = restyle_docx(source, output, {
+        "schema": "docforge.style.v1",
+        "template": str(template),
+        "roles": {"body": {"word_style": "Normal"}},
+        "policy": {"direct_formatting": "preserve", "missing_style": "error"},
+    }, force=True)
+    assert summary["template"] == str(template)
+    assert "Normal" in summary["imported_styles"]
+    assert _texts(source) == _texts(output) == ("Keep me",)
+    body = next(item for item in resolved_paragraph_styles(output) if item["text"] == "Keep me")
+    assert body["size_pt"] == 16
+    assert body["latin"] == "Times New Roman"
+    overlay = tmp_path / "overlay.docx"
+    restyle_docx(source, overlay, {
+        "schema": "docforge.style.v1",
+        "template": str(template),
+        "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 18, "latin": "Georgia"}}},
+        "policy": {"direct_formatting": "clear_conflicting", "missing_style": "error"},
+    }, force=True)
+    styled = next(item for item in resolved_paragraph_styles(overlay) if item["text"] == "Keep me")
+    assert styled["size_pt"] == 18
+    assert styled["latin"] == "Georgia"
+    profile_path = tmp_path / "style.yaml"
+    profile_path.write_text(
+        "schema: docforge.style.v1\n"
+        "template: house.docx\n"
+        "roles:\n"
+        "  body:\n"
+        "    word_style: Normal\n"
+        "policy:\n"
+        "  direct_formatting: preserve\n"
+        "  missing_style: error\n",
+        encoding="utf-8",
+    )
+    via_yaml = tmp_path / "yaml.docx"
+    loaded = load_profile(profile_path)
+    assert loaded.template == "house.docx"
+    assert loaded.template_base == profile_path.resolve().parent
+    restyle_docx(source, via_yaml, profile_path, force=True)
+    yaml_body = next(item for item in resolved_paragraph_styles(via_yaml) if item["text"] == "Keep me")
+    assert yaml_body["size_pt"] == 16
+    assert yaml_body["latin"] == "Times New Roman"
+    converted = tmp_path / "converted.docx"
+    result = convert(source, converted, style=profile_path, force=True)
+    assert result.execution_mode == "SOURCE_PATCH"
+    assert any(item.code == "style.template" for item in result.loss_report.diagnostics)
+    assert _texts(converted) == ("Keep me",)
+    kept = tmp_path / "kept.docx"
+    kept.write_bytes(b"SENTINEL")
+    missing = tmp_path / "missing.docx"
+    no_styles = tmp_path / "no-styles.docx"
+    _repack(template, no_styles, drop={"word/styles.xml"})
+    bad_styles = tmp_path / "bad-styles.docx"
+    _repack(template, bad_styles, replace={"word/styles.xml": b"<styles"})
+    for profile in (
+        {"schema": "docforge.style.v1", "template": "missing-template.docx", "roles": {"body": {"word_style": "Normal"}}},
+        {"schema": "docforge.style.v1", "template": str(missing), "roles": {"body": {"word_style": "Normal"}}},
+        {"schema": "docforge.style.v1", "template": str(_broken_template(tmp_path / "broken.docx")), "roles": {"body": {"word_style": "Normal"}}},
+        {"schema": "docforge.style.v1", "template": str(no_styles), "roles": {"body": {"word_style": "Normal"}}},
+        {"schema": "docforge.style.v1", "template": str(bad_styles), "roles": {"body": {"word_style": "Normal"}}},
+    ):
+        with pytest.raises(ConversionError, match="template") as caught:
+            restyle_docx(source, kept, profile, force=True)
+        assert caught.value.code == "STYLE_TEMPLATE"
+        assert kept.read_bytes() == b"SENTINEL"
 
 
 def test_docx_projection_keeps_body_order(tmp_path: Path) -> None:
@@ -657,12 +718,13 @@ def test_public_restyle_attaches_selected_style_and_reports_unused(tmp_path: Pat
 
     kept = tmp_path / "kept.docx"
     kept.write_bytes(b"SENTINEL")
-    with pytest.raises(ConversionError, match="template"):
+    with pytest.raises(ConversionError, match="template") as caught:
         restyle(source, kept, profile={
             "schema": "docforge.style.v1",
             "template": "template.docx",
             "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 12}}},
         }, force=True)
+    assert caught.value.code == "STYLE_TEMPLATE"
     assert kept.read_bytes() == b"SENTINEL"
 
 
@@ -684,6 +746,21 @@ def _page_size(path: Path) -> tuple[str | None, str | None]:
 
 def _texts(path: Path) -> tuple[str, ...]:
     return tuple(paragraph.text for paragraph in Document(path).paragraphs)
+
+
+def _house_template(path: Path) -> Path:
+    document = Document()
+    normal = document.styles["Normal"]
+    normal.font.name = "Times New Roman"
+    normal.font.size = Pt(16)
+    document.add_paragraph("Sample")
+    document.save(path)
+    return path
+
+
+def _broken_template(path: Path) -> Path:
+    path.write_bytes(b"this is not a word package")
+    return path
 
 
 def _fixture(path: Path) -> Path:
