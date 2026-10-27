@@ -16,7 +16,7 @@ from lxml import etree
 from docx.shared import Pt
 from PIL import Image
 
-from docforge import audit, convert, read, write
+from docforge import audit, convert, read, restyle, write
 from docforge.adapters.protocol import ConversionError, LossReport
 from docforge.cli import main as cli_main
 from docforge.semantic import BlockNode, SemanticDocument, text_node
@@ -359,6 +359,12 @@ def test_invalid_model_does_not_replace_output(tmp_path: Path) -> None:
         with pytest.raises(ConversionError, match="validation"):
             write(document, destination, force=True)
         assert destination.read_bytes() == b"SENTINEL-INVALID"
+    for name in ("absent.md", "absent.tex"):
+        destination = tmp_path / "missing" / name
+        with pytest.raises(ConversionError, match="validation"):
+            write(document, destination, force=True)
+        assert not destination.exists()
+        assert not destination.parent.exists()
 
 
 def test_audit_resolves_images_headers_and_relative_targets(tmp_path: Path) -> None:
@@ -413,6 +419,92 @@ def test_audit_resolves_images_headers_and_relative_targets(tmp_path: Path) -> N
     assert any(item.code == "docx.header_footer" for item in header_report.diagnostics)
 
 
+def test_audit_package_relationships_and_encoded_targets(tmp_path: Path) -> None:
+    png = _png(tmp_path / "dot.png")
+    document = Document()
+    document.add_paragraph("See")
+    document.add_picture(str(png))
+    header = document.sections[0].header
+    header.is_linked_to_previous = False
+    header.paragraphs[0].text = "Running head"
+    source = tmp_path / "picture.docx"
+    document.save(source)
+    media = next(name for name in zipfile.ZipFile(source).namelist() if name.startswith("word/media/"))
+    media_name = Path(media).name
+
+    package_absolute = tmp_path / "package-absolute.docx"
+    _prefix_relationship_targets(source, package_absolute, "_rels/.rels")
+    assert audit(package_absolute).ok
+
+    missing_core = tmp_path / "missing-core.docx"
+    _repack(source, missing_core, drop={"docProps/core.xml"})
+    core_report = audit(missing_core)
+    assert not core_report.ok
+    assert any(item.code == "docx.missing_target" and item.details.get("owner") == "[package]" for item in core_report.diagnostics)
+
+    encoded = tmp_path / "encoded.docx"
+    _retarget_media(source, encoded, part_name="image 1.png", target="media/image%201.png")
+    assert audit(encoded).ok
+
+    swapped = tmp_path / "case.docx"
+    _retarget_media(source, swapped, part_name=media_name, target=f"media/{media_name.swapcase()}")
+    assert audit(swapped).ok
+
+    dotted = tmp_path / "dotted.docx"
+    _retarget_media(source, dotted, part_name=media_name, target=f"media/../media/{media_name}")
+    assert audit(dotted).ok
+
+    header_media = tmp_path / "header-media.docx"
+    _repack(source, header_media, replace={
+        "word/_rels/header1.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"'
+            f' Target="media/{media_name}"/>'
+            "</Relationships>"
+        ).encode("utf-8"),
+    })
+    assert audit(header_media).ok
+
+    escaped = tmp_path / "escaped.docx"
+    _retarget_media(source, escaped, part_name=media_name, target="../../outside.png")
+    assert not audit(escaped).ok
+
+    empty_target = tmp_path / "empty-target.docx"
+    _add_relationship(source, empty_target, 'Id="rIdEmpty" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target=""')
+    assert not audit(empty_target).ok
+
+    linked = tmp_path / "linked.docx"
+    _rename_blip_attribute(source, linked, "link")
+    assert audit(linked).ok
+
+    dangling_link = tmp_path / "dangling-link.docx"
+    _rename_blip_attribute(source, dangling_link, "link", value="rIdMissing")
+    link_report = audit(dangling_link)
+    assert not link_report.ok
+    assert any(item.code == "docx.dangling_relationship" for item in link_report.diagnostics)
+
+    diagram = tmp_path / "diagram.docx"
+    _add_relationship_attribute(source, diagram, "dm", "rIdMissing")
+    diagram_report = audit(diagram)
+    assert not diagram_report.ok
+    assert any(item.code == "docx.dangling_relationship" for item in diagram_report.diagnostics)
+
+    strict = tmp_path / "strict.docx"
+    _add_relationship_attribute(
+        source, strict, "embed", "rIdMissing",
+        namespace="http://purl.oclc.org/ooxml/officeDocument/relationships",
+    )
+    assert not audit(strict).ok
+
+    office = tmp_path / "office.docx"
+    _add_relationship_attribute(
+        source, office, "relid", "rIdMissing",
+        namespace="urn:schemas-microsoft-com:office:office",
+    )
+    assert not audit(office).ok
+
+
 def test_restyle_audit_failure_keeps_existing_output(tmp_path: Path) -> None:
     source = tmp_path / "picture.docx"
     document = Document()
@@ -447,11 +539,15 @@ def test_markdown_latex_escapes_links_images_and_copies_media(tmp_path: Path) ->
     text = output.read_text(encoding="utf-8")
     assert "\\usepackage{graphicx}" in text
     assert "\\usepackage{hyperref}" in text
+    assert "\\usepackage{textcomp}" in text
+    assert text.index("\\usepackage{graphicx}") < text.index("\\usepackage{hyperref}")
     assert "\\href{https://example.com}{site}" in text
     assert "\\includegraphics{plot.png}" in text
     assert r"\{" in text and r"\}" in text and r"\$" in text
+    assert r"\&" in text and r"\%" in text and r"\#" in text and r"\_" in text
     assert r"\textasciitilde{}" in text and r"\textasciicircum{}" in text
     assert r"\textbackslash{}" in text
+    assert str(tmp_path) not in text
     assert (output_dir / "plot.png").read_bytes() == png.read_bytes()
     engine = shutil.which("pdflatex") or shutil.which("lualatex") or shutil.which("xelatex")
     if engine:
@@ -460,6 +556,114 @@ def test_markdown_latex_escapes_links_images_and_copies_media(tmp_path: Path) ->
             cwd=output_dir, capture_output=True, text=True, timeout=120, check=False,
         )
         assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
+
+
+def test_markdown_latex_rebases_media_outside_the_source_tree(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    png = _png(shared / "plot.png")
+    source_dir = tmp_path / "chapter"
+    source_dir.mkdir()
+    nested_dir = source_dir / "figs"
+    nested_dir.mkdir()
+    nested = _png(nested_dir / "nested.png")
+    source = source_dir / "sample.md"
+    source.write_text(
+        "See [site](https://example.com) and symbols { } $ ~ ^.\n\n"
+        "![Plot](../shared/plot.png)\n\n"
+        "![Nested](figs/nested.png)\n",
+        encoding="utf-8",
+    )
+    loaded = read(source)
+    assert str(tmp_path) not in str(loaded.document.to_dict())
+    output = tmp_path / "build" / "sample.tex"
+    convert(source, output, force=True)
+    text = output.read_text(encoding="utf-8")
+    assert "\\includegraphics{plot.png}" in text
+    assert "\\includegraphics{figs/nested.png}" in text
+    assert ".." not in text
+    assert str(tmp_path) not in text
+    assert (output.parent / "plot.png").read_bytes() == png.read_bytes()
+    assert (output.parent / "figs" / "nested.png").read_bytes() == nested.read_bytes()
+    engine = shutil.which("pdflatex") or shutil.which("lualatex") or shutil.which("xelatex")
+    if engine:
+        completed = subprocess.run(
+            [engine, "-interaction=nonstopmode", "-halt-on-error", output.name],
+            cwd=output.parent, capture_output=True, text=True, timeout=120, check=False,
+        )
+        assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
+
+
+def test_missing_figure_does_not_publish_export(tmp_path: Path) -> None:
+    source_dir = tmp_path / "in"
+    source_dir.mkdir()
+    png = _png(source_dir / "plot.png")
+    source = source_dir / "sample.md"
+    source.write_text("![Plot](plot.png)\n", encoding="utf-8")
+    loaded = read(source)
+    edited = replace(
+        loaded,
+        document=replace(loaded.document, blocks=loaded.document.blocks + (
+            BlockNode("note", "paragraph", inlines=(text_node("Note"),)),
+        )),
+    )
+    png.unlink()
+    for name in ("sample.md", "sample.tex"):
+        destination = tmp_path / "out" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"SENTINEL")
+        sibling = destination.parent / "plot.png"
+        sibling.write_bytes(b"KEEP")
+        with pytest.raises(ConversionError, match="audit"):
+            write(edited, destination, force=True)
+        assert destination.read_bytes() == b"SENTINEL"
+        assert sibling.read_bytes() == b"KEEP"
+
+
+def test_public_restyle_attaches_selected_style_and_reports_unused(tmp_path: Path) -> None:
+    source = _fixture(tmp_path / "styled.docx")
+    unused_output = tmp_path / "unused.docx"
+    unused = restyle(source, unused_output, profile={
+        "schema": "docforge.style.v1",
+        "roles": {"missing": {"word_style": "NotAStyle", "font": {"size_pt": 12}}},
+        "policy": {"missing_style": "create"},
+    }, force=True)
+    assert any(item.code == "style.unused" and item.details.get("role") == "missing" for item in unused.loss_report.diagnostics)
+    assert not any(item.code == "style.applied" for item in unused.loss_report.diagnostics)
+    assert all(item["style_id"] != "NotAStyle" for item in resolved_paragraph_styles(unused_output))
+    assert _texts(source) == _texts(unused_output)
+
+    selected_output = tmp_path / "selected.docx"
+    selected = restyle(source, selected_output, profile={
+        "schema": "docforge.style.v1",
+        "roles": {
+            "pullquote": {
+                "word_style": "PullQuote",
+                "select": "Normal",
+                "font": {"size_pt": 13, "latin": "Georgia"},
+            }
+        },
+        "policy": {"missing_style": "create", "direct_formatting": "clear_conflicting"},
+    }, force=True)
+    assert any(item.code == "style.applied" and item.details.get("role") == "pullquote" for item in selected.loss_report.diagnostics)
+    rows = resolved_paragraph_styles(selected_output)
+    body = next(item for item in rows if str(item["text"]).startswith("Body"))
+    caption = next(item for item in rows if item["text"] == "Caption text")
+    assert body["style_id"] == "PullQuote"
+    assert body["size_pt"] == 13
+    assert body["latin"] == "Georgia"
+    assert caption["style_id"] != "PullQuote"
+    assert _texts(source) == _texts(selected_output)
+
+    kept = tmp_path / "kept.docx"
+    kept.write_bytes(b"SENTINEL")
+    with pytest.raises(ConversionError, match="template"):
+        restyle(source, kept, profile={
+            "schema": "docforge.style.v1",
+            "template": "template.docx",
+            "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 12}}},
+        }, force=True)
+    assert kept.read_bytes() == b"SENTINEL"
 
 
 def _docx_view(path: Path) -> list[tuple[str, list[tuple[str, bool, bool]]]]:
@@ -553,6 +757,77 @@ def _absolutize_media_targets(source: Path, dest: Path) -> None:
             item.set("Target", "/word/" + target.removeprefix("./"))
     _repack(source, dest, replace={
         "word/_rels/document.xml.rels": etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
+    })
+
+
+def _prefix_relationship_targets(source: Path, dest: Path, rels_name: str) -> None:
+    with zipfile.ZipFile(source) as package:
+        root = etree.fromstring(package.read(rels_name))
+    for item in root.findall(f"{{{_PKG_REL}}}Relationship"):
+        target = item.get("Target") or ""
+        mode = (item.get("TargetMode") or "").casefold()
+        if mode == "external" or not target or target.startswith(("/", "#")) or "://" in target:
+            continue
+        item.set("Target", "/" + target)
+    _repack(source, dest, replace={
+        rels_name: etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
+    })
+
+
+def _retarget_media(source: Path, dest: Path, *, part_name: str, target: str) -> None:
+    with zipfile.ZipFile(source) as package:
+        payloads = {name: package.read(name) for name in package.namelist()}
+    media = next(name for name in payloads if name.startswith("word/media/") and not name.endswith("/"))
+    renamed = str(Path(media).with_name(part_name)).replace("\\", "/")
+    payloads[renamed] = payloads.pop(media)
+    rels_name = "word/_rels/document.xml.rels"
+    root = etree.fromstring(payloads[rels_name])
+    for item in root.findall(f"{{{_PKG_REL}}}Relationship"):
+        current = item.get("Target") or ""
+        if "media/" in current.replace("\\", "/"):
+            item.set("Target", target)
+    payloads[rels_name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+    with zipfile.ZipFile(dest, "w") as outgoing:
+        for name, payload in payloads.items():
+            outgoing.writestr(name, payload)
+
+
+def _add_relationship(source: Path, dest: Path, attributes: str) -> None:
+    with zipfile.ZipFile(source) as package:
+        root = etree.fromstring(package.read("word/_rels/document.xml.rels"))
+    root.append(etree.fromstring(
+        f'<Relationship xmlns="{_PKG_REL}" {attributes}/>'
+    ))
+    _repack(source, dest, replace={
+        "word/_rels/document.xml.rels": etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
+    })
+
+
+def _rename_blip_attribute(source: Path, dest: Path, local_name: str, *, value: str | None = None) -> None:
+    with zipfile.ZipFile(source) as package:
+        root = etree.fromstring(package.read("word/document.xml"))
+    for blip in root.xpath(".//a:blip", namespaces=_DRAWING_NS):
+        current = blip.get(f"{{{_DRAWING_NS['r']}}}embed")
+        if not current:
+            continue
+        del blip.attrib[f"{{{_DRAWING_NS['r']}}}embed"]
+        blip.set(f"{{{_DRAWING_NS['r']}}}{local_name}", value or current)
+    _repack(source, dest, replace={
+        "word/document.xml": etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
+    })
+
+
+def _add_relationship_attribute(source: Path, dest: Path, local_name: str, value: str, *, namespace: str | None = None) -> None:
+    namespace = namespace or _DRAWING_NS["r"]
+    with zipfile.ZipFile(source) as package:
+        root = etree.fromstring(package.read("word/document.xml"))
+    body = root.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
+    assert body is not None
+    marker = etree.Element("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p")
+    marker.set(f"{{{namespace}}}{local_name}", value)
+    body.append(marker)
+    _repack(source, dest, replace={
+        "word/document.xml": etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
     })
 
 

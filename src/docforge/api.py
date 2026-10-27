@@ -176,7 +176,19 @@ def restyle(
 
     policy = default_loss_policy("preserve", loss_policy)  # type: ignore[arg-type]
     summary = restyle_docx(Path(source), Path(output), profile, force=force, preserve_content=preserve_content)  # type: ignore[arg-type]
-    report = LossReport(policy, (finding("info", "style.applied", "style profile applied to the source package"),))
+    diagnostics = [
+        finding("info", "style.applied", "style role applied to matching paragraphs", role=str(role))
+        for role in summary.get("roles") or []
+    ]
+    diagnostics.extend(
+        finding("info", "style.unused", "style role matched no paragraphs", role=str(role))
+        for role in summary.get("unused") or []
+    )
+    if summary.get("page"):
+        diagnostics.append(finding("info", "style.page", "page setup applied"))
+    if not diagnostics:
+        diagnostics.append(finding("info", "style.unused", "style profile matched no paragraphs"))
+    report = LossReport(policy, tuple(diagnostics))
     validation = audit(output)
     if not validation.ok:
         raise ConversionError("restyle audit failed", code="AUDIT_FAILED", diagnostics=validation.diagnostics)

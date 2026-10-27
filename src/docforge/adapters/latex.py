@@ -14,7 +14,7 @@ from pathlib import Path
 from ..pipeline.models import Diagnostic
 from ..semantic import BlockNode, DocumentMetadata, Provenance, Reference, SemanticDocument
 from .inlines import citation_keys, parse_latex_inlines
-from .markdown import copy_figure_files, render_latex
+from .markdown import publish_text_export, render_latex
 from .protocol import (
     FormatCapabilities,
     LossReport,
@@ -27,7 +27,6 @@ from .protocol import (
     ensure_publishable,
     export_losses,
     finding,
-    publish_bytes,
     require_valid_document,
 )
 
@@ -92,17 +91,16 @@ class LatexWriter:
         return WritePlan("latex", "REBUILD", document, source, options, LossReport(options.loss_policy, diagnostics, dropped))
 
     def write(self, plan: WritePlan, output: Path) -> WriteResult:
-        from ..pipeline.models import ValidationReport
-
         output = Path(output)
         require_valid_document(plan.document)
         ensure_publishable(plan.loss_report)
         if output.exists() and not plan.options.force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
-        text = render_latex(plan.document)
-        copy_figure_files(plan.document, plan.origin, output)
-        publish_bytes(output, text.encode("utf-8"), force=plan.options.force)
-        return WriteResult(output, "REBUILD", plan.loss_report, ValidationReport("pass"))
+        text = render_latex(plan.document, origin=plan.origin)
+        report = publish_text_export(
+            output, text, plan.document, plan.origin, force=plan.options.force, kind="latex",
+        )
+        return WriteResult(output, "REBUILD", plan.loss_report, report)
 
 
 class _Counter:

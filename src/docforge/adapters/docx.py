@@ -11,6 +11,7 @@ import hashlib
 import re
 import zipfile
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 
 from lxml import etree
 
@@ -21,6 +22,8 @@ from .protocol import FormatCapabilities, ReadOptions, ReadResult, SourceContext
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+STRICT_R = "http://purl.oclc.org/ooxml/officeDocument/relationships"
+OFFICE = "urn:schemas-microsoft-com:office:office"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
@@ -28,7 +31,7 @@ V = "urn:schemas-microsoft-com:vml"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"w": W, "r": R, "pr": REL, "a": A, "wp": WP, "v": V, "m": M, "mc": MC}
-_REL_ATTRS = frozenset({"id", "embed", "link"})
+_REL_NAMESPACES = frozenset({R, STRICT_R})
 _SKIP_BODY = frozenset({
     "sectPr", "bookmarkStart", "bookmarkEnd", "proofErr", "permStart", "permEnd",
     "commentRangeStart", "commentRangeEnd", "moveFromRangeStart", "moveFromRangeEnd",
@@ -495,16 +498,18 @@ def audit_docx(path: Path) -> ValidationReport:
 def resolve_opc_target(source_part: str, target: str) -> str | None:
     """Resolve an OPC relationship target against the part that owns it.
 
-    ``None`` means the target is external or only a fragment. An empty string
-    means the relative path escaped the package.
+    Targets are percent-decoded, then ``.`` and ``..`` are normalized. A
+    leading slash is package-absolute. ``None`` means the target is an
+    external URI or only a fragment. An empty string means the target is
+    empty or the relative path escaped the package.
     """
 
-    raw = target.replace("\\", "/").strip()
-    if not raw or raw.startswith("#") or "://" in raw:
+    raw = unquote(target).replace("\\", "/").strip()
+    if "://" in raw or raw.startswith("#"):
         return None
     body = raw.split("#", 1)[0]
     if not body:
-        return None
+        return ""
     absolute = body.startswith("/")
     if absolute:
         stack: list[str] = []
@@ -567,6 +572,25 @@ def _read_relationships(payload: bytes) -> dict[str, tuple[str, str, bool]]:
     return relationships
 
 
+def _part_present(names: set[str], resolved: str) -> bool:
+    """OPC part names compare case-insensitively."""
+
+    if not resolved:
+        return False
+    if resolved in names:
+        return True
+    folded = resolved.casefold()
+    return any(name.casefold() == folded for name in names)
+
+
+def _is_relationship_attribute(attribute: etree.QName) -> bool:
+    """Relationship-valued attributes, including embeds, links, and diagram ids."""
+
+    if attribute.namespace in _REL_NAMESPACES:
+        return True
+    return attribute.namespace == OFFICE and attribute.localname == "relid"
+
+
 def _missing_targets(relationships: dict[str, tuple[str, str, bool]], owner: str, names: set[str]) -> list[Diagnostic]:
     findings: list[Diagnostic] = []
     for target, rel_type, external in relationships.values():
@@ -575,7 +599,7 @@ def _missing_targets(relationships: dict[str, tuple[str, str, bool]], owner: str
         resolved = resolve_opc_target(owner, target)
         if resolved is None:
             continue
-        if resolved not in names:
+        if not _part_present(names, resolved):
             findings.append(finding(
                 "error", _relationship_code(rel_type),
                 "relationship target is missing from the package",
@@ -592,7 +616,7 @@ def _dangling_references(payload: bytes, relationships: dict[str, tuple[str, str
         local = etree.QName(node).localname
         for attr, value in node.attrib.items():
             attribute = etree.QName(attr)
-            if attribute.namespace != R or attribute.localname not in _REL_ATTRS or not value:
+            if not _is_relationship_attribute(attribute) or not value:
                 continue
             if value in external:
                 continue
