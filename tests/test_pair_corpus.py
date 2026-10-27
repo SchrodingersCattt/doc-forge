@@ -153,6 +153,47 @@ def _codes(diagnostics) -> set[str]:
     return {item.code for item in diagnostics}
 
 
+_NESTED_DISPLAY = re.compile(
+    r"\\begin\{equation\*?\}(?:\s|%|\n)*\\begin\{(?:align|gather|multline|flalign|eqnarray)\*?\}"
+)
+
+
+def _assert_compilable_display_math(tex: str) -> None:
+    assert _NESTED_DISPLAY.search(tex) is None
+    assert r"\begin{align}" in tex
+    assert r"\usepackage{amsmath}" in tex
+
+
+def _tex_engine() -> str | None:
+    for command in ("pdflatex", "latexmk"):
+        if shutil.which(command):
+            return command
+    return None
+
+
+def _compile_tex(path: Path) -> None:
+    engine = _tex_engine()
+    if engine is None:
+        pytest.skip("pdflatex or latexmk is required to compile the TeX fixture. This skip is not a pass.")
+    path = path.resolve()
+    if engine == "latexmk":
+        command = ["latexmk", "-pdf", "-interaction=nonstopmode", "-halt-on-error", path.name]
+    else:
+        command = [engine, "-interaction=nonstopmode", "-halt-on-error", path.name]
+    completed = subprocess.run(
+        command,
+        cwd=path.parent,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        log = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        raise AssertionError(f"{engine} failed for {path.name}:\n{log[-2500:]}")
+
+
 def test_semantic_sources_share_the_supported_view() -> None:
     markdown = read(ROOT / "semantic.md")
     latex = read(ROOT / "semantic.tex")
@@ -179,7 +220,9 @@ def test_markdown_latex_round_trip_api_and_cli(tmp_path: Path) -> None:
     first = convert(source, tex, force=True)
     second = convert(tex, back, force=True)
     assert first.execution_mode == second.execution_mode == "REBUILD"
-    assert tex.read_text(encoding="utf-8") == (ROOT / "semantic.tex").read_text(encoding="utf-8")
+    generated = tex.read_text(encoding="utf-8")
+    assert generated == (ROOT / "semantic.tex").read_text(encoding="utf-8")
+    _assert_compilable_display_math(generated)
     assert read(back).document.projection() == read(source).document.projection()
     assert (tmp_path / "media" / "mark.png").read_bytes() == MARK.read_bytes()
     assert source.read_bytes() == before
@@ -197,9 +240,26 @@ def test_markdown_latex_round_trip_api_and_cli(tmp_path: Path) -> None:
     convert(origin, markdown, force=True)
     convert(markdown, restored, force=True)
     assert read(restored).document.projection() == read(origin).document.projection()
+    _assert_compilable_display_math(restored.read_text(encoding="utf-8"))
     assert supported_view(read(markdown).document) == supported_view(read(origin).document)
     assert origin.read_bytes() == origin_before
     assert cli_main(["convert", str(origin), str(tmp_path / "cli-from-tex.md"), "--force"]) == 0
+
+
+def test_markdown_tex_compiles_when_engine_present(tmp_path: Path) -> None:
+    if _tex_engine() is None:
+        pytest.skip("pdflatex or latexmk is required to compile the TeX fixture. This skip is not a pass.")
+    generated = tmp_path / "from-md.tex"
+    convert(ROOT / "semantic.md", generated, force=True)
+    _compile_tex(generated)
+    restored_dir = tmp_path / "roundtrip"
+    restored_dir.mkdir()
+    markdown = restored_dir / "back.md"
+    restored = restored_dir / "restored.tex"
+    convert(generated, markdown, force=True)
+    convert(markdown, restored, force=True)
+    _assert_compilable_display_math(restored.read_text(encoding="utf-8"))
+    _compile_tex(restored)
 
 
 def test_markdown_to_docx_projection_api_and_cli(tmp_path: Path) -> None:

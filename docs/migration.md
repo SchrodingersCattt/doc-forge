@@ -57,7 +57,7 @@ Synthetic fixtures live in `tests/fixtures/pairs/`. `pytest tests/test_pair_corp
 
 `loss_policy=error` refuses a missing image (`resource.missing`), an unknown TeX command or environment (`latex.unsupported_command`, `latex.unsupported_environment`), and a DOCX text box (`docx.textboxes`). The destination is left untouched and the CLI exits 2. Sources are not modified.
 
-A TeX `tabular` column specification is not a cell. `\label` and `\ref` round-trip in the semantic inline codec. A `\label` inside `figure` or `table` is reported as `latex.float_label` and is not a semantic node. The legacy TeX renderer still resolves those labels when the loss policy is `warn`.
+A TeX `tabular` column specification is not a cell. Display `align` is written as `align` with `amsmath`, not nested inside `equation`. `pdflatex` or `latexmk` compiles that fixture when one is installed; a missing engine skips the compile check, and that skip is not a pass. `\label` and `\ref` round-trip in the semantic inline codec. A `\label` inside `figure` or `table` is reported as `latex.float_label` and is not a semantic node. The legacy TeX renderer still resolves those labels when the loss policy is `warn`.
 
 Legacy Markdown `#` is Word Heading 2. A TeX `\section` is Heading 1. Legacy lists are paragraphs. The DOCX reader does not declare list or citation nodes. OMML is `docx.omml`, not TeX.
 

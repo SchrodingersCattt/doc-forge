@@ -14,7 +14,7 @@ from pathlib import Path
 from ..pipeline.models import Diagnostic
 from ..semantic import BlockNode, DocumentMetadata, Provenance, Reference, SemanticDocument
 from .inlines import citation_keys, parse_latex_inlines
-from .markdown import publish_text_export, render_latex
+from .markdown import publish_text_export, render_latex, semantic_display_source
 from .protocol import (
     FormatCapabilities,
     LossReport,
@@ -317,7 +317,11 @@ def _environment(env: str, body: str, filename: str, counter: _Counter, diagnost
         inlines = parse_latex_inlines(" ".join(body.split()), diagnostics=unknown)
         return [BlockNode(counter.next("b"), "quote", inlines=inlines, provenance=provenance)]
     if name in {"equation", "align"}:
-        return [BlockNode(counter.next("b"), "math", attrs=(("tex", body.strip()), ("display", "true")), provenance=provenance)]
+        return [BlockNode(
+            counter.next("b"), "math",
+            attrs=(("tex", semantic_display_source(env, body)), ("display", "true")),
+            provenance=provenance,
+        )]
     if name == "verbatim" or name == "lstlisting":
         return [BlockNode(counter.next("b"), "code", attrs=(("language", ""), ("code", body.strip("\n"))), provenance=provenance)]
     if name == "tabular":
