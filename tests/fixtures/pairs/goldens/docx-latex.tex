@@ -1,0 +1,48 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage{geometry}
+\geometry{a4paper,top=2.54cm,bottom=2.54cm,left=3.17cm,right=3.17cm}
+\usepackage{setspace}
+\setstretch{1.5}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage[normalem]{ulem}
+\usepackage{soul}
+\usepackage{hyperref}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+
+\begin{document}
+
+\section{Methods}
+
+Water is \textbf{bold} and \emph{italic} with H\textsubscript{2}O.
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 2\tabcolsep) * \real{0.5000}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 2\tabcolsep) * \real{0.5000}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+ion
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+charge
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+Na & +1 \\
+\end{longtable}
+
+\includegraphics{image1.png}
+
+Mark
+
+\end{document}

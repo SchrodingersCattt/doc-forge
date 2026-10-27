@@ -227,6 +227,8 @@ def _parse_body(text: str, filename: str, counter: _Counter, diagnostics: list[D
             if command == "begin":
                 flush()
                 env, after = _argument_after(text, index + len("\\begin"))
+                if env.rstrip("*") == "tabular":
+                    after = _skip_tabular_spec(text, after)
                 body, end = _environment_body(text, after, env)
                 index = end
                 blocks.extend(_environment(env, body, filename, counter, diagnostics, references))
@@ -259,6 +261,21 @@ def _argument_after(text: str, index: int) -> tuple[str, int]:
     if index < len(text) and text[index] == "{":
         return _balanced(text, index)
     return "", index
+
+
+def _skip_tabular_spec(text: str, index: int) -> int:
+    """Skip the optional position and the column specification after ``\\begin{tabular}``."""
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == "[":
+        end = text.find("]", index + 1)
+        index = len(text) if end < 0 else end + 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+    if index < len(text) and text[index] == "{":
+        _spec, index = _balanced(text, index)
+    return index
 
 
 def _environment_body(text: str, index: int, env: str) -> tuple[str, int]:
@@ -306,10 +323,16 @@ def _environment(env: str, body: str, filename: str, counter: _Counter, diagnost
     if name == "tabular":
         return [_tabular(body, provenance, counter)]
     if name == "figure":
+        _note_float_labels(body, diagnostics)
         return [_figure(body, provenance, counter, diagnostics)]
     if name == "table":
-        opened = re.search(r"\\begin\{tabular\}\{[^}]*\}", body)
-        inner = _environment_body(body, opened.end(), "tabular")[0] if opened else body
+        _note_float_labels(body, diagnostics)
+        opened = re.search(r"\\begin\{tabular\*?\}", body)
+        if opened:
+            spec_end = _skip_tabular_spec(body, opened.end())
+            inner = _environment_body(body, spec_end, "tabular")[0]
+        else:
+            inner = body
         tabular = _tabular(inner, provenance, counter)
         caption = _command_arg(body, "caption")
         children = [tabular]
@@ -335,6 +358,19 @@ def _tabular(body: str, provenance: Provenance, counter: _Counter) -> BlockNode:
             cells.append(BlockNode(counter.next("b"), "table_cell", inlines=parse_latex_inlines(cell.strip()), provenance=provenance))
         rows.append(BlockNode(counter.next("b"), "table_row", children=tuple(cells), provenance=provenance))
     return BlockNode(counter.next("b"), "table", children=tuple(rows), provenance=provenance)
+
+
+def _note_float_labels(body: str, diagnostics: list[Diagnostic]) -> None:
+    """Float labels stay in the legacy TeX renderer. The semantic tree does not model them yet."""
+
+    for label in re.findall(r"\\label\{([^}]+)\}", body):
+        diagnostics.append(finding(
+            "warning",
+            "latex.float_label",
+            "label inside a float is not a semantic node",
+            category="loss",
+            label=label,
+        ))
 
 
 def _figure(body: str, provenance: Provenance, counter: _Counter, diagnostics: list[Diagnostic]) -> BlockNode:

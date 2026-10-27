@@ -1,0 +1,12 @@
+schema: docforge.style.v1
+roles:
+  body:
+    word_style: Normal
+    font:
+      latin: Times New Roman
+      size_pt: 14
+    paragraph:
+      alignment: justify
+policy:
+  missing_style: error
+  direct_formatting: clear_conflicting
