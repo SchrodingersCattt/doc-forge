@@ -8,9 +8,12 @@ supported subset back out.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
-from pathlib import Path
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from ..pipeline.models import Diagnostic
 from ..semantic import (
@@ -25,6 +28,7 @@ from ..semantic import (
 )
 from .inlines import citation_keys, parse_markdown_inlines, write_latex_inlines, write_markdown_inlines
 from .protocol import (
+    ConversionError,
     FormatCapabilities,
     ReadOptions,
     ReadResult,
@@ -35,7 +39,6 @@ from .protocol import (
     ensure_publishable,
     export_losses,
     finding,
-    publish_bytes,
     require_valid_document,
 )
 
@@ -126,40 +129,41 @@ class MarkdownWriter:
         )
 
     def write(self, plan: WritePlan, output: Path) -> WriteResult:
-        from ..pipeline.models import ValidationReport
-
         output = Path(output)
         require_valid_document(plan.document)
         ensure_publishable(plan.loss_report)
         if output.exists() and not plan.options.force:
             raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
-        text = render_markdown(plan.document)
-        copy_figure_files(plan.document, plan.origin, output)
-        publish_bytes(output, text.encode("utf-8"), force=plan.options.force)
-        return WriteResult(output, "REBUILD", plan.loss_report, ValidationReport("pass"))
+        text = render_markdown(plan.document, origin=plan.origin)
+        report = publish_text_export(
+            output, text, plan.document, plan.origin, force=plan.options.force, kind="markdown",
+        )
+        return WriteResult(output, "REBUILD", plan.loss_report, report)
 
 
-def render_markdown(document: SemanticDocument) -> str:
+def render_markdown(document: SemanticDocument, *, origin: Path | None = None) -> str:
+    paths = _figure_output_paths(document, origin)
     lines: list[str] = []
     for block in document.blocks:
-        rendered = _render_block(block)
+        rendered = _render_block(block, paths)
         if rendered:
             lines.append(rendered)
     return "\n\n".join(lines).rstrip() + "\n"
 
 
-def render_latex(document: SemanticDocument) -> str:
+def render_latex(document: SemanticDocument, *, origin: Path | None = None) -> str:
+    paths = _figure_output_paths(document, origin)
     body: list[str] = []
     if document.metadata.title:
         body.append("\\title{" + write_latex_inlines((text_node(document.metadata.title),)) + "}")
         body.append("\\maketitle")
     for block in document.blocks:
-        rendered = _render_latex_block(block)
+        rendered = _render_latex_block(block, paths)
         if rendered:
             body.append(rendered)
     rendered_body = "\n\n".join(body)
     preamble = ["\\documentclass{article}"]
-    if "textasciitilde" in rendered_body or "textasciicircum" in rendered_body:
+    if any(token in rendered_body for token in ("textasciitilde", "textasciicircum", "textbackslash")):
         preamble.append("\\usepackage{textcomp}")
     if "\\includegraphics" in rendered_body:
         preamble.append("\\usepackage{graphicx}")
@@ -168,41 +172,218 @@ def render_latex(document: SemanticDocument) -> str:
     return "\n".join([*preamble, "\\begin{document}", "", rendered_body, "\\end{document}", ""])
 
 
-def copy_figure_files(document: SemanticDocument, origin: Path | None, output: Path) -> None:
-    """Copy figure files next to ``output``, keeping the stored relative path."""
+@dataclass(frozen=True)
+class _MediaPlacement:
+    block_id: str
+    stored: str
+    output_rel: str
+    source: Path | None
 
-    if origin is None:
-        return
-    source_root = Path(origin).resolve().parent
-    output_root = Path(output).resolve().parent
+
+def plan_media(document: SemanticDocument, origin: Path | None) -> tuple[_MediaPlacement, ...]:
+    """Map each figure to a portable output path and the file that should be copied."""
+
+    used: set[str] = set()
+    placements: list[_MediaPlacement] = []
     for block in document.walk():
         if block.kind != "figure":
             continue
-        relative = block.attr("path")
-        if not relative:
-            resource = document.resource(block.attr("resource"))
-            relative = resource.path if resource is not None else ""
-        if not relative or relative.startswith(("/", "\\")) or ".." in Path(relative).parts:
+        stored = _stored_figure_path(document, block)
+        portable = _dedupe_rel(_portable_media_rel(stored), used)
+        placements.append(_MediaPlacement(block.id, stored, portable, _media_source(origin, stored)))
+    return tuple(placements)
+
+
+def publish_text_export(
+    output: Path,
+    text: str,
+    document: SemanticDocument,
+    origin: Path | None,
+    *,
+    force: bool,
+    kind: str,
+):
+    """Stage text and figures, audit the candidate, and publish only on success."""
+
+    output = Path(output)
+    placements = plan_media(document, origin)
+    files: dict[str, bytes] = {output.name: text.encode("utf-8")}
+    for item in placements:
+        if item.source is None or not item.output_rel:
             continue
-        source = (source_root / relative).resolve()
-        try:
-            source.relative_to(source_root)
-        except ValueError:
+        files[item.output_rel] = item.source.read_bytes()
+    report = _audit_text_export(files, output.name, kind=kind, placements=placements, origin=origin)
+    if not report.ok:
+        raise ConversionError("export audit failed", code="AUDIT_FAILED", diagnostics=report.diagnostics)
+    _publish_files(output, files, force=force)
+    return report
+
+
+def copy_figure_files(document: SemanticDocument, origin: Path | None, output: Path) -> None:
+    """Copy figure files next to ``output`` using portable relative paths."""
+
+    if origin is None:
+        return
+    output_root = Path(output).resolve().parent
+    for item in plan_media(document, origin):
+        if item.source is None or not item.output_rel:
             continue
-        if not source.is_file():
-            continue
-        destination = (output_root / relative).resolve()
+        destination = (output_root / item.output_rel).resolve()
         try:
             destination.relative_to(output_root)
         except ValueError:
             continue
-        if destination == source:
+        if destination == item.source.resolve():
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        shutil.copyfile(item.source, destination)
 
 
-def _render_block(block: BlockNode) -> str:
+def _figure_output_paths(document: SemanticDocument, origin: Path | None) -> dict[str, str]:
+    return {item.block_id: item.output_rel for item in plan_media(document, origin)}
+
+
+def _stored_figure_path(document: SemanticDocument, block: BlockNode) -> str:
+    path = (block.attr("path") or "").replace("\\", "/").strip()
+    if path:
+        return path
+    resource = document.resource(block.attr("resource"))
+    if resource is None:
+        return ""
+    return (resource.path or "").replace("\\", "/").strip()
+
+
+def _portable_media_rel(stored: str) -> str:
+    if not stored or "://" in stored:
+        return ""
+    raw = stored.strip()
+    path = PurePosixPath(raw)
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+        return path.name
+    parts: list[str] = []
+    escaped = False
+    for piece in path.parts:
+        if piece in {"", "."}:
+            continue
+        if piece == "..":
+            if parts:
+                parts.pop()
+            else:
+                escaped = True
+            continue
+        parts.append(piece)
+    if escaped or not parts:
+        return path.name
+    return "/".join(parts)
+
+
+def _dedupe_rel(rel: str, used: set[str]) -> str:
+    if not rel:
+        return ""
+    if rel not in used:
+        used.add(rel)
+        return rel
+    path = PurePosixPath(rel)
+    parent = "" if str(path.parent) in {"", "."} else path.parent.as_posix()
+    suffix = path.suffix
+    stem = path.stem
+    number = 2
+    while True:
+        name = f"{stem}-{number}{suffix}"
+        candidate = f"{parent}/{name}" if parent else name
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        number += 1
+
+
+def _media_source(origin: Path | None, stored: str) -> Path | None:
+    if origin is None or not stored or "://" in stored:
+        return None
+    raw = stored.strip()
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+        candidate = Path(raw)
+    else:
+        candidate = (Path(origin).parent / raw).resolve()
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
+
+
+def _latex_filename(path: str) -> str:
+    if any(char in path for char in " %#&{}$~^\\"):
+        return "\\detokenize{" + path.replace("\\", "/") + "}"
+    return path
+
+
+def _audit_text_export(files: dict[str, bytes], output_name: str, *, kind: str, placements: tuple[_MediaPlacement, ...], origin: Path | None):
+    from ..pipeline.models import ValidationReport
+
+    diagnostics = []
+    try:
+        text = files.get(output_name, b"").decode("utf-8")
+    except UnicodeError:
+        return ValidationReport("fail", (finding("error", "export.encoding", "export is not valid UTF-8"),))
+    if kind == "latex":
+        if "\\documentclass" not in text or "\\begin{document}" not in text or "\\end{document}" not in text:
+            diagnostics.append(finding("error", "latex.structure", "generated LaTeX is missing a document wrapper"))
+        else:
+            preamble, _, body = text.partition("\\begin{document}")
+            if "\\includegraphics" in body and "\\usepackage{graphicx}" not in preamble:
+                diagnostics.append(finding("error", "latex.package", "graphicx is required for includegraphics"))
+            if "\\href{" in body and "\\usepackage{hyperref}" not in preamble:
+                diagnostics.append(finding("error", "latex.package", "hyperref is required for href"))
+            if any(token in body for token in ("\\textasciitilde", "\\textasciicircum", "\\textbackslash")) and "\\usepackage{textcomp}" not in preamble:
+                diagnostics.append(finding("error", "latex.package", "textcomp is required for escaped text symbols"))
+    if origin is not None:
+        for item in placements:
+            if not item.stored or "://" in item.stored:
+                continue
+            if item.source is None or not item.output_rel or item.output_rel not in files:
+                diagnostics.append(finding(
+                    "error", "export.missing_media",
+                    "figure file was not staged with the export",
+                    name=PurePosixPath(item.output_rel or item.stored).name,
+                ))
+    status = "fail" if any(item.severity == "error" for item in diagnostics) else "pass"
+    return ValidationReport(status, tuple(diagnostics), {"export": kind})
+
+
+def _publish_files(output: Path, files: dict[str, bytes], *, force: bool) -> None:
+    output = Path(output)
+    if output.exists() and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
+    root = output.parent
+    planned: list[tuple[Path, bytes]] = []
+    for rel, payload in files.items():
+        rel_path = PurePosixPath(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            raise ConversionError("export path escapes the output directory", code="PATH_ESCAPE")
+        destination = root.joinpath(*rel_path.parts)
+        if destination.exists() and not force:
+            raise FileExistsError(f"Output exists; pass --force to overwrite: {destination}")
+        planned.append((destination, payload))
+    root.mkdir(parents=True, exist_ok=True)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for destination, payload in planned:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.stem}-", suffix=destination.suffix, dir=destination.parent,
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
+            staged.append((temporary, destination))
+            temporary.write_bytes(payload)
+        for temporary, destination in staged:
+            os.replace(temporary, destination)
+    finally:
+        for temporary, _destination in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _render_block(block: BlockNode, paths: dict[str, str]) -> str:
     if block.kind == "heading":
         level = int(block.attr("level") or "1")
         return "#" * level + " " + write_markdown_inlines(block.inlines)
@@ -236,7 +417,7 @@ def _render_block(block: BlockNode) -> str:
         return "\n".join([rows[0], separator, *rows[1:]])
     if block.kind == "figure":
         resource = block.attr("resource")
-        path = block.attr("path")
+        path = paths.get(block.id, block.attr("path"))
         caption = ""
         for child in block.children:
             if child.kind == "caption":
@@ -251,7 +432,7 @@ def _render_block(block: BlockNode) -> str:
     return write_markdown_inlines(block.inlines)
 
 
-def _render_latex_block(block: BlockNode) -> str:
+def _render_latex_block(block: BlockNode, paths: dict[str, str]) -> str:
     if block.kind == "heading":
         level = block.attr("level") or "1"
         command = {"1": "section", "2": "subsection", "3": "subsubsection"}.get(level, "paragraph")
@@ -280,8 +461,11 @@ def _render_latex_block(block: BlockNode) -> str:
         for child in block.children:
             if child.kind == "caption":
                 caption = write_latex_inlines(child.inlines)
-        path = block.attr("path")
-        lines = ["\\begin{figure}", f"\\includegraphics{{{path}}}", f"\\caption{{{caption}}}", "\\end{figure}"]
+        path = paths.get(block.id) or block.attr("path")
+        lines = ["\\begin{figure}"]
+        if path:
+            lines.append("\\includegraphics{" + _latex_filename(path) + "}")
+        lines.extend((f"\\caption{{{caption}}}", "\\end{figure}"))
         return "\n".join(lines)
     if block.kind == "thematic_break":
         return r"\noindent\rule{\textwidth}{0.4pt}"
@@ -352,13 +536,14 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
         resource_id = "res" + counter.block()
         path = Path(block.path) if block.path else None
         relative = ""
+        portable = ""
         sha = ""
         media = "application/octet-stream"
         if path is not None and path.is_file():
-            try:
-                relative = path.resolve().relative_to(source.parent.resolve()).as_posix()
-            except ValueError:
-                relative = path.name
+            relative = os.path.relpath(path.resolve(), source.parent.resolve()).replace("\\", "/")
+            portable = _portable_media_rel(relative) or path.name
+            if relative.startswith(("/", "\\")) or (len(relative) > 1 and relative[1] == ":"):
+                relative = portable
                 diagnostics.append(finding(
                     "warning", "resource.path_reduced", "image path was reduced to its file name",
                     category="loss", name=path.name,
@@ -375,7 +560,7 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
             attrs=(("resource", resource_id), ("path", relative)),
             provenance=provenance,
         )
-        return figure, [ResourceDescriptor(resource_id, media, sha, relative)]
+        return figure, [ResourceDescriptor(resource_id, media, sha, portable)]
     diagnostics.append(finding(
         "warning", "markdown.unsupported_block", f"unsupported markdown block kind: {block.kind}",
         category="loss",

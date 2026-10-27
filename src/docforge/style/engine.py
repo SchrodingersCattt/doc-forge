@@ -59,12 +59,12 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
         matched = 0
         for paragraph in document.xpath(".//w:p", namespaces=NS):
             if role.select:
-                chosen = _paragraph_matches_select(paragraph, styles, role.select)
-                if chosen and style_id:
-                    _set_paragraph_style(paragraph, style_id)
-            else:
-                chosen = _paragraph_style(paragraph, styles) == style_id
-            if not chosen:
+                if not style_id or not _paragraph_matches_select(paragraph, styles, role.select):
+                    continue
+                _set_paragraph_style(paragraph, style_id)
+                if _paragraph_style(paragraph, styles) != style_id:
+                    continue
+            elif _paragraph_style(paragraph, styles) != style_id:
                 continue
             matched += 1
             _apply_direct(paragraph, role, loaded.policy.direct_formatting)
@@ -72,7 +72,7 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
             applied.append(role_name)
         else:
             unused.append(role_name)
-    _apply_page(document, loaded)
+    page_applied = _apply_page(document, loaded)
     after = _content_stream(document)
     if preserve_content and before != after:
         raise ConversionError("restyle changed document text", code="CONTENT_CHANGED")
@@ -103,6 +103,7 @@ def restyle_docx(source: Path, output: Path, profile: StyleProfile | Path | str,
         "execution_mode": "SOURCE_PATCH",
         "roles": applied,
         "unused": unused,
+        "page": page_applied,
         "content_unchanged": before == after,
     }
 
@@ -276,13 +277,15 @@ def _apply_direct(paragraph: etree._Element, role, policy: str) -> None:
                 properties.remove(fonts)
 
 
-def _apply_page(document: etree._Element, profile: StyleProfile) -> None:
+def _apply_page(document: etree._Element, profile: StyleProfile) -> bool:
     page = profile.page
     if not page.size and not page.margins_mm:
-        return
+        return False
     if page.size and page.size.upper() not in _PAGE_TWIPS:
         raise ConversionError(f"unsupported page size: {page.size}", code="STYLE_PAGE")
+    applied = False
     for section in document.xpath(".//w:sectPr", namespaces=NS):
+        applied = True
         if page.size:
             width, height = _PAGE_TWIPS[page.size.upper()]
             size = _child(section, "pgSz")
@@ -294,6 +297,7 @@ def _apply_page(document: etree._Element, profile: StyleProfile) -> None:
                 if side not in {"top", "bottom", "left", "right"}:
                     raise ConversionError(f"unsupported margin side: {side}", code="STYLE_PAGE")
                 margins.set(_q(side), str(int(round(float(value) * 56.6929133858))))
+    return applied
 
 
 def _paragraph_matches_select(paragraph: etree._Element, styles: etree._Element, select: str) -> bool:
