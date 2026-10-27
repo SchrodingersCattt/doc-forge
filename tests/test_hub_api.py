@@ -19,7 +19,7 @@ from PIL import Image
 from docforge import audit, convert, read, restyle, write
 from docforge.adapters.protocol import ConversionError, LossReport
 from docforge.cli import main as cli_main
-from docforge.semantic import BlockNode, SemanticDocument, text_node
+from docforge.semantic import BlockNode, InlineNode, SemanticDocument, text_node
 from docforge.style import load_profile, resolved_paragraph_styles, restyle_docx
 
 
@@ -376,14 +376,128 @@ def test_preserve_write_rejects_stale_and_edited_docx(tmp_path: Path) -> None:
     edited = replace(
         loaded,
         document=replace(loaded.document, blocks=loaded.document.blocks + (
-            BlockNode("extra", "paragraph", inlines=(text_node("Edited"),)),
+            BlockNode("extra", "opaque", attrs=(("element", "widget"),)),
         )),
     )
     edited_output = tmp_path / "edited.docx"
     edited_output.write_bytes(b"SENTINEL-EDITED")
-    with pytest.raises(ConversionError, match="preserve fidelity"):
+    with pytest.raises(ConversionError, match="preserve fidelity") as caught:
         write(edited, edited_output, fidelity="preserve", force=True)
+    assert caught.value.code == "UNSUPPORTED_PATCH"
     assert edited_output.read_bytes() == b"SENTINEL-EDITED"
+
+
+def test_source_patch_confines_paragraph_edits(tmp_path: Path) -> None:
+    png = _png(tmp_path / "dot.png")
+    document = Document()
+    document.add_paragraph("Alpha")
+    document.add_paragraph("Beta")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Cell"
+    document.add_paragraph("Gamma")
+    document.add_picture(str(png))
+    source = tmp_path / "bundle.docx"
+    document.save(source)
+    loaded = read(source)
+    assert loaded.document.blocks[0].provenance is not None
+    assert str(loaded.document.blocks[0].provenance.anchor).startswith("word/document.xml:child:")
+    blocks = []
+    for block in loaded.document.blocks:
+        if block.plain() == "Beta":
+            blocks.append(replace(block, inlines=(
+                text_node("Beta "),
+                InlineNode("emph", children=(text_node("edited"),)),
+            )))
+        else:
+            blocks.append(block)
+    replaced = replace(loaded, document=replace(loaded.document, blocks=tuple(blocks)))
+    output = tmp_path / "patched.docx"
+    result = write(replaced, output, fidelity="preserve", force=True)
+    assert result.execution_mode == "SOURCE_PATCH"
+    assert any(item.code == "patch.replaced" for item in result.loss_report.diagnostics)
+    assert _changed_parts(source, output) == ["word/document.xml"]
+    assert _paragraph_rows(output)[0] == _paragraph_rows(source)[0]
+    beta_before = _paragraph_rows(source)[1]
+    beta_after = _paragraph_rows(output)[1]
+    assert beta_before[0] == "Beta"
+    assert beta_after[0] == "Beta edited"
+    assert beta_before[1] == beta_after[1]
+    assert _paragraph_rows(output)[2][0] == "Gamma"
+    assert _media_bytes(source) == _media_bytes(output)
+
+    removed_blocks = tuple(block for block in blocks if block.plain() != "Gamma")
+    removed = replace(loaded, document=replace(loaded.document, blocks=removed_blocks))
+    deleted = tmp_path / "deleted.docx"
+    deleted_result = write(removed, deleted, fidelity="preserve", force=True)
+    assert deleted_result.execution_mode == "SOURCE_PATCH"
+    assert [row[0] for row in _paragraph_rows(deleted) if row[0]] == ["Alpha", "Beta edited"]
+    assert Document(deleted).tables[0].cell(0, 0).text == "Cell"
+    assert _changed_parts(source, deleted) == ["word/document.xml"]
+    assert _media_bytes(source) == _media_bytes(deleted)
+
+    inserted_blocks = (*blocks[:1], BlockNode("added", "paragraph", inlines=(text_node("Inserted"),)), *blocks[1:])
+    inserted = replace(loaded, document=replace(loaded.document, blocks=tuple(inserted_blocks)))
+    added = tmp_path / "inserted.docx"
+    added_result = write(inserted, added, fidelity="preserve", force=True)
+    assert added_result.execution_mode == "SOURCE_PATCH"
+    assert [row[0] for row in _paragraph_rows(added) if row[0]] == ["Alpha", "Inserted", "Beta edited", "Gamma"]
+    assert _changed_parts(source, added) == ["word/document.xml"]
+
+    table_block = next(block for block in loaded.document.blocks if block.kind == "table")
+    cell = table_block.children[0].children[0]
+    paragraph = cell.children[0]
+    changed_cell = replace(cell, children=(replace(paragraph, inlines=(text_node("Changed"),)),))
+    changed_row = replace(table_block.children[0], children=(changed_cell,))
+    changed_table = replace(table_block, children=(changed_row,))
+    refused_blocks = tuple(changed_table if block.kind == "table" else block for block in loaded.document.blocks)
+    refused = replace(loaded, document=replace(loaded.document, blocks=refused_blocks))
+    sentinel = tmp_path / "sentinel.docx"
+    sentinel.write_bytes(b"SENTINEL-PATCH")
+    with pytest.raises(ConversionError, match="preserve fidelity") as caught:
+        write(refused, sentinel, fidelity="preserve", force=True)
+    assert caught.value.code == "UNSUPPORTED_PATCH"
+    assert sentinel.read_bytes() == b"SENTINEL-PATCH"
+    plain = tmp_path / "plain.docx"
+    plain_doc = Document()
+    plain_doc.add_paragraph("Alpha")
+    plain_doc.save(plain)
+    plain_loaded = read(plain)
+    plain_edited = replace(
+        plain_loaded,
+        document=replace(plain_loaded.document, blocks=(
+            replace(plain_loaded.document.blocks[0], inlines=(text_node("Alpha edited"),)),
+        )),
+    )
+    semantic = tmp_path / "rebuilt.docx"
+    rebuilt = write(plain_edited, semantic, force=True)
+    assert rebuilt.execution_mode == "REBUILD"
+    preserved = tmp_path / "preserved.docx"
+    patched = write(plain_edited, preserved, fidelity="preserve", force=True)
+    assert patched.execution_mode == "SOURCE_PATCH"
+    assert Document(preserved).paragraphs[0].text == "Alpha edited"
+
+
+def _changed_parts(left: Path, right: Path) -> list[str]:
+    with zipfile.ZipFile(left) as source, zipfile.ZipFile(right) as output:
+        names = source.namelist()
+        assert names == output.namelist()
+        return [name for name in names if source.read(name) != output.read(name)]
+
+
+def _paragraph_rows(path: Path) -> list[tuple[str, bytes]]:
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    root = etree.fromstring(zipfile.ZipFile(path).read("word/document.xml"))
+    rows = []
+    for paragraph in root.findall("w:body/w:p", namespace):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace))
+        properties = paragraph.find("w:pPr", namespace)
+        rows.append((text, etree.tostring(properties) if properties is not None else b""))
+    return rows
+
+
+def _media_bytes(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as package:
+        return {name: package.read(name) for name in package.namelist() if name.startswith("word/media/")}
 
 
 def test_loss_policy_error_publishes_nothing(tmp_path: Path) -> None:

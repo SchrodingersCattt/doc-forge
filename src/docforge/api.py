@@ -55,8 +55,9 @@ def write(
     """Write a document.
 
     An unchanged DOCX is copied only after its on-disk SHA-256 still matches
-    the snapshot from ``read``. An edited DOCX is refused at ``preserve``
-    fidelity until source patching exists. Unchanged Markdown or TeX is
+    the snapshot from ``read``. A preserve-mode edit of that DOCX is a
+    ``SOURCE_PATCH`` when the change is a supported paragraph edit, and is
+    refused otherwise. It is not rebuilt. Unchanged Markdown or TeX is
     rebuilt by the legacy renderer.
     """
 
@@ -66,14 +67,13 @@ def write(
     policy = default_loss_policy(fidelity, loss_policy)  # type: ignore[arg-type]
     if isinstance(loaded, ReadResult):
         if loaded.origin_format == "docx" and fidelity == "preserve":
-            if not loaded.unchanged():
-                raise ConversionError(
-                    "edited DOCX cannot be written with preserve fidelity until source patching exists",
-                    code="PRESERVE_EDIT",
-                )
             _require_fresh_source(loaded)
-            return convert(
-                loaded.origin, destination, fidelity=fidelity, loss_policy=policy, force=force, style=style,
+            if loaded.unchanged():
+                return convert(
+                    loaded.origin, destination, fidelity=fidelity, loss_policy=policy, force=force, style=style,
+                )
+            return _patch_preserved_docx(
+                loaded, destination, fidelity=fidelity, loss_policy=policy, force=force, style=style,
             )
         if loaded.origin is not None and loaded.unchanged():
             _require_fresh_source(loaded)
@@ -247,6 +247,45 @@ def _readers() -> Mapping[str, object]:
     from .adapters.markdown import MarkdownReader
 
     return {"markdown": MarkdownReader(), "latex": LatexReader(), "docx": DocxReader()}
+
+
+def _patch_preserved_docx(loaded: ReadResult, output: Path, *, fidelity: str, loss_policy: str | None, force: bool, style) -> WriteResult:
+    """Patch a DOCX in place. Never fall through to a semantic rebuild."""
+
+    from .adapters.patch import patch_docx
+
+    if loaded.origin is None:
+        raise ConversionError("preserve fidelity needs the source snapshot", code="STALE_SOURCE")
+    policy = default_loss_policy(fidelity, loss_policy)  # type: ignore[arg-type]
+    if style is None:
+        summary = patch_docx(loaded.origin, output, loaded.document, force=force)
+        return _patch_result(output, summary, policy)
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="docforge-patch-") as directory:
+        staged = Path(directory) / "patched.docx"
+        summary = patch_docx(loaded.origin, staged, loaded.document, force=True)
+        result = restyle(staged, output, profile=style, loss_policy=policy, force=force)
+    extra = _patch_findings(summary)
+    report = LossReport(policy, extra + result.loss_report.diagnostics)
+    return WriteResult(result.output, "SOURCE_PATCH", report, result.validation, result.manifest)
+
+
+def _patch_result(output: Path, summary: dict[str, int | str], policy: str) -> WriteResult:
+    report = LossReport(policy, _patch_findings(summary))
+    validation = audit(output)
+    if not validation.ok:
+        raise ConversionError("patch audit failed", code="AUDIT_FAILED", diagnostics=validation.diagnostics)
+    return WriteResult(output, "SOURCE_PATCH", report, validation, None)
+
+
+def _patch_findings(summary: dict[str, int | str]) -> tuple[Diagnostic, ...]:
+    findings = []
+    for name in ("replaced", "inserted", "deleted"):
+        count = int(summary.get(name) or 0)
+        if count:
+            findings.append(finding("info", f"patch.{name}", f"{count} paragraph(s) {name}", count=count))
+    return tuple(findings)
 
 
 def _legacy_docx(source: Path, output: Path, *, source_format: str, policy: str, force: bool, style, title, si, bib, target: str) -> WriteResult:

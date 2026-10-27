@@ -121,6 +121,7 @@ class _Projector:
         self.path = path
         self.names = set(package.namelist())
         self.provenance = Provenance(path.name)
+        self._anchor = ""
         self.styles = _style_names(package, self.names)
         self.part = "word/document.xml"
         self.rels = _read_relationships(package.read(self.part_rels)) if self.part_rels in self.names else {}
@@ -145,7 +146,7 @@ class _Projector:
         self._note_package_features(document_xml)
         root = etree.fromstring(document_xml)
         body = root.find(f"{{{W}}}body")
-        blocks = self._container(body if body is not None else root)
+        blocks = self._container(body if body is not None else root, prefix=f"{self.part}:child")
         blocks.extend(self._stories())
         self._note_unreferenced_media()
         if self.resources and "media" not in self.features:
@@ -189,27 +190,38 @@ class _Projector:
             self.part = part
             self.rels = _read_relationships(self.package.read(self.part_rels)) if self.part_rels in self.names else {}
             if rel_type.endswith("/comments"):
-                for comment in root.findall(f"{{{W}}}comment"):
-                    blocks.extend(self._container(comment))
+                for index, comment in enumerate(root.findall(f"{{{W}}}comment")):
+                    blocks.extend(self._container(comment, prefix=f"{part}:comment:{index}"))
             elif rel_type.endswith(("/footnotes", "/endnotes")):
+                note_index = 0
                 for note in root:
                     if note.get(f"{{{W}}}type") in {"separator", "continuationSeparator", "continuationNotice"}:
                         continue
-                    blocks.extend(self._container(note))
+                    blocks.extend(self._container(note, prefix=f"{part}:note:{note_index}"))
+                    note_index += 1
             else:
-                blocks.extend(self._container(root))
+                blocks.extend(self._container(root, prefix=f"{part}:child"))
             self.part, self.rels = previous
         if blocks:
             self._note("docx.stories", "headers, footers, notes, and comments are projected after the body", loss=False)
         return blocks
 
-    def _container(self, element: etree._Element | None) -> list[BlockNode]:
+    def _container(self, element: etree._Element | None, *, prefix: str | None = None) -> list[BlockNode]:
         if element is None:
             return []
         blocks: list[BlockNode] = []
-        for child in element:
-            blocks.extend(self._dispatch(child))
+        for index, child in enumerate(element):
+            previous = self._anchor
+            if prefix is not None:
+                self._anchor = f"{prefix}:{index}"
+            try:
+                blocks.extend(self._dispatch(child))
+            finally:
+                self._anchor = previous
         return blocks
+
+    def _here(self) -> Provenance:
+        return Provenance(self.provenance.source, anchor=self._anchor)
 
     def _dispatch(self, element: etree._Element) -> list[BlockNode]:
         name = etree.QName(element)
@@ -358,9 +370,9 @@ class _Projector:
                 grid = cell.find(f"{{{W}}}tcPr/{{{W}}}gridSpan")
                 if grid is not None and str(grid.get(f"{{{W}}}val") or "").isdigit():
                     attrs.append(("colspan", str(grid.get(f"{{{W}}}val"))))
-                cells.append(BlockNode(self._next_id(), "table_cell", children=tuple(children), attrs=tuple(attrs), provenance=self.provenance))
-            rows.append(BlockNode(self._next_id(), "table_row", children=tuple(cells), provenance=self.provenance))
-        return BlockNode(self._next_id(), "table", children=tuple(rows), provenance=self.provenance)
+                cells.append(BlockNode(self._next_id(), "table_cell", children=tuple(children), attrs=tuple(attrs), provenance=self._here()))
+            rows.append(BlockNode(self._next_id(), "table_row", children=tuple(cells), provenance=self._here()))
+        return BlockNode(self._next_id(), "table", children=tuple(rows), provenance=self._here())
 
     def _drawing(self, element: etree._Element) -> list[BlockNode]:
         contents = _textbox_contents(element)
@@ -377,37 +389,37 @@ class _Projector:
         if not rel_ids:
             self._note("docx.unmodeled_drawing", "drawing has no projected image or text", loss=True)
             text = "".join(element.itertext()).strip()
-            return [BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("text", text)), provenance=self.provenance)]
+            return [BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("text", text)), provenance=self._here())]
         return [self._figure(rel_id, descr) for rel_id in rel_ids]
 
     def _figure(self, rel_id: str, descr: str) -> BlockNode:
         relationship = self.rels.get(rel_id)
         if relationship is None:
             self._note("docx.dangling_drawing", "drawing references a missing relationship", loss=True)
-            return BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("rel", rel_id)), provenance=self.provenance)
+            return BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("rel", rel_id)), provenance=self._here())
         target, _rel_type, external = relationship
         if external or "://" in target:
             self._note("docx.external_image", "linked image is outside the package", loss=True)
-            return BlockNode(self._next_id(), "figure", attrs=(("resource", ""), ("path", ""), ("href", target)), provenance=self.provenance)
+            return BlockNode(self._next_id(), "figure", attrs=(("resource", ""), ("path", ""), ("href", target)), provenance=self._here())
         part = resolve_opc_target(self.part, target)
         if not part or part not in self.names:
             self._note("docx.missing_media", "drawing target is missing from the package", loss=True)
-            return BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("target", target)), provenance=self.provenance)
+            return BlockNode(self._next_id(), "opaque", attrs=(("element", "drawing"), ("target", target)), provenance=self._here())
         resource_id = self._ensure_resource(part)
         self.referenced.add(part)
         children = ()
         if descr:
-            children = (BlockNode(self._next_id(), "caption", inlines=(text_node(descr),), provenance=self.provenance),)
+            children = (BlockNode(self._next_id(), "caption", inlines=(text_node(descr),), provenance=self._here()),)
         return BlockNode(
             self._next_id(), "figure", children=children,
             attrs=(("resource", resource_id), ("path", PurePosixPath(part).name)),
-            provenance=self.provenance,
+            provenance=self._here(),
         )
 
     def _math(self, element: etree._Element) -> BlockNode:
         self._note("docx.omml", "OMML is kept as opaque text because it has no TeX projection", loss=True)
         text = "".join(node.text or "" for node in element.xpath(".//m:t", namespaces=NS))
-        return BlockNode(self._next_id(), "opaque", attrs=(("element", "omml"), ("text", text)), provenance=self.provenance)
+        return BlockNode(self._next_id(), "opaque", attrs=(("element", "omml"), ("text", text)), provenance=self._here())
 
     def _unknown(self, element: etree._Element) -> list[BlockNode]:
         local = etree.QName(element).localname
@@ -418,7 +430,7 @@ class _Projector:
         if inner:
             return inner
         text = "".join(element.itertext()).strip()
-        return [BlockNode(self._next_id(), "opaque", attrs=(("element", local), ("text", text)), provenance=self.provenance)]
+        return [BlockNode(self._next_id(), "opaque", attrs=(("element", local), ("text", text)), provenance=self._here())]
 
     def _text_block(self, inlines: tuple[InlineNode, ...], style_id: str | None) -> BlockNode:
         plain = "".join(node.plain() for node in inlines)
@@ -426,10 +438,10 @@ class _Projector:
             self.title = plain
         level = _heading_level(style_id, self.styles)
         if level:
-            return BlockNode(self._next_id(), "heading", inlines=inlines, attrs=(("level", level),), provenance=self.provenance)
+            return BlockNode(self._next_id(), "heading", inlines=inlines, attrs=(("level", level),), provenance=self._here())
         style_name = self.styles.get(style_id or "", style_id or "")
         attrs = (("style", style_name),) if style_name else ()
-        return BlockNode(self._next_id(), "paragraph", inlines=inlines, attrs=attrs, provenance=self.provenance)
+        return BlockNode(self._next_id(), "paragraph", inlines=inlines, attrs=attrs, provenance=self._here())
 
     def _ensure_resource(self, part: str) -> str:
         existing = self.resource_ids.get(part)
