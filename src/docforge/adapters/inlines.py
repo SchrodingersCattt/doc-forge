@@ -14,6 +14,8 @@ from ..semantic import InlineNode, text_node
 
 _MD = re.compile(
     r"\\cite[p]?\{(?P<cite>[^}]+)\}"
+    r"|\\label\{(?P<label>[^}]+)\}"
+    r"|\\(?:eq|auto)?ref\{(?P<ref>[^}]+)\}"
     r"|`(?P<code>[^`]+)`"
     r"|\$\$?(?P<math>[^$]+)\$\$?"
     r"|\*\*\*(?P<both>.+?)\*\*\*"
@@ -36,6 +38,12 @@ def parse_markdown_inlines(text: str) -> tuple[InlineNode, ...]:
         if match.group("cite") is not None:
             keys = tuple(part.strip() for part in match.group("cite").split(",") if part.strip())
             nodes.append(InlineNode("citation", attrs=(("keys", ",".join(keys)),)))
+        elif match.group("label") is not None:
+            label = match.group("label").strip()
+            nodes.append(InlineNode("span", text=label, attrs=(("label", label),)))
+        elif match.group("ref") is not None:
+            key = match.group("ref").strip()
+            nodes.append(InlineNode("link", text=key, attrs=(("href", "#" + key),)))
         elif match.group("code") is not None:
             nodes.append(InlineNode("code", text=match.group("code")))
         elif match.group("math") is not None:
@@ -77,7 +85,11 @@ def _write_markdown(node: InlineNode) -> str:
     if node.kind == "math":
         return f"${node.text}$"
     if node.kind == "link":
+        if _is_crossref(node, inner):
+            return "\\ref{" + node.attr("href")[1:] + "}"
         return f"[{inner or node.text}]({node.attr('href')})"
+    if node.kind == "span" and node.attr("label"):
+        return "\\label{" + node.attr("label") + "}"
     if node.kind == "subscript":
         return f"<sub>{inner or node.text}</sub>"
     if node.kind == "superscript":
@@ -111,7 +123,11 @@ def _write_latex(node: InlineNode) -> str:
         body = node.text
         return f"$${body}$$" if node.attr("display") == "true" else f"${body}$"
     if node.kind == "link":
+        if _is_crossref(node, inner):
+            return "\\ref{" + node.attr("href")[1:] + "}"
         return "\\href{" + _escape_latex_url(node.attr("href")) + "}{" + (inner or _escape_latex(node.text)) + "}"
+    if node.kind == "span" and node.attr("label"):
+        return "\\label{" + node.attr("label") + "}"
     if node.kind == "subscript":
         return "\\textsubscript{" + (inner or _escape_latex(node.text)) + "}"
     if node.kind == "superscript":
@@ -123,6 +139,15 @@ def _write_latex(node: InlineNode) -> str:
     if node.kind == "break":
         return "\n"
     return inner or _escape_latex(node.text)
+
+
+def _is_crossref(node: InlineNode, inner: str) -> bool:
+    """A ``#label`` link whose visible text is the label is a TeX cross-reference."""
+
+    href = node.attr("href")
+    if not href.startswith("#") or len(href) < 2:
+        return False
+    return (inner or node.text) == href[1:]
 
 
 def _escape_latex(text: str) -> str:

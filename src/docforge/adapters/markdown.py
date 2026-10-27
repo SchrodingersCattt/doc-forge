@@ -151,6 +151,57 @@ def render_markdown(document: SemanticDocument, *, origin: Path | None = None) -
     return "\n\n".join(lines).rstrip() + "\n"
 
 
+_OUTER_DISPLAY = re.compile(
+    r"\\begin\{(?P<env>equation\*?|align\*?|gather\*?|multline\*?|flalign\*?|eqnarray\*?|displaymath)\}"
+    r"(?P<body>.*)\\end\{(?P=env)\}\s*\Z",
+    re.DOTALL,
+)
+_AMSMATH_MARKERS = (
+    r"\begin{align",
+    r"\begin{gather",
+    r"\begin{multline",
+    r"\begin{flalign",
+    r"\begin{eqnarray",
+    r"\begin{aligned",
+    r"\begin{cases",
+    r"\begin{split",
+)
+
+
+def display_math_tex(tex: str) -> str:
+    """Return compilable display math.
+
+    An outer ``align`` (or other display environment) is kept as itself.
+    ``equation`` is not wrapped around another display environment.
+    """
+
+    stripped = tex.strip()
+    match = _OUTER_DISPLAY.match(stripped)
+    if match is None:
+        return "\\begin{equation}\n" + stripped + "\n\\end{equation}"
+    if match.group("env").startswith("equation"):
+        inner = _OUTER_DISPLAY.match(match.group("body").strip())
+        if inner is not None and not inner.group("env").startswith("equation"):
+            return match.group("body").strip()
+    return stripped
+
+
+def semantic_display_source(env: str, body: str) -> str:
+    """Tex stored for one display environment.
+
+    Plain equations stay bare. ``align`` keeps its environment so a later write
+    does not nest it inside ``equation``.
+    """
+
+    inner = body.strip()
+    nested = _OUTER_DISPLAY.match(inner)
+    if nested is not None and not nested.group("env").startswith("equation"):
+        return inner
+    if env.rstrip("*") == "equation":
+        return inner
+    return f"\\begin{{{env}}}\n{inner}\n\\end{{{env}}}"
+
+
 def render_latex(document: SemanticDocument, *, origin: Path | None = None) -> str:
     paths = _figure_output_paths(document, origin)
     body: list[str] = []
@@ -167,6 +218,8 @@ def render_latex(document: SemanticDocument, *, origin: Path | None = None) -> s
         preamble.append("\\usepackage{textcomp}")
     if "\\includegraphics" in rendered_body:
         preamble.append("\\usepackage{graphicx}")
+    if any(token in rendered_body for token in _AMSMATH_MARKERS):
+        preamble.append("\\usepackage{amsmath}")
     if "\\href{" in rendered_body:
         preamble.append("\\usepackage{hyperref}")
     return "\n".join([*preamble, "\\begin{document}", "", rendered_body, "\\end{document}", ""])
@@ -444,7 +497,7 @@ def _render_latex_block(block: BlockNode, paths: dict[str, str]) -> str:
     if block.kind == "code":
         return "\\begin{verbatim}\n" + block.attr("code") + "\n\\end{verbatim}"
     if block.kind == "math":
-        return "\\begin{equation}\n" + block.attr("tex") + "\n\\end{equation}"
+        return display_math_tex(block.attr("tex"))
     if block.kind == "list":
         env = "enumerate" if block.attr("ordered") == "true" else "itemize"
         items = "\n".join("\\item " + write_latex_inlines(item.inlines) for item in block.children)
