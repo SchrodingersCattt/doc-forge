@@ -11,7 +11,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from PIL import Image
 from docforge.cli import build_parser
 
@@ -590,6 +590,92 @@ def test_one_section_template_uses_terminal_section_properties(tmp_path: Path) -
     assert result.template_sections_before == 1
     assert result.template_sections_after == 1
     assert "placeholder" not in "\n".join(p.text for p in Document(output).paragraphs).lower()
+
+
+def test_style_profile_authority_beats_historical_size_and_color(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    document = Document()
+    normal = document.styles["Normal"]
+    normal.font.name = "Georgia"
+    normal.font.size = Pt(16)
+    normal.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+    document.add_paragraph("Body sample")
+    document.save(template)
+    source = tmp_path / "body.md"
+    source.write_text("Hello body.\n", encoding="utf-8")
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    legacy = tmp_path / "legacy.docx"
+    assemble_markdown_template([source], template_path=template, output=legacy, metadata_path=metadata)
+    legacy_runs = [row for row in _direct_runs(legacy) if "Hello body" in row["paragraph"]]
+    assert legacy_runs
+    assert any(row["sz"] == "22" for row in legacy_runs)
+    assert any(row["color"] == "000000" for row in legacy_runs)
+
+    authority = tmp_path / "authority.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=authority, metadata_path=metadata,
+        style_authority={
+            "schema": "docforge.style.v1",
+            "roles": {"body": {"word_style": "Normal"}},
+            "policy": {"missing_style": "error", "direct_formatting": "preserve"},
+        },
+    )
+    authority_runs = [row for row in _direct_runs(authority) if "Hello body" in row["paragraph"]]
+    assert authority_runs
+    assert all(row["sz"] != "22" for row in authority_runs)
+    assert all((row["color"] or "").upper() != "000000" for row in authority_runs)
+    from docforge.style import resolved_paragraph_styles
+
+    resolved = next(item for item in resolved_paragraph_styles(authority) if "Hello body" in str(item["text"]))
+    assert resolved["size_pt"] == 16
+    assert resolved["latin"] == "Georgia"
+    assert _style_color(authority, "Normal") == "C00000"
+
+    overlay = tmp_path / "overlay.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=overlay, metadata_path=metadata,
+        style_authority={
+            "schema": "docforge.style.v1",
+            "roles": {"body": {"word_style": "Normal", "font": {"size_pt": 14, "color": "0000FF"}}},
+            "policy": {"missing_style": "error", "direct_formatting": "clear_conflicting"},
+        },
+    )
+    overlay_run = next(item for item in resolved_paragraph_styles(overlay) if "Hello body" in str(item["text"]))
+    assert overlay_run["size_pt"] == 14
+    assert _style_color(overlay, "Normal") == "0000FF"
+    assert all(row["sz"] != "22" for row in _direct_runs(overlay) if "Hello body" in row["paragraph"])
+
+
+def _direct_runs(path: Path) -> list[dict[str, str | None]]:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = __import__("lxml").etree.fromstring(__import__("zipfile").ZipFile(path).read("word/document.xml"))
+    rows = []
+    for paragraph in root.findall(f".//{{{namespace}}}p"):
+        text = "".join(node.text or "" for node in paragraph.findall(f".//{{{namespace}}}t"))
+        for run in paragraph.findall(f"{{{namespace}}}r"):
+            properties = run.find(f"{{{namespace}}}rPr")
+            size = properties.find(f"{{{namespace}}}sz") if properties is not None else None
+            color = properties.find(f"{{{namespace}}}color") if properties is not None else None
+            rows.append({
+                "paragraph": text,
+                "sz": size.get(f"{{{namespace}}}val") if size is not None else None,
+                "color": color.get(f"{{{namespace}}}val") if color is not None else None,
+            })
+    return rows
+
+
+def _style_color(path: Path, style_id: str) -> str | None:
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = __import__("lxml").etree.fromstring(__import__("zipfile").ZipFile(path).read("word/styles.xml"))
+    for style in root.findall(f"{{{namespace}}}style"):
+        if style.get(f"{{{namespace}}}styleId") != style_id:
+            continue
+        color = style.find(f"{{{namespace}}}rPr/{{{namespace}}}color")
+        if color is None:
+            return None
+        return (color.get(f"{{{namespace}}}val") or "").upper()
+    return None
 
 
 def _front_and_body_same_style_template(path: Path) -> None:

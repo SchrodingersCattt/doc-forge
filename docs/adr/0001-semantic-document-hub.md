@@ -20,7 +20,7 @@ Inlines: text, emph, strong, code, link, math, break, subscript, superscript, un
 
 Unsupported source constructs become diagnostics. A diagnostic is a loss when its severity is `error` or its category is `loss`. `loss_policy=error` and `fidelity=preserve` refuse to publish a loss before replacing an output. Informational warnings do not block publication. Semantic conversion defaults to `warn`.
 
-DOCX projection walks `w:body` in order, including nested tables and drawings. `restyle` publishes only after the staged package passes `audit`. `StyleProfile.template` is not applied. A new style is attached only through `RoleSpec.select`; otherwise the role is unused.
+DOCX projection walks `w:body` in order, including nested tables and drawings. Body blocks carry a `word/document.xml:child:N` anchor so a later source patch can find them. `restyle` publishes only after the staged package passes `audit`. `StyleProfile.template` copies the named styles and their `basedOn` chain from that DOCX, then role overrides apply. A new style is attached only through `RoleSpec.select`; otherwise the role is unused. Preserve-mode content edits use `SOURCE_PATCH` for simple body paragraphs and headings, and refuse anything else.
 
 ## Non-goals
 

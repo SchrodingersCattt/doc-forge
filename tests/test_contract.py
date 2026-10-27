@@ -128,7 +128,7 @@ def test_contract_runs_redline_render_and_consistent_manifest(tmp_path: Path) ->
     from docforge.docxmd.verify import _soffice
 
     if _soffice() is None:
-        pytest.skip("LibreOffice render gate is not executable in this environment; it stays open")
+        pytest.skip("LibreOffice render gate is not executable in this environment; a skip is not a pass")
     template, source, metadata, baseline = _contract_fixture(tmp_path)
     output = tmp_path / "output.docx"
     result = build_docx_contract(
