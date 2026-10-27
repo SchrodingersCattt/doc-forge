@@ -3,7 +3,8 @@
 Supported edits are confined to simple body paragraphs and headings:
 replacing their text, inserting a plain paragraph, or deleting one.
 Tables, figures, fields, math, revisions, drawings, and story parts are
-refused. Preservation mode must not rebuild the package instead.
+refused. Unchanged story anchors stay in the plan as keeps and are not
+body edit targets. Preservation mode must not rebuild the package instead.
 """
 
 from __future__ import annotations
@@ -138,14 +139,20 @@ def _plan(original: SemanticDocument, edited: SemanticDocument) -> list[tuple]:
 
 
 def _apply(body: etree._Element, children: list[etree._Element], operations: list[tuple]) -> None:
-    def element_for(anchor: str) -> etree._Element:
+    def body_child(anchor: str) -> etree._Element | None:
         match = _BODY_ANCHOR.match(anchor)
         if match is None:
-            _refuse("the edit is outside the document body")
+            return None
         index = int(match.group(1))
         if index >= len(children):
             _refuse("the source anchor is missing from the package")
         return children[index]
+
+    def element_for(anchor: str) -> etree._Element:
+        element = body_child(anchor)
+        if element is None:
+            _refuse("the edit is outside the document body")
+        return element
 
     for kind, anchor, *_rest in [(item[0], item[1], *item[2:]) for item in operations if item[0] in {"replace", "delete"}]:
         if not _simple_paragraph(element_for(anchor)):
@@ -157,7 +164,14 @@ def _apply(body: etree._Element, children: list[etree._Element], operations: lis
             continue
         if item[0] == "delete":
             continue
-        element = element_for(item[1])
+        if item[0] == "keep":
+            # Story keeps are not body cursors. Resolving them would refuse a
+            # body-only edit; trailing inserts still flush before sectPr.
+            element = body_child(item[1])
+            if element is None:
+                continue
+        else:
+            element = element_for(item[1])
         for block in pending:
             element.addprevious(_new_paragraph(block, _prototype(element)))
         pending.clear()

@@ -519,6 +519,39 @@ def test_source_patch_confines_paragraph_edits(tmp_path: Path) -> None:
     assert Document(preserved).paragraphs[0].text == "Alpha edited"
 
 
+def test_source_patch_body_text_keeps_projected_header(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("Alpha")
+    header = document.sections[0].header
+    header.is_linked_to_previous = False
+    header.paragraphs[0].text = "Running head"
+    source = tmp_path / "headed.docx"
+    document.save(source)
+    loaded = read(source)
+    story = [
+        block for block in loaded.document.blocks
+        if block.provenance is not None and block.provenance.anchor.startswith("word/header")
+    ]
+    assert [block.plain() for block in story] == ["Running head"]
+    body = next(block for block in loaded.document.blocks if block.plain() == "Alpha")
+    edited_blocks = tuple(
+        replace(block, inlines=(text_node("Alpha edited"),)) if block is body else block
+        for block in loaded.document.blocks
+    )
+    edited = replace(loaded, document=replace(loaded.document, blocks=edited_blocks))
+    output = tmp_path / "patched.docx"
+    result = write(edited, output, fidelity="preserve", force=True)
+    assert result.execution_mode == "SOURCE_PATCH"
+    assert _changed_parts(source, output) == ["word/document.xml"]
+    with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
+        headers = [name for name in before.namelist() if name.startswith("word/header")]
+        assert headers
+        assert all(before.read(name) == after.read(name) for name in headers)
+        assert b"Running head" in before.read(headers[0])
+    assert [row[0] for row in _paragraph_rows(output) if row[0]] == ["Alpha edited"]
+    assert Document(output).sections[0].header.paragraphs[0].text == "Running head"
+
+
 def _changed_parts(left: Path, right: Path) -> list[str]:
     with zipfile.ZipFile(left) as source, zipfile.ZipFile(right) as output:
         names = source.namelist()
