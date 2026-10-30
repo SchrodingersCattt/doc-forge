@@ -27,9 +27,9 @@ Supported `SOURCE_PATCH` content edits are confined to simple body paragraphs an
 
 ## Style authority
 
-`md2docx` and `tex2docx` without a StyleProfile keep their historical direct font, size, and color passes, including the template assembly stamps of 11 pt body, 10 pt captions, 18 pt unsized titles, and black runs.
+`md2docx --template` inherits fonts, sizes, and colors from named template styles. Explicit typography flags override them. Standalone Markdown and TeX rendering retain their defaults. See [template roles and layout](template-layout.md).
 
-`assemble_markdown_template(..., style_authority=profile)` skips those implicit stamps and then restyles the package with the profile. `convert(..., style=profile)` and `write(..., style=profile)` drop the same direct defaults from the freshly rebuilt DOCX before restyle. An existing document passed only to `restyle` keeps its direct formatting except where the profile policy clears it.
+`assemble_markdown_template(..., style_authority=profile)` applies the profile after assembly; the CLI accepts the same v1 schema through `--style`. `convert(..., style=profile)` and `write(..., style=profile)` drop the same direct defaults from the freshly rebuilt DOCX before restyle. For existing documents, `preserve` retains direct formatting. `clear_all` removes run presentation and paragraph spacing, indents, tabs, and alignment while retaining bold, italic, scripts, character styles, and structural properties. `clear_conflicting` clears properties supplied by the target style, its base styles, document defaults, or explicit role overrides; emphasis remains unless the role explicitly overrides it. Nested hyperlink runs are included.
 
 ## Intentionally unchanged
 
@@ -96,7 +96,7 @@ Matrix boxes exercised here:
 | B. SOURCE_PATCH content edits | Paragraph and heading replace, insert, and delete. `word/document.xml` is the only changed part. Media bytes stay equal. |
 | B. No silent reconstruction | `fidelity=preserve` on an unsupported edit raises `UNSUPPORTED_PATCH` and leaves the destination untouched. Semantic mode can still rebuild. |
 | StyleEngine template source | `StyleProfile.template` copies named styles. An invalid template fails closed. Role font overrides still win. |
-| StyleEngine authority | With a StyleProfile, historical 11 pt / 10 pt / 18 pt / black stamps do not win. Without one, `md2docx` keeps them. |
+| StyleEngine authority | Template-backed Markdown inherits typography; explicit flags and profile overlays can override it. |
 | D. Render evidence | LibreOffice and Word gates report `skipped` or `passed`. Word visual parity is not passed on this runner. |
 | D. Bench | `docs/bench.md`. No measured case rose by 25%. |
 | RT-CONTENT | Patched paragraph text changes; sibling paragraph properties stay. |

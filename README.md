@@ -70,11 +70,13 @@ docforge pipeline pipeline.json --workspace . --output-dir dist
 
 ## Templates, math, figures, and citations
 
-Template assembly replaces the sample body. It keeps the template's styles, section geometry, headers, footers, numbering, and embedded assets, including figures already in the template.
+Template assembly replaces sample content while retaining styles, section geometry, headers, footers, numbering, and reusable figure layouts. Generated text inherits template fonts, sizes, and colors. The explicit `--body-font-size`, `--abstract-font-size`, `--caption-font-size`, `--reference-font-size`, `--font-family`, and `--east-asia-font` options override those values. Inline code retains its monospace font.
+
+`--style profile.json` accepts either the legacy semantic-role-to-style map or a `docforge.style.v1` profile. See [template roles and layout](docs/template-layout.md) for roles, profiles, table notes, algorithms, and end placement.
 
 A line that begins with `! ` or `！ ` is omitted. `--keep-comments` keeps that line as a `[TODO: ...]` note.
 
-Inline math such as `$t_{\mathrm{chem}}$` becomes Word runs: variables are italic, `\mathrm{...}` text and numerals are upright, and `^` / `_` are superscript or subscript. A display block between `$$` lines is OMML and receives the next equation number, such as `(1)`. `--numbering-prefix S` applies that prefix to figure captions, `Table:` captions, and those equation numbers.
+Inline math such as `$t_{\mathrm{chem}}$` becomes Word runs: variables are italic, `\mathrm{...}` text and numerals are upright, and `^` / `_` are superscript or subscript. With `--template`, add `--inline-math omml` to compile inline formulae to native Office Math, preserving nested scripts, limits, and math alphabets. This requires a supported Pandoc version. The default `--inline-math runs` preserves the historical text representation. A display block between `$$` lines is OMML and receives the next equation number, such as `(1)`. `--numbering-prefix S` applies that prefix to figure captions, `Table:` captions, and those equation numbers.
 
 A figure is an image paragraph plus the caption paragraph that follows:
 
@@ -84,7 +86,7 @@ A figure is an image paragraph plus the caption paragraph that follows:
 Figure 1. Caption text.
 ```
 
-`--figure-span column|page` sets the default width. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
+`--figure-span column|page` sets the default width. Figures also fit within the active section text height, reserving estimated caption space and preserving aspect ratio. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
 
 `--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.
 

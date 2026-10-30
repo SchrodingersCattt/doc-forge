@@ -56,6 +56,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             strip_level_one_headings=args.no_title,
             heading_before=args.heading_before,
             native_toc=args.native_toc,
+            end_matter_placement=getattr(args, "end_matter_placement", "source"),
+            inline_math=getattr(args, "inline_math", "runs"),
             restart_heading_numbering=args.restart_heading_numbering,
             body_first_line_chars=args.body_first_line_chars,
             page_break_before_h1=args.page_break_before_h1,
@@ -87,6 +89,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         args.metadata is not None
         or args.bibliography is not None
         or args.citation_base is not None
+        or getattr(args, "end_matter_placement", "source") != "source"
+        or getattr(args, "inline_math", "runs") != "runs"
         or args.style_profile != "template"
         or args.line_numbers != "template"
         or args.figure_span != "column"

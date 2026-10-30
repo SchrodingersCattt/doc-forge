@@ -274,7 +274,50 @@ def parse_math_omml(text: str, normal: bool = False) -> list:
             continue
         elements.extend(math_text_elements(char, normal=normal))
         index += 1
-    return elements
+    container = etree.Element(f"{{{MATH_CONTEXT}}}e")
+    container.extend(elements)
+    normalize_bar_delimiters(container)
+    return list(container)
+
+
+def normalize_bar_delimiters(root: etree._Element) -> None:
+    """Represent paired bare absolute-value bars as portable OMML delimiters.
+
+    Only siblings whose entire run is one bar are paired. Unpaired operators,
+    including conditional-probability and set-builder bars, stay unchanged.
+    Single-argument delimiters omit redundant empty separators for renderer
+    interoperability; their enclosing characters stay unchanged.
+    """
+    q = lambda name: f"{{{MATH_CONTEXT}}}{name}"
+    for delimiter in root.iter(q("d")):
+        properties = delimiter.find(q("dPr"))
+        if properties is not None and len(delimiter.findall(q("e"))) == 1:
+            for separator in list(properties.findall(q("sepChr"))):
+                if separator.get(q("val"), "") == "":
+                    properties.remove(separator)
+    for parent in list(root.iter()):
+        opening = None
+        for child in list(parent):
+            is_bar = child.tag == q("r") and child.findtext(q("t")) == "|"
+            if not is_bar:
+                continue
+            if opening is None:
+                opening = child
+                continue
+            children = list(parent)
+            left, right = children.index(opening), children.index(child)
+            if right > left + 1:
+                delimiter = etree.Element(q("d"))
+                properties = etree.SubElement(delimiter, q("dPr"))
+                for name in ("begChr", "endChr"):
+                    etree.SubElement(properties, q(name)).set(q("val"), "|")
+                argument = etree.SubElement(delimiter, q("e"))
+                for content in children[left + 1:right]:
+                    argument.append(content)
+                parent.insert(left, delimiter)
+                parent.remove(opening)
+                parent.remove(child)
+            opening = None
 
 
 def normalize_math_source(text: str) -> str:

@@ -14,7 +14,6 @@ import shutil
 import sys
 import tempfile
 import zipfile
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -131,6 +130,8 @@ class AssemblyResult:
     bibliography_profile: str = "markdown"
     include_metadata_back_matter: bool = True
     native_toc: bool = False
+    end_matter_placement: str = "source"
+    inline_math: str = "runs"
     restart_heading_numbering: bool = False
     body_first_line_chars: float | None = None
     page_break_before_h1: bool = False
@@ -309,6 +310,9 @@ def _extract_abstract(blocks: Iterable[Block]) -> tuple[str, tuple[Block, ...]]:
             continue
         if collecting and block.kind == "heading" and block.level == 1:
             collecting = False
+        if block.kind == "keywords":
+            body.append(block)
+            continue
         if collecting:
             if block.text:
                 abstract.append(block.text)
@@ -415,13 +419,27 @@ def discover_template_styles(
     if numbered_bold_prototypes(document.paragraphs):
         fallback_roles.update({"heading_1", "heading_2", "heading_3", "references_heading"})
     fallback = "Normal"
-    return {
+    resolved = {
         role: _find_style(
             document, options, role=role,
             fallback=fallback if (not strict or role in fallback_roles) else None,
         )
         for role, options in candidates.items()
     }
+    optional = {
+        "table_caption": (("TableCaption", "Table Caption"), "caption"),
+        "table_head": (("TableHead", "Table Head", "Table Header"), "body"),
+        "table_body": (("TableBody", "Table Body"), "body"),
+        "table_foot": (("TableFoot", "Table Foot", "Table Note"), "body"),
+        "keywords": (("Keywords", "Keyword"), "body"),
+        "back_matter_heading": (("BackMatterHeading", "Back Matter Heading", "HAcknowledgements"), "heading_1"),
+        "back_matter_body": (("BackMatter", "Back Matter", "Acknowledgements", "Acknowledgments"), "body"),
+        "toc_text": (("TableOfContentText", "Graphical Abstract", "TOC Text"), "body"),
+        "algorithm": (("Algorithm", "Pseudocode"), "body"),
+    }
+    for role, (aliases, fallback_role) in optional.items():
+        resolved[role] = _find_style(document, aliases, fallback=resolved[fallback_role])
+    return resolved
 
 
 def _resolve_style_profile(
@@ -447,6 +465,17 @@ def _resolve_style_profile(
             raise ValueError(f"Style profile names an unavailable style: {role}={value!r}")
         result[role] = document.styles[value].style_id if value in {style.name for style in document.styles} else value
     return result
+
+
+def _style_points(document: DocumentType, style_id: str) -> float:
+    style = _style(document, style_id)
+    seen = set()
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        if style.font.size is not None:
+            return style.font.size.pt
+        style = style.base_style
+    return 11.0
 
 
 def _style(document: DocumentType, style_id: str):
@@ -479,6 +508,8 @@ def _strip_fonts(element) -> None:
     for properties in element.iter(qn("w:rPr")):
         for tag in (qn("w:rFonts"), qn("w:sz"), qn("w:szCs"), qn("w:kern")):
             for child in list(properties.findall(tag)):
+                if tag == qn("w:rFonts") and child.get(qn("w:ascii")) == "Consolas":
+                    continue
                 properties.remove(child)
 
 
@@ -561,7 +592,7 @@ def _sanitize_run_properties(run_properties, *, keep_bold: bool | None = None):
     if run_properties is None:
         return None
     result = copy.deepcopy(run_properties)
-    for tag in (qn("w:highlight"), qn("w:shd"), qn("w:rStyle"), qn("w:rPrChange")):
+    for tag in (qn("w:highlight"), qn("w:shd"), qn("w:rStyle"), qn("w:rPrChange"), qn("w:rFonts"), qn("w:sz"), qn("w:szCs"), qn("w:color")):
         for child in list(result.findall(tag)):
             result.remove(child)
     if keep_bold is False:
@@ -622,22 +653,6 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
             fonts.attrib.pop(qn(f"w:{slot}"), None)
 
 
-def _force_run_black(element) -> None:
-    """Default text color is black. Drop theme colors inherited from a template."""
-    for run in element.iter(qn("w:r")):
-        properties = run.find(qn("w:rPr"))
-        if properties is None:
-            properties = OxmlElement("w:rPr")
-            run.insert(0, properties)
-        color = properties.find(qn("w:color"))
-        if color is None:
-            color = OxmlElement("w:color")
-            properties.append(color)
-        color.set(qn("w:val"), "000000")
-        for attribute in ("themeColor", "themeShade", "themeTint"):
-            color.attrib.pop(qn(f"w:{attribute}"), None)
-
-
 def _set_paragraph_flag(element, tag: str) -> None:
     properties = element.find(qn("w:pPr"))
     if properties is None:
@@ -670,11 +685,10 @@ def _remove_run_emphasis(element, *, preserve_math: bool = False) -> None:
                 properties.remove(node)
 
 
-def _format_caption_runs(element, points: float | None = 10) -> None:
+def _format_caption_runs(element, points: float | None = None) -> None:
     """Apply roman caption text and bold only the leading label run.
 
-    ``points`` is the historical 10 pt stamp when the caller does not pass a
-    size. A StyleProfile authority passes ``None`` so that stamp is skipped.
+    Font metrics inherit from the template unless the caller requests a size.
     """
     _remove_run_emphasis(element, preserve_math=True)
     if points is not None:
@@ -695,12 +709,6 @@ def _format_caption_runs(element, points: float | None = 10) -> None:
     for tag in ("b", "bCs"):
         marker = OxmlElement("w:" + tag)
         properties.append(marker)
-
-
-def _caption_points(explicit: float | None, implicit: bool) -> float | None:
-    if explicit is not None:
-        return explicit
-    return 10.0 if implicit else None
 
 
 def _override_heading_before(element, style_ids: set[str], points: float | None) -> None:
@@ -735,8 +743,15 @@ def _new_paragraph(
     temporary = Document()
     paragraph = temporary.add_paragraph()
     rendered_text = text.upper() if uppercase else text
-    _add_template_inline(paragraph, rendered_text, bold_default=bold_default)
+    renderer = append_inline_math
+    if getattr(document.part, "_docforge_inline_math", "runs") == "omml":
+        from .launcher import append_inline_omml
+        renderer = append_inline_omml
+    render_inline(paragraph, rendered_text, bold_default=bold_default, math_renderer=renderer)
     element = copy.deepcopy(paragraph._p)
+    _strip_fonts(element)
+    for color in list(element.iter(qn("w:color"))):
+        color.getparent().remove(color)
     if prototype is not None:
         original_properties = prototype.find(qn("w:pPr"))
         properties = element.find(qn("w:pPr"))
@@ -789,6 +804,10 @@ def _new_paragraph(
         merged_rpr = _copy_positive_markers(source_rpr, target_rpr)
         if target_rpr is None and merged_rpr is not None and len(merged_rpr):
             run.insert(0, merged_rpr)
+    if style_id == getattr(document.part, "_docforge_roles", {}).get("reference"):
+        for tag in ("ind", "spacing", "tabs"):
+            for direct in list(properties.findall(qn("w:" + tag))):
+                properties.remove(direct)
     _override_run_fonts(element, font_family, east_asia_font)
     return element
 
@@ -839,11 +858,12 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
     return element
 
 
-def _native_toc_nodes(document: DocumentType, heading_style_id: str) -> list:
+def _native_toc_nodes(document: DocumentType, heading_style_id: str, entries: Sequence[str] = ()) -> list:
     """Create a native Word TOC field covering Heading 1 through Heading 3."""
     toc_style_id = _find_style(document, ("TOC Heading", "TOCHeading"), fallback="Normal")
     heading = _new_paragraph(document, toc_style_id or heading_style_id, "CONTENTS", uppercase=False)
     _flush_left_heading(heading)
+    _set_paragraph_flag(heading, "w:keepNext")
     paragraph = OxmlElement("w:p")
     run_begin = OxmlElement("w:r")
     begin = OxmlElement("w:fldChar")
@@ -864,8 +884,15 @@ def _native_toc_nodes(document: DocumentType, heading_style_id: str) -> list:
     paragraph.append(run_separate)
     placeholder = OxmlElement("w:r")
     text = OxmlElement("w:t")
-    text.text = "Right-click and update field to populate this table of contents."
+    text.text = "\n".join(entries) or "Contents"
     placeholder.append(text)
+    if entries:
+        text.text = entries[0]
+        for entry in entries[1:]:
+            placeholder.append(OxmlElement("w:br"))
+            line = OxmlElement("w:t")
+            line.text = entry
+            placeholder.append(line)
     paragraph.append(placeholder)
     run_end = OxmlElement("w:r")
     end = OxmlElement("w:fldChar")
@@ -947,6 +974,7 @@ def _terminal_heading(
     )
     _flush_left_heading(heading)
     _set_heading_outline(heading, 1)
+    _set_paragraph_flag(heading, "w:keepNext")
     _remove_paragraph_numbering(heading)
     if page_break_before:
         _set_page_break_before(heading)
@@ -1326,6 +1354,9 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         "references_heading": references_heading if references_heading is not None else choose("references_heading", text_match="references"),
         "front_note": front_note,
     }
+    for role in ("table_caption", "table_head", "table_body", "table_foot", "keywords",
+                 "back_matter_heading", "back_matter_body", "toc_text", "algorithm"):
+        paragraphs_map[role] = choose(role)
     figure_regions = _template_inline_figure_slots(regions)
     if not figure_regions:
         figure_regions = tuple(region for region in regions if region.figure)
@@ -1413,7 +1444,7 @@ def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Bl
         groups.append((tuple(text), block, alt))
         text = []
         index += 1
-        if index < len(blocks) and blocks[index].kind == "paragraph" and is_caption(blocks[index].text):
+        if index < len(blocks) and blocks[index].kind in {"paragraph", "toc_text"} and is_caption(blocks[index].text):
             groups[-1] = (groups[-1][0], block, blocks[index].text.strip())
             index += 1
     groups.append((tuple(text), None, ""))
@@ -1476,6 +1507,15 @@ def _section_geometry(section) -> tuple[int, int, int, int, int, int]:
             int(margins.get(qn("w:right"), "1440")),
         )
     )
+
+
+def _section_text_height_twips(section) -> int:
+    size = section.find(qn("w:pgSz"))
+    margins = section.find(qn("w:pgMar"))
+    height = int(size.get(qn("w:h"), "15840")) if size is not None else 15840
+    top = int(margins.get(qn("w:top"), "1440")) if margins is not None else 1440
+    bottom = int(margins.get(qn("w:bottom"), "1440")) if margins is not None else 1440
+    return max(1, height - top - bottom)
 
 
 def _section_width_twips(section) -> int:
@@ -1544,6 +1584,9 @@ def _with_continuous_section(section):
 
 
 def _apply_template_run_formatting(element, prototype) -> None:
+    _strip_fonts(element)
+    for color in list(element.iter(qn("w:color"))):
+        color.getparent().remove(color)
     if prototype is None:
         return
     base = _run_prototype(prototype, prefer_long=True)
@@ -1571,7 +1614,6 @@ def _clone_rendered_block(
     number_prefix: str = "",
     body_font_size: float | None = None,
     caption_font_size: float | None = None,
-    implicit_typography: bool = True,
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
@@ -1588,20 +1630,43 @@ def _clone_rendered_block(
             body = re.sub(r"(?i)^supplementary\s+table\s*\d*\s*[.:]?\s*", "", body).strip()
         paragraph = _new_paragraph(
             target,
-            styles["caption"],
+            styles["table_caption"],
             f"**{label}** {body}".strip(),
-            prototype=p.get("caption"),
+            prototype=p.get("table_caption"),
         )
-        _format_caption_runs(paragraph, _caption_points(caption_font_size, implicit_typography))
+        _format_caption_runs(paragraph, caption_font_size)
+        _set_paragraph_flag(paragraph, "w:keepNext")
         return [paragraph]
+    if block.kind in {"keywords", "table_foot", "back_matter_heading", "back_matter_body", "toc_text"}:
+        paragraph = _new_paragraph(target, styles[block.kind], block.text, prototype=p.get(block.kind))
+        if block.kind == "back_matter_heading":
+            _set_paragraph_flag(paragraph, "w:keepNext")
+            _set_heading_outline(paragraph, 1)
+        return [paragraph]
+    if block.kind == "algorithm":
+        from docx.text.paragraph import Paragraph
+        from docx.shared import Pt
+        result = []
+        for line in block.text.split("\n"):
+            normalized = line.replace("\u00a0", " ").expandtabs(4)
+            lead = len(normalized) - len(normalized.lstrip(" "))
+            node = _new_paragraph(target, styles["algorithm"], normalized.lstrip(" "), prototype=p.get("algorithm"))
+            paragraph = Paragraph(node, target._body)
+            base = _style(target, styles["algorithm"]).paragraph_format.left_indent
+            paragraph.paragraph_format.left_indent = Pt((base.pt if base else 0) + lead * _style_points(target, styles["algorithm"]) / 2)
+            paragraph.paragraph_format.keep_together = True
+            if styles["algorithm"] == styles["body"]:
+                paragraph.alignment = 0
+                for run in paragraph.runs:
+                    run.font.name = "Consolas"
+            result.append(node)
+        return result
     if block.kind in {"paragraph", "reference"}:
         role = "reference" if block.kind == "reference" else "body"
         paragraph = _new_paragraph(target, styles[role], block.text, prototype=p.get(role))
         if block.kind == "paragraph":
             if body_font_size is not None:
                 _override_run_size(paragraph, body_font_size)
-            elif implicit_typography:
-                _override_run_size(paragraph, 11)
         return [paragraph]
     if block.kind == "heading":
         level = min(max(block.level, 1), 3)
@@ -1609,7 +1674,9 @@ def _clone_rendered_block(
         # Markdown heading text is authored content.  Preserve its case even
         # when a template uses an uppercase Heading 1 style; style formatting
         # must not rewrite the source text.
-        return [_new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False)]
+        heading = _new_paragraph(target, styles[role], block.text, prototype=p.get(role), bold_default=False)
+        _set_paragraph_flag(heading, "w:keepNext")
+        return [heading]
     if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet", "code", "equation", "table", "separator"}:
         generated = render_blocks_to_doc([block], equation_start=equation_number or 1, number_prefix=number_prefix)
         result: list = []
@@ -1623,6 +1690,7 @@ def _clone_rendered_block(
             _fit_tables(clone, width)
             if block.kind == "equation":
                 _add_body_style(clone, styles["body"])
+                _strip_fonts(clone)
             if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet"}:
                 properties = clone.find(qn("w:pPr"))
                 if properties is None:
@@ -1650,12 +1718,21 @@ def _clone_rendered_block(
                 _apply_style_to_paragraph(clone, target, styles["body"])
                 _apply_template_run_formatting(clone, p.get("body"))
             if block.kind == "table":
-                # Renderer table cells use a fresh paragraph with left
-                # alignment.  Give every cell the semantic body style so an
-                # explicit custom alignment (for example justified P1) wins.
-                for paragraph in clone.iter(qn("w:p")):
-                    _apply_style_to_paragraph(paragraph, target, styles["body"])
-                    _apply_template_run_formatting(paragraph, p.get("body"))
+                # Rebuild cell text through the template inline codec so cell
+                # roles and optional native math apply consistently.
+                for row_index, row in enumerate(clone.findall(qn("w:tr"))):
+                    role = "table_head" if row_index == 0 else "table_body"
+                    for column_index, cell in enumerate(row.findall(qn("w:tc"))):
+                        for paragraph in list(cell.findall(qn("w:p"))):
+                            merge = cell.find(qn("w:tcPr") + "/" + qn("w:vMerge"))
+                            content = "" if merge is not None and merge.get(qn("w:val")) != "restart" else block.rows[row_index][column_index]
+                            replacement = _new_paragraph(target, styles[role], content, prototype=p.get(role))
+                            cell.replace(paragraph, replacement)
+                    for paragraph in row.iter(qn("w:p")):
+                        _apply_style_to_paragraph(paragraph, target, styles[role])
+                        for tag in ("spacing", "ind"):
+                            for node in list(paragraph.findall(qn("w:pPr") + "/" + qn("w:" + tag))):
+                                node.getparent().remove(node)
             result.append(clone)
         return result
     return []
@@ -1670,9 +1747,9 @@ def _clone_figure(
     caption_style_id: str,
     figure_number: int,
     section_width_twips: int | None = None,
+    section_height_twips: int | None = None,
     number_prefix: str = "",
     caption_font_size: float | None = None,
-    implicit_typography: bool = True,
 ) -> list:
     image_path = Path(image.path)
     if not image_path.is_file():
@@ -1740,6 +1817,23 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
+    height_twips = section_height_twips or _section_text_height_twips(target.sections[-1]._sectPr)
+    points = caption_font_size or _style_points(target, caption_style_id)
+    width_twips = section_width_twips or _body_column_width_twips(target)
+    chars_per_line = max(1, width_twips / (points * 10))
+    lines = max(1, int(len(caption) / chars_per_line) + 1) if caption.strip() else 0
+    allowance = (lines * points * 1.3 + 24) * 20
+    limit = max(1, int((height_twips - allowance) * 635))
+    for extent in paragraph.iter(qn("wp:extent")):
+        cx, cy = int(extent.get("cx")), int(extent.get("cy"))
+        if cy > limit:
+            new_width = max(1, round(cx * limit / cy))
+            extent.set("cx", str(new_width))
+            extent.set("cy", str(limit))
+            for other in paragraph.iter(qn("a:ext")):
+                if other.get("cx") == str(cx) and other.get("cy") == str(cy):
+                    other.set("cx", str(new_width))
+                    other.set("cy", str(limit))
     if not caption.strip():
         return [paragraph]
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
@@ -1750,7 +1844,7 @@ def _clone_figure(
     )
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
     _set_paragraph_flag(cap, "w:keepLines")
-    _format_caption_runs(cap, _caption_points(caption_font_size, implicit_typography))
+    _format_caption_runs(cap, caption_font_size)
     return [paragraph, cap]
 
 
@@ -1893,12 +1987,16 @@ def _geometry(document: DocumentType) -> tuple[tuple[int, int, int, int, int, in
     )
 
 
-def _update_fields(document: DocumentType) -> None:
-    """Disable automatic field updates that trigger Word's external-field prompt."""
+def _update_fields(document: DocumentType, *, enabled: bool = False) -> None:
+    """Request field refresh when a native TOC was explicitly requested."""
     settings = document.settings.element
     node = settings.find(qn("w:updateFields"))
     if node is not None:
         settings.remove(node)
+    if enabled:
+        node = OxmlElement("w:updateFields")
+        node.set(qn("w:val"), "true")
+        settings.append(node)
 
 
 def _source_part(rels_name: str) -> str | None:
@@ -2002,6 +2100,7 @@ def verify_template_output(
     expected_sections: int | None = None,
     expected_geometry: Sequence[tuple[int, int, int, int, int, int]] | None = None,
     expected_body_columns: int | None = None,
+    body_section_index: int = 1,
     expected_reference_labels: Sequence[str] | None = None,
 ) -> dict[str, object]:
     verify_navigation_headings(path)
@@ -2011,8 +2110,10 @@ def verify_template_output(
     with zipfile.ZipFile(path) as archive:
         settings = etree.fromstring(archive.read("word/settings.xml"))
         update_fields = settings.find(qn("w:updateFields"))
-        if update_fields is not None and update_fields.get(qn("w:val"), "true").lower() == "true":
-            raise RuntimeError("Generated DOCX enables automatic field updates on open")
+        if update_fields is not None and update_fields.get(qn("w:val"), "true").lower() in {"true", "1", "on"}:
+            main = etree.fromstring(archive.read("word/document.xml"))
+            if not any(re.match(r"\s*TOC\b", node.text or "") for node in main.iter(qn("w:instrText"))):
+                raise RuntimeError("Generated DOCX enables automatic field updates without a native TOC")
         unsafe = re.compile(r"\b(?:INCLUDETEXT|INCLUDEPICTURE|DDE(?:AUTO)?|LINK)\b", re.IGNORECASE)
         for name in archive.namelist():
             if not name.startswith("word/") or not name.endswith(".xml"):
@@ -2029,7 +2130,7 @@ def verify_template_output(
         )
     if expected_geometry is not None and tuple(expected_geometry) != geometry:
         raise RuntimeError("Template page geometry changed during assembly")
-    body_columns = _section_columns(document)
+    body_columns = _section_columns(document, body_section_index)
     if expected_body_columns is not None and body_columns != expected_body_columns:
         raise RuntimeError(
             f"Template body column count changed: expected {expected_body_columns}, found {body_columns}"
@@ -2058,7 +2159,7 @@ def verify_template_output(
         "image_relationships": "resolved",
         "placeholder_tokens": [],
         "raw_citation_tokens": 0,
-        "automatic_field_updates": False,
+        "automatic_field_updates": update_fields is not None,
         "sections": len(document.sections),
         "body_columns": body_columns,
         "section_geometry": [list(value) for value in geometry],
@@ -2092,6 +2193,8 @@ def assemble_markdown_template(
     bibliography_profile: str = "markdown",
     include_metadata_back_matter: bool = True,
     native_toc: bool = False,
+    end_matter_placement: str = "source",
+    inline_math: str = "runs",
     restart_heading_numbering: bool = False,
     body_first_line_chars: float | None = None,
     page_break_before_h1: bool = False,
@@ -2102,6 +2205,7 @@ def assemble_markdown_template(
     force: bool = False,
     style_authority: object | None = None,
 ) -> AssemblyResult:
+    requested_style_profile = style_profile
     validate_output_path(output)
     if output.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {output}")
@@ -2150,7 +2254,22 @@ def assemble_markdown_template(
     if resolved_bibliography_scope == "new-only" and citation_base_path is None:
         raise ValueError("bibliography_scope='new-only' requires citation_base_path")
 
+    if end_matter_placement not in {"source", "end"}:
+        raise ValueError("end_matter_placement must be source or end")
+    if inline_math not in {"runs", "omml"}:
+        raise ValueError("inline_math must be runs or omml")
     template = _load_template_document(template_path)
+    template.part._docforge_inline_math = inline_math
+    if style_profile != "template":
+        from ..style.profile import load_profile
+        profile_path = Path(style_profile)
+        raw = profile_path.read_text(encoding="utf-8-sig")
+        payload = json.loads(raw) if raw.lstrip().startswith("{") else None
+        if isinstance(payload, dict) and any(key in payload for key in ("schema", "roles", "policy")):
+            if style_authority is not None:
+                raise ValueError("Provide either --style v1 profile or style_authority")
+            style_authority = load_profile(profile_path)
+            style_profile = "template"
     if citation_format == "template":
         citation_style = (
             CitationStyle.SUPERSCRIPT
@@ -2181,6 +2300,33 @@ def assemble_markdown_template(
     )
     rendered = _replace_block_citations(blocks, mapping, citation_style)
     abstract, body_blocks = _extract_abstract(rendered)
+    keywords = tuple(block for block in body_blocks if block.kind == "keywords")
+    body_blocks = tuple(block for block in body_blocks if block.kind != "keywords")
+    deferred: list[Block] = []
+    retained: list[Block] = []
+    in_end_matter = False
+    in_back_matter = False
+    for block in body_blocks:
+        if block.kind == "heading" and block.level == 1:
+            label = block.text.strip().rstrip(":：").casefold()
+            in_end_matter = label in {"table of contents", "graphical abstract", "toc"}
+            in_back_matter = label in {
+                "acknowledgments", "acknowledgements", "conflict of interest",
+                "author contributions", "data availability", "code availability",
+                "data and software availability", "supporting information",
+            }
+            if in_back_matter:
+                block = Block("back_matter_heading", block.text, level=block.level)
+        elif block.kind == "paragraph":
+            if in_end_matter:
+                block = Block("toc_text", block.text)
+            elif in_back_matter:
+                block = Block("back_matter_body", block.text)
+        if in_end_matter and end_matter_placement == "end":
+            deferred.append(block)
+        else:
+            retained.append(block)
+    body_blocks = tuple(retained)
     # Supplementary-information templates carry an italic lead-in immediately
     # before the title.  Treat that source Markdown paragraph as front matter
     # so it is emitted with the template's original run metrics and does not
@@ -2214,6 +2360,13 @@ def assemble_markdown_template(
     # profile may satisfy a missing role explicitly.
     discovered = discover_template_styles(template, strict=False)
     styles = _resolve_style_profile(template, discovered, style_profile)
+    if style_authority is not None:
+        from ..style.profile import load_profile
+        authority = load_profile(style_authority)
+        for role_name, role_spec in authority.roles.items():
+            if role_name in styles and role_spec.word_style:
+                styles[role_name] = _find_style(template, (role_spec.word_style,), role=role_name)
+    template.part._docforge_roles = styles
     custom_template = any(
         getattr(style, "builtin", False) is False
         and style.type == WD_STYLE_TYPE.PARAGRAPH
@@ -2230,8 +2383,10 @@ def assemble_markdown_template(
         required_roles.add("authors")
     if metadata.affiliations or metadata.contacts:
         required_roles.add("affiliations")
-    if any(block.kind in {"image", "table_caption"} for block in body_blocks):
+    if any(block.kind == "image" for block in (*body_blocks, *deferred)):
         required_roles.add("caption")
+    if any(block.kind == "table_caption" for block in (*body_blocks, *deferred)):
+        required_roles.add("table_caption")
     if any(block.kind == "reference" for block in body_blocks) or (
         used
         and (
@@ -2320,8 +2475,16 @@ def assemble_markdown_template(
         if abstract_font_size is not None:
             _override_run_size(abstract_paragraph, abstract_font_size)
         front.append(abstract_paragraph)
+    for block in keywords:
+        front.append(_new_paragraph(template, styles["keywords"], block.text))
+    native_end = []
     if native_toc:
-        front.extend(_native_toc_nodes(template, styles["heading_1"]))
+        entries = [block.text for block in rendered if block.kind == "heading" and 1 <= block.level <= 3 and block.text.strip().casefold() not in {"abstract", "table of contents", "toc"}]
+        native_nodes = _native_toc_nodes(template, styles["heading_1"], entries)
+        if end_matter_placement == "end":
+            native_end = native_nodes[:-1]
+        else:
+            front.extend(native_nodes)
 
     # Build a fresh body while reusing the template's section properties.  The
     # sample text and sample images are discarded; their section geometry,
@@ -2366,7 +2529,6 @@ def assemble_markdown_template(
                 number_prefix=numbering_prefix,
                 body_font_size=body_font_size,
                 caption_font_size=caption_font_size,
-                implicit_typography=style_authority is None,
             )
             if block.kind == "heading":
                 for node in nodes:
@@ -2469,9 +2631,9 @@ def assemble_markdown_template(
                 styles["caption"],
                 figure_index + 1,
                 section_width_twips=_section_width_twips(render_section),
+                section_height_twips=_section_text_height_twips(render_section),
                 number_prefix=numbering_prefix,
                 caption_font_size=caption_font_size,
-                implicit_typography=style_authority is None,
             )
         )
         if resolved_span == "page" and page_span_requires_breaks:
@@ -2504,20 +2666,20 @@ def assemble_markdown_template(
         if resolved_bibliography_scope == "all" or key not in citation_base
     ) if citation_base is not None else tuple(used)
     if include_metadata_back_matter and _is_filled_metadata(metadata.supporting_information):
-        output_nodes.append(_terminal_heading(template, styles["heading_1"], "SUPPORTING INFORMATION", prototype=prototypes.paragraphs.get("heading_1")))
-        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.supporting_information, prototype=prototypes.paragraphs.get("body"))
+        output_nodes.append(_terminal_heading(template, styles["back_matter_heading"], "SUPPORTING INFORMATION", prototype=prototypes.paragraphs.get("back_matter_heading")))
+        _append_metadata_paragraphs(output_nodes, template, styles["back_matter_body"], metadata.supporting_information, prototype=prototypes.paragraphs.get("back_matter_body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.acknowledgement):
-        output_nodes.append(_terminal_heading(template, styles["heading_1"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("heading_1")))
-        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("body"))
+        output_nodes.append(_terminal_heading(template, styles["back_matter_heading"], "ACKNOWLEDGMENTS", prototype=prototypes.paragraphs.get("back_matter_heading")))
+        _append_metadata_paragraphs(output_nodes, template, styles["back_matter_body"], metadata.acknowledgement, prototype=prototypes.paragraphs.get("back_matter_body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.author_contributions):
-        output_nodes.append(_terminal_heading(template, styles["heading_1"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("heading_1")))
-        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("body"))
+        output_nodes.append(_terminal_heading(template, styles["back_matter_heading"], "AUTHOR CONTRIBUTIONS", prototype=prototypes.paragraphs.get("back_matter_heading")))
+        _append_metadata_paragraphs(output_nodes, template, styles["back_matter_body"], metadata.author_contributions, prototype=prototypes.paragraphs.get("back_matter_body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.code_availability):
-        output_nodes.append(_terminal_heading(template, styles["heading_1"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
-        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.code_availability, prototype=prototypes.paragraphs.get("body"))
+        output_nodes.append(_terminal_heading(template, styles["back_matter_heading"], "CODE AVAILABILITY", prototype=prototypes.paragraphs.get("back_matter_heading")))
+        _append_metadata_paragraphs(output_nodes, template, styles["back_matter_body"], metadata.code_availability, prototype=prototypes.paragraphs.get("back_matter_body"))
     if include_metadata_back_matter and _is_filled_metadata(metadata.data_software_availability):
-        output_nodes.append(_terminal_heading(template, styles["heading_1"], "DATA AND SOFTWARE AVAILABILITY", prototype=prototypes.paragraphs.get("heading_1")))
-        _append_metadata_paragraphs(output_nodes, template, styles["body"], metadata.data_software_availability, prototype=prototypes.paragraphs.get("body"))
+        output_nodes.append(_terminal_heading(template, styles["back_matter_heading"], "DATA AND SOFTWARE AVAILABILITY", prototype=prototypes.paragraphs.get("back_matter_heading")))
+        _append_metadata_paragraphs(output_nodes, template, styles["back_matter_body"], metadata.data_software_availability, prototype=prototypes.paragraphs.get("back_matter_body"))
     if reference_keys:
         reference_heading = _terminal_heading(
             template,
@@ -2533,6 +2695,77 @@ def assemble_markdown_template(
                 _override_run_size(reference, reference_font_size)
             output_nodes.append(reference)
     final_region = body_regions[min(body_index, len(body_regions) - 1)]
+    end_section = adjusted(final_region.section)
+    if native_end:
+        output_nodes.append(_page_break_node())
+        output_nodes.extend(native_end)
+    if deferred:
+        output_nodes.append(_page_break_node())
+        for preceding, image, caption in _figure_groups(deferred):
+            for block in preceding:
+                nodes = _clone_rendered_block(
+                    block, template, styles, prototypes,
+                    equation_number=equation_index, table_number=table_index,
+                    number_prefix=numbering_prefix, body_font_size=body_font_size,
+                    caption_font_size=caption_font_size,
+                )
+                for node in nodes:
+                    _fit_tables(node, _section_width_twips(end_section))
+                output_nodes.extend(nodes)
+                if block.kind == "equation":
+                    equation_index += 1
+                if block.kind == "table_caption":
+                    label = f"Table {numbering_prefix}{table_index}"
+                    tables.append({"number": table_index, "label": label, "caption": block.text})
+                    table_index += 1
+            if image is None:
+                continue
+            options = dict(image.options)
+            orientation = options.get("orientation", "portrait")
+            if orientation not in {"portrait", "landscape"}:
+                raise ValueError("Image orientation marker must be portrait or landscape")
+            span = options.get("span", figure_span)
+            if "columns" in options:
+                if "span" in options:
+                    raise ValueError("Image span and columns markers cannot be combined")
+                if options["columns"] not in {"single", "one", "double", "two"}:
+                    raise ValueError("Image columns marker must be one, two, single, or double")
+                span = "page" if options["columns"] in {"single", "one"} else "column"
+            if span not in {"column", "page"}:
+                raise ValueError("Image span marker must be column or page")
+            if orientation == "landscape" and span != "page":
+                raise ValueError("Landscape images require span=page")
+            figure_section = end_section
+            breaks = span == "page" and (
+                _section_column_count(end_section) != 1
+                or _section_orientation(end_section) != orientation
+            )
+            if breaks:
+                figure_section = _with_page_orientation(_with_column_layout(end_section, "one"), orientation)
+                figure_section = _with_continuous_section(figure_section)
+                output_nodes.append(_section_break_node(_with_continuous_section(end_section)))
+                section_sources.append(final_region.index)
+                section_geometries.append(_section_geometry(end_section))
+            output_nodes.extend(_clone_figure(
+                template, image, caption, None, prototypes.paragraphs.get("caption"),
+                styles["caption"], figure_index + 1,
+                section_width_twips=_section_width_twips(figure_section),
+                section_height_twips=_section_text_height_twips(figure_section),
+                number_prefix=numbering_prefix, caption_font_size=caption_font_size,
+            ))
+            if breaks:
+                output_nodes.append(_section_break_node(figure_section))
+                section_sources.append(final_region.index)
+                section_geometries.append(_section_geometry(figure_section))
+            figures.append({
+                "number": figure_index + 1,
+                "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
+                "path": str(Path(image.path).resolve()), "sha256": sha256_file(Path(image.path)),
+                "caption": caption, "template_region": None,
+                "placement_after_body_region": final_region.index, "span": span,
+                "columns": _section_column_count(figure_section), "orientation": orientation,
+            })
+            figure_index += 1
     # The final section belongs to the document body.  A body-level sectPr is
     # required for Word/LibreOffice to balance the last two-column region.
     final_section = adjusted(final_region.section)
@@ -2541,38 +2774,34 @@ def assemble_markdown_template(
     section_geometries.append(_section_geometry(final_section))
 
     heading_style_ids = {
-        styles["heading_1"],
-        styles["heading_2"],
-        styles["heading_3"],
-        styles["references_heading"],
+        styles["heading_1"], styles["heading_2"], styles["heading_3"],
+        styles["references_heading"], styles["back_matter_heading"],
     }
-    implicit_typography = style_authority is None
+    if native_toc:
+        cached_entries = []
+        for node in output_nodes:
+            properties = node.find(qn("w:pPr"))
+            outline = properties.find(qn("w:outlineLvl")) if properties is not None else None
+            if outline is not None and int(outline.get(qn("w:val"), "9")) < 3:
+                label = _text_of(node).strip()
+                if label:
+                    cached_entries.append(label)
+        for node in output_nodes:
+            if not any(re.match(r"\s*TOC\b", item.text or "") for item in node.iter(qn("w:instrText"))):
+                continue
+            result_run = next((run for run in node.findall(qn("w:r")) if run.find(qn("w:t")) is not None), None)
+            if result_run is not None:
+                for child in list(result_run):
+                    result_run.remove(child)
+                for index, entry in enumerate(cached_entries):
+                    if index:
+                        result_run.append(OxmlElement("w:br"))
+                    text = OxmlElement("w:t")
+                    text.text = entry
+                    result_run.append(text)
     for node in output_nodes:
         _override_heading_before(node, heading_style_ids, heading_before)
         _override_run_fonts(node, font_family, east_asia_font)
-        if implicit_typography:
-            _force_run_black(node)
-        style_node = node.find(qn("w:pPr"))
-        style_ref = style_node.find(qn("w:pStyle")) if style_node is not None else None
-        style_id = style_ref.get(qn("w:val")) if style_ref is not None else None
-        # Some house styles want an unsized title centered at 18 pt. A named
-        # template title already carries its own size, and a style shared with
-        # the body (the Normal fallback) must not be restyled on every paragraph.
-        shared_roles = {
-            styles["body"],
-            styles["authors"],
-            styles["affiliations"],
-            styles["abstract"],
-            styles["heading_1"],
-            styles["heading_2"],
-            styles["heading_3"],
-            styles["caption"],
-            styles["reference"],
-        }
-        if implicit_typography and style_id == styles["title"] and style_id not in shared_roles:
-            title_style = _style(template, style_id)
-            if title_style.font.size is None:
-                _override_run_size(node, 18)
     body_element = template._element.body
     for child in list(body_element):
         body_element.remove(child)
@@ -2580,7 +2809,7 @@ def assemble_markdown_template(
         body_element.append(node)
     template.core_properties.title = resolved_title
     template.core_properties.author = metadata.authors
-    _update_fields(template)
+    _update_fields(template, enabled=native_toc)
     citation_converted = materialize_citations(template, citation_style)
     normalize_document_typography(template)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -2612,6 +2841,7 @@ def assemble_markdown_template(
         expected_sections=len(section_sources),
         expected_geometry=selected_geometry,
         expected_body_columns=body_columns_after,
+        body_section_index=section_sources.index(body_regions[0].index),
         expected_reference_labels=tuple(str(mapping[key]) for key in reference_keys),
     )
     verification["citation_format"] = citation_style.name
@@ -2633,7 +2863,7 @@ def assemble_markdown_template(
         verification=verification,
         font_family=font_family,
         east_asia_font=east_asia_font,
-        style_profile=style_profile,
+        style_profile=requested_style_profile,
         line_numbers=line_numbers,
         contacts=metadata.contacts,
         include_title=include_title,
@@ -2648,6 +2878,8 @@ def assemble_markdown_template(
         bibliography_profile=bibliography_profile,
         include_metadata_back_matter=include_metadata_back_matter,
         native_toc=native_toc,
+        end_matter_placement=end_matter_placement,
+        inline_math=inline_math,
         restart_heading_numbering=restart_heading_numbering,
         body_first_line_chars=body_first_line_chars,
         page_break_before_h1=page_break_before_h1,
@@ -2680,6 +2912,8 @@ def write_assembly_sidecars(
         "markdown_inputs": [_descriptor(path) for path in inputs],
         "template": _descriptor(template_path),
     }
+    if result.style_profile != "template" and Path(result.style_profile).is_file():
+        descriptors["style_profile"] = _descriptor(Path(result.style_profile))
     if metadata_path is not None:
         descriptors["metadata"] = _descriptor(metadata_path)
     if bibliography_path is not None:
@@ -2707,6 +2941,8 @@ def write_assembly_sidecars(
             "strip_level_one_headings": result.strip_level_one_headings,
             "heading_before": result.heading_before,
             "native_toc": result.native_toc,
+            "end_matter_placement": result.end_matter_placement,
+            "inline_math": result.inline_math,
             "restart_heading_numbering": result.restart_heading_numbering,
             "body_first_line_chars": result.body_first_line_chars,
             "page_break_before_h1": result.page_break_before_h1,
