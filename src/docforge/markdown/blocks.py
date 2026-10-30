@@ -12,7 +12,8 @@ class Block:
 
     Attributes:
         kind: heading | paragraph | ordered | bullet | reference | code |
-            equation | table_caption | table | quote | image | separator
+            equation | table_caption | table | table_foot | keywords | algorithm |
+            quote | image | separator
         text: textual payload (empty for tables)
         level: heading/list nesting level (0-based for lists, 1+ for headings)
         language: fenced-code info string

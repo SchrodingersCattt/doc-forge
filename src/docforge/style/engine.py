@@ -77,7 +77,7 @@ def restyle_docx(
             elif _paragraph_style(paragraph, styles) != style_id:
                 continue
             matched += 1
-            _apply_direct(paragraph, role, loaded.policy.direct_formatting)
+            _apply_direct(paragraph, role, loaded.policy.direct_formatting, styles, style_id)
         if matched:
             applied.append(role_name)
         else:
@@ -351,49 +351,84 @@ def _apply_paragraph(properties: etree._Element, paragraph) -> None:
         spacing.set(_q("lineRule"), "auto")
     if paragraph.first_line_pt is not None:
         _child(properties, "ind").set(_q("firstLine"), str(int(round(paragraph.first_line_pt * 20))))
-    if paragraph.keep_with_next:
-        _child(properties, "keepNext")
-    if paragraph.page_break_before:
-        _child(properties, "pageBreakBefore")
+    _toggle(properties, "keepNext", paragraph.keep_with_next)
+    _toggle(properties, "pageBreakBefore", paragraph.page_break_before)
 
 
-def _apply_direct(paragraph: etree._Element, role, policy: str) -> None:
+def _apply_direct(paragraph: etree._Element, role, policy: str,
+                  styles: etree._Element, style_id: str) -> None:
     if policy == "preserve":
         return
-    for run in paragraph.findall(_q("r")):
-        properties = run.find(_q("rPr"))
-        if properties is None:
-            continue
-        if policy == "clear_all":
-            for child in list(properties):
-                if etree.QName(child).localname not in {"vertAlign", "rStyle"}:
+    # Effective properties include docDefaults and the complete basedOn chain.
+    by_id = {style.get(_q("styleId")): style for style in styles.findall(_q("style"))}
+    chain = list(reversed(_chain(by_id, style_id)))
+    defaults = styles.find(_q("docDefaults"))
+    run_tags: dict[str, dict[str, str]] = {}
+    para_tags: dict[str, dict[str, str]] = {}
+    for style in ([defaults] if defaults is not None else []) + chain:
+        for tag, target in (("rPr", run_tags), ("pPr", para_tags)):
+            properties = style.find(_q(tag))
+            if style is defaults:
+                properties = style.find(f"{_q(tag + 'Default')}/{_q(tag)}")
+            if properties is not None:
+                for child in properties:
+                    target.setdefault(child.tag, {}).update(child.attrib)
+    # Emphasis, scripts and character styles carry authored meaning.
+    semantic = {_q(tag) for tag in ("b", "bCs", "i", "iCs", "vertAlign", "rStyle", "u", "strike", "dstrike")}
+    explicit_semantic = set()
+    if role.font.bold is not None:
+        explicit_semantic.update({_q("b"), _q("bCs")})
+    if role.font.italic is not None:
+        explicit_semantic.update({_q("i"), _q("iCs")})
+    for properties in paragraph.xpath(".//w:rPr", namespaces=NS):
+        for child in list(properties):
+            if child.tag in semantic and (policy == "clear_all" or child.tag not in explicit_semantic):
+                continue
+            if policy == "clear_all" or child.tag in explicit_semantic:
+                properties.remove(child)
+            elif child.tag in run_tags:
+                _clear_property_conflicts(properties, child, run_tags[child.tag])
+    properties = paragraph.find(_q("pPr"))
+    if properties is not None:
+        for child in list(properties):
+            # Keep structure and navigation, including list numbering, sections,
+            # outline levels and generated keep-with-next flags.
+            if etree.QName(child).localname in {"spacing", "ind", "jc", "tabs", "shd", "pBdr"}:
+                if policy == "clear_all":
                     properties.remove(child)
-            continue
-        font = role.font
-        if font.size_pt is not None:
-            _drop(properties, "sz")
-            _drop(properties, "szCs")
-        if font.bold is not None:
-            _drop(properties, "b")
-            _drop(properties, "bCs")
-        if font.italic is not None:
-            _drop(properties, "i")
-            _drop(properties, "iCs")
-        if font.color is not None:
-            _drop(properties, "color")
-        fonts = properties.find(_q("rFonts"))
-        if fonts is not None:
-            if font.latin:
-                for slot in ("ascii", "hAnsi", "asciiTheme", "hAnsiTheme"):
-                    fonts.attrib.pop(_q(slot), None)
-            if font.east_asia:
-                fonts.attrib.pop(_q("eastAsia"), None)
-                fonts.attrib.pop(_q("eastAsiaTheme"), None)
-            if font.complex:
-                fonts.attrib.pop(_q("cs"), None)
-                fonts.attrib.pop(_q("csTheme"), None)
-            if not fonts.attrib:
-                properties.remove(fonts)
+                elif child.tag in para_tags:
+                    _clear_property_conflicts(properties, child, para_tags[child.tag])
+            elif (child.tag == _q("keepNext") and role.paragraph.keep_with_next is not None) or (
+                child.tag == _q("pageBreakBefore") and role.paragraph.page_break_before is not None
+            ):
+                properties.remove(child)
+
+
+def _clear_property_conflicts(parent: etree._Element, direct: etree._Element,
+                              inherited: dict[str, str]) -> None:
+    """Clear only slots actually supplied by a partial template property."""
+    conflicts = set(inherited)
+    # Word treats these as mutually exclusive ways to set the same slot.
+    groups = (
+        {"ascii", "asciiTheme"}, {"hAnsi", "hAnsiTheme"},
+        {"eastAsia", "eastAsiaTheme"}, {"cs", "csTheme"},
+        {"firstLine", "firstLineChars", "hanging", "hangingChars"},
+        {"left", "leftChars", "start"}, {"right", "rightChars", "end"},
+        {"before", "beforeLines", "beforeAutospacing"},
+        {"after", "afterLines", "afterAutospacing"},
+        {"line", "lineRule"}, {"val", "themeColor", "themeTint", "themeShade"},
+    )
+    for group in groups:
+        names = {_q(name) for name in group}
+        if conflicts & names:
+            conflicts.update(names)
+    if len(direct) or not inherited:
+        parent.remove(direct)
+        return
+    for attribute in conflicts:
+        direct.attrib.pop(attribute, None)
+    if not direct.attrib:
+        parent.remove(direct)
 
 
 def _apply_page(document: etree._Element, profile: StyleProfile) -> bool:

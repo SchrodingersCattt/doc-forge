@@ -237,7 +237,7 @@ def test_direct_formatting_policies(tmp_path: Path) -> None:
     profile["policy"]["direct_formatting"] = "clear_all"
     restyle_docx(source, cleared, profile, force=True)
     body = next(item for item in resolved_paragraph_styles(cleared) if item["text"].startswith("Body"))
-    assert body["direct_italic"] is False
+    assert body["direct_italic"] is True
     assert body["subscript"] is True
     assert body["size_pt"] == 16
 

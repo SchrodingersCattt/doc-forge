@@ -16,6 +16,7 @@ from ..docxdiff import Package
 from ..docxdiff.redline import W as DIFF_W, NS as DIFF_NS, _accepted_revision_view, _blocks, visible_text
 from ..math import latex_to_omml
 from ..output import validate_output_path
+from ..tables import is_grouping_column as _is_auto_merge_column
 from .bib import CitationResolver, parse_bib, _compress_labels
 from .tokenize import Span, TableCell, tokenize_tex, spans_to_plain, plain_tex, unpaired_quote_errors
 FONT_BODY="Times New Roman"
@@ -1461,15 +1462,6 @@ def _apply_explicit_rowspans(tbl, rows: list[list[TableCell]], header_rows: int)
             for r in range(i, end + 1):
                 occupied.add((r, j))
     return occupied
-
-
-def _is_auto_merge_column(header: str) -> bool:
-    header_norm = re.sub(r"[^A-Za-z]+", " ", header).strip().lower()
-    safe_headers = {
-        "level", "group", "category", "class", "type", "family",
-        "site", "site level", "factor", "block",
-    }
-    return header_norm in safe_headers or header_norm.endswith(" level")
 
 
 def _apply_repeated_cell_merges(
