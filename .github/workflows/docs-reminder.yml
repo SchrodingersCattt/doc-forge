@@ -1,0 +1,35 @@
+# Advisory only. A missing docs note warns and comments.
+# The reminder step exits 0, so a missing note leaves the job successful.
+name: docs-reminder
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: docs-reminder-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  remind:
+    name: advisory docs note
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-check the reminder rules
+        run: python3 .github/scripts/docs_reminder.py --self-check
+
+      - name: Warn when src changes lack a docs note
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/scripts/docs_reminder.py
