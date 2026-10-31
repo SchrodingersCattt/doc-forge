@@ -1,5 +1,5 @@
-# Advisory only. A missing docs note warns and comments.
-# The reminder step exits 0, so a missing note leaves the job successful.
+# Advisory only. Self-check and the reminder both set continue-on-error.
+# A drifted self-check or a missing docs note warns. The job stays successful.
 name: docs-reminder
 
 on:
@@ -23,7 +23,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Self-check the reminder rules
-        run: python3 .github/scripts/docs_reminder.py --self-check
+        continue-on-error: true
+        run: |
+          if ! python3 .github/scripts/docs_reminder.py --self-check; then
+            echo "::warning::docs reminder self-check failed. The job stays successful."
+          fi
 
       - name: Warn when src changes lack a docs note
         continue-on-error: true
