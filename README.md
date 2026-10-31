@@ -137,6 +137,8 @@ pip install -e ".[tests]"
 pytest
 ```
 
+Public API, CLI, contract, migration, and ADR changes update the stable docs in the same change. The review bar is in [AGENTS.md](AGENTS.md). The pull request checklist is [`.github/pull_request_template.md`](.github/pull_request_template.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

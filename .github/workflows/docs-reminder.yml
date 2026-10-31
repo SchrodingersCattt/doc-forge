@@ -1,0 +1,39 @@
+# Advisory only. Self-check and the reminder both set continue-on-error.
+# A drifted self-check or a missing docs note warns. The job stays successful.
+name: docs-reminder
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: docs-reminder-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  remind:
+    name: advisory docs note
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-check the reminder rules
+        continue-on-error: true
+        run: |
+          if ! python3 .github/scripts/docs_reminder.py --self-check; then
+            echo "::warning::docs reminder self-check failed. The job stays successful."
+          fi
+
+      - name: Warn when src or pyproject.toml changes lack a docs note
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/scripts/docs_reminder.py
