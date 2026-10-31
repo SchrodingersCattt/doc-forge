@@ -1,11 +1,12 @@
-"""Advisory reminder when src/ changes without a docs note.
+"""Advisory reminder when src/ or pyproject.toml changes without a docs note.
 
 The process exits 0 when it warns. A missing note is a warning annotation and
 a pull request comment. It does not fail the build.
 
 The checklist prompt in ``.github/pull_request_template.md`` names the token
-``Docs: N/A``. That prompt is not a declaration. A declaration is any other
-occurrence of that exact token, usually with a one-line reason.
+``Docs: N/A``. That placeholder is not a declaration, including when the
+prompt line is reworded. A declaration is ``Docs: N/A`` followed by a
+separator and a non-empty reason.
 """
 
 from __future__ import annotations
@@ -19,13 +20,16 @@ from pathlib import Path
 
 MARKER = "<!-- docforge-docs-reminder -->"
 TEMPLATE_PROMPT = "Docs paths touched, or `Docs: N/A` and a one-line reason:"
-_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_TOKEN = "Docs: N/A"
+_PLACEHOLDER_PREFIX = "Docs paths touched"
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_TAIL_REASON = re.compile(r"\s*[`'\"]*\s*(?:—|–|--|-|:)\s*(.+)")
 
 COMMENT_BODY = f"""{MARKER}
 
-**Advisory.** This note does not fail the build.
+**Advisory.** This note leaves the build successful.
 
-`src/` changed, this pull request does not change `docs/**` or `AGENTS.md`, and the description has no `Docs: N/A` note.
+`src/` or `pyproject.toml` changed, this pull request does not change `docs/**` or `AGENTS.md`, and the description has no `Docs: N/A` note with a reason.
 
 - Out of scope (pure refactor, test-only or CI-only change, private helper, or docs-only pull request): add `Docs: N/A` and a one-line reason.
 - In scope (public API, CLI, Markdown/TeX/DOCX contracts, migration, or ADR-level design): update the stable docs in this pull request.
@@ -34,15 +38,55 @@ See `AGENTS.md`.
 """
 
 
+def _tail_has_reason(tail: str) -> bool:
+    """True when text after ``Docs: N/A`` is a separator plus a non-empty reason."""
+    matched = _TAIL_REASON.match(tail)
+    if not matched:
+        return False
+    reason = matched.group(1).strip().strip("`\"'")
+    return bool(re.search(r"\w", reason))
+
+
+def _line_has_reason(line: str) -> bool:
+    start = 0
+    while True:
+        index = line.find(_TOKEN, start)
+        if index < 0:
+            return False
+        if _tail_has_reason(line[index + len(_TOKEN) :]):
+            return True
+        start = index + len(_TOKEN)
+
+
 def declaration_present(body: str | None) -> bool:
-    """Return true when the author wrote ``Docs: N/A`` outside the template prompt."""
-    text = _COMMENT.sub("", body or "")
-    text = text.replace(TEMPLATE_PROMPT, "", 1)
-    return "Docs: N/A" in text
+    """True when the author wrote ``Docs: N/A`` plus a non-empty reason.
+
+    HTML comments are ignored. A checklist line that starts from the template
+    prompt (``Docs paths touched``) is placeholder text, including when that
+    line is slightly reworded. Its first ``Docs: N/A`` counts only when a
+    reason follows that same token. A later token on the line can still be
+    the author's note.
+    """
+    text = _HTML_COMMENT.sub("", body or "")
+    for line in text.splitlines():
+        if _PLACEHOLDER_PREFIX in line:
+            index = line.find(_TOKEN)
+            if index < 0:
+                continue
+            remainder = line[index + len(_TOKEN) :]
+            second = remainder.find(_TOKEN)
+            if _tail_has_reason(remainder):
+                return True
+            if second >= 0 and _tail_has_reason(remainder[second + len(_TOKEN) :]):
+                return True
+            continue
+        if _line_has_reason(line):
+            return True
+    return False
 
 
-def _is_src(path: str) -> bool:
-    return path == "src" or path.startswith("src/")
+def _is_watched(path: str) -> bool:
+    return path == "src" or path.startswith("src/") or path == "pyproject.toml"
 
 
 def _is_docs_or_agents(path: str) -> bool:
@@ -50,8 +94,8 @@ def _is_docs_or_agents(path: str) -> bool:
 
 
 def should_warn(paths: list[str], body: str | None) -> bool:
-    """Warn when src/ changed, docs were not touched, and the body has no note."""
-    if not any(_is_src(path) for path in paths):
+    """Warn when watched paths changed, docs were not touched, and no note exists."""
+    if not any(_is_watched(path) for path in paths):
         return False
     if any(_is_docs_or_agents(path) for path in paths):
         return False
@@ -102,11 +146,29 @@ def _self_check() -> None:
         ([src, "docs/adr/0002-example.md"], "", False),
         ([src, "AGENTS.md"], "", False),
         ([src], "Docs: N/A — private helper", False),
-        ([src], "See Docs: N/A for the internal refactor.", False),
-        ([src], "<!-- Docs: N/A — hidden -->", True),
+        ([src], "Docs: N/A - test-only change", False),
+        ([src], "Docs: N/A: internal refactor", False),
+        ([src], "Docs: N/A", True),
+        ([src], "Docs: N/A —", True),
+        ([src], "Docs: N/A -", True),
+        ([src], "See Docs: N/A for the internal refactor.", True),
+        ([src], "<!-- Docs: N/A — hidden from review -->", True),
         ([src], template, True),
         ([src], template + "\nDocs: N/A — test-only change\n", False),
         ([src], template.replace(TEMPLATE_PROMPT, TEMPLATE_PROMPT + " Docs: N/A — refactor"), False),
+        ([src], template.replace(" and a one-line reason", ""), True),
+        ([src], template.replace("a one-line reason", "a short note"), True),
+        (
+            [src],
+            template.replace(" and a one-line reason", "") + "\nDocs: N/A — private helper\n",
+            False,
+        ),
+        ([src], "- Docs paths touched: Docs: N/A — private helper", False),
+        (["pyproject.toml"], "", True),
+        (["pyproject.toml"], "Docs: N/A — script entry only", False),
+        (["pyproject.toml"], template.replace(" and a one-line reason", ""), True),
+        (["pyproject.toml", "docs/migration.md"], "", False),
+        (["pyproject.toml", "AGENTS.md"], "", False),
         (["tests/test_api.py"], "", False),
         (["docs/pipeline.md"], "", False),
         (["README.md", "src-extra/notes.md"], "", False),
@@ -127,6 +189,11 @@ def _self_check() -> None:
     )
     if not should_warn(renamed_inside_src, ""):
         raise SystemExit("a rename inside src/ must warn when docs are untouched")
+    renamed_manifest = paths_from_entries(
+        [{"filename": "packaging.toml", "previous_filename": "pyproject.toml"}]
+    )
+    if not should_warn(renamed_manifest, ""):
+        raise SystemExit("a rename of pyproject.toml must warn when docs are untouched")
     pages = [[{"filename": src}], [{"filename": "tests/test_api.py"}]]
     if paths_from_pages(pages) != [src, "tests/test_api.py"]:
         raise SystemExit("paginated file lists must flatten in order")
@@ -253,8 +320,8 @@ def run() -> None:
     paths = paths_from_pages(pages)
     if should_warn(paths, body):
         print(
-            "::warning::src/ changed without docs/** or AGENTS.md, "
-            "and the pull request body has no Docs: N/A note. See AGENTS.md."
+            "::warning::src/ or pyproject.toml changed without docs/** or AGENTS.md, "
+            "and the pull request body has no Docs: N/A note with a reason. See AGENTS.md."
         )
         try:
             _upsert_comment(repo, number)
