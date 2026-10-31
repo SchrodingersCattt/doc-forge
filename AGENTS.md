@@ -28,6 +28,30 @@ python -m py_compile src/docforge/**/*.py   # 快速语法检查
 - 保持类型标注 `from __future__ import annotations`，dataclass 建模（`Block`、`Span`、`PromptSpec` 等）。
 - 改动后跑 `pytest`；涉及 DOCX/跟踪修订的行为变更需补测试。
 - 提交信息用英语，一句话说明做了什么；默认直接在 `main` 上维护。
+- In-scope API, CLI, contract, migration, and ADR changes update stable docs in the same change. See below.
+
+## Documentation ships with the change
+
+公共 API、CLI、契约、迁移或 ADR 级设计的变更，必须在同一次变更里更新稳定文档。经 pull request 审查时，文档更新在同一个 pull request 中。直接提交到默认分支时，文档与代码同一提交落地。
+
+In-scope changes update these stable docs in that same change:
+
+- Public API or CLI behavior
+- Template-backed Markdown, round-trip, pipeline, or audit contracts
+  (`docs/pipeline.md`, `docs/roundtrip-contract.md`, `docs/docxmd-syntax.md`)
+- Migration or compatibility (`docs/migration.md`), including when hub APIs
+  are additive and legacy `md2docx` / `tex2docx` stay
+- A new or amended ADR under `docs/adr/`
+- A new standing package-boundary rule (`AGENTS.md`)
+
+Out of scope. Write `Docs: N/A` and a one-line reason:
+
+- Pure refactors, test-only or CI-only changes, private helpers, and docs-only pull requests
+- Consumer project templates and journal-specific content (those stay outside this package)
+
+Missing stable docs on an in-scope pull request is review P1. Docs that introduce consumer project names, journal-template identifiers, sample material names, or consumer repository paths are also review P1.
+
+Prefer fixtures, goldens, and contract tests as the behavioral truth where they exist. The checklist is `.github/pull_request_template.md`. An advisory workflow may warn when `src/` changes without `docs/**` or `AGENTS.md` and without a `Docs: N/A` note. The warning is advisory. Review still applies the P1 bar.
 
 ## Template-backed Markdown
 
