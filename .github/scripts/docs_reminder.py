@@ -131,6 +131,35 @@ def _self_check() -> None:
     if paths_from_pages(pages) != [src, "tests/test_api.py"]:
         raise SystemExit("paginated file lists must flatten in order")
 
+    marker_body = f"quoted marker\n{MARKER}\n"
+    bot = {
+        "id": 10,
+        "body": marker_body,
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+    human = {
+        "id": 11,
+        "body": marker_body,
+        "user": {"login": "reviewer", "type": "User"},
+    }
+    other_bot = {
+        "id": 12,
+        "body": marker_body,
+        "user": {"login": "example[bot]", "type": "Bot"},
+    }
+    missing_type = {
+        "id": 13,
+        "body": marker_body,
+        "user": {"login": "github-actions[bot]"},
+    }
+    no_marker = {
+        "id": 14,
+        "body": "no marker here",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+    if reminder_comment_ids([[human, bot, other_bot, missing_type, no_marker]]) != ["10"]:
+        raise SystemExit("only a github-actions[bot] comment with the marker may be edited")
+
 
 def _gh(args: list[str], *, payload: dict | None = None) -> subprocess.CompletedProcess[str]:
     command = ["gh", "api", *args]
@@ -159,18 +188,30 @@ def _fetch_pages(endpoint: str) -> list:
     return data
 
 
-def _comment_ids(repo: str, number: str) -> list[str]:
-    pages = _fetch_pages(f"repos/{repo}/issues/{number}/comments")
+def owned_reminder_comment(item: dict) -> bool:
+    """True only for this workflow's comment, posted by github-actions[bot]."""
+    if not isinstance(item, dict) or item.get("id") is None:
+        return False
+    if MARKER not in (item.get("body") or ""):
+        return False
+    user = item.get("user")
+    if not isinstance(user, dict):
+        return False
+    return user.get("type") == "Bot" and user.get("login") == "github-actions[bot]"
+
+
+def reminder_comment_ids(pages: list) -> list[str]:
     found: list[str] = []
     for page in pages:
         items = page if isinstance(page, list) else [page]
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            body = item.get("body") or ""
-            if MARKER in body and item.get("id") is not None:
+            if isinstance(item, dict) and owned_reminder_comment(item):
                 found.append(str(item["id"]))
     return found
+
+
+def _comment_ids(repo: str, number: str) -> list[str]:
+    return reminder_comment_ids(_fetch_pages(f"repos/{repo}/issues/{number}/comments"))
 
 
 def _upsert_comment(repo: str, number: str) -> None:
