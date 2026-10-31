@@ -32,7 +32,7 @@ python -m py_compile src/docforge/**/*.py   # 快速语法检查
 
 ## Documentation ships with the change
 
-公共 API、CLI、契约、迁移或 ADR 级设计的变更，必须在同一次变更里更新稳定文档。经 pull request 审查时，文档更新在同一个 pull request 中。直接提交到默认分支时，文档与代码同一提交落地。
+Changes to the public API, CLI, contracts, migration story, or an ADR-level design update the stable docs in the same change. In a pull request, the docs update is in that same pull request. A direct commit to the default branch lands the docs in that commit.
 
 In-scope changes update these stable docs in that same change:
 
@@ -51,7 +51,7 @@ Out of scope. Write `Docs: N/A` and a one-line reason:
 
 Missing stable docs on an in-scope pull request is review P1. Docs that introduce consumer project names, journal-template identifiers, sample material names, or consumer repository paths are also review P1.
 
-Prefer fixtures, goldens, and contract tests as the behavioral truth where they exist. The checklist is `.github/pull_request_template.md`. An advisory workflow may warn when `src/` changes without `docs/**` or `AGENTS.md` and without a `Docs: N/A` note. The warning is advisory. Review still applies the P1 bar.
+Prefer fixtures, goldens, and contract tests as the behavioral truth where they exist. The checklist is `.github/pull_request_template.md`. An advisory workflow may warn when `src/` or `pyproject.toml` changes without `docs/**` or `AGENTS.md` and without a `Docs: N/A` note that gives a one-line reason. The warning is advisory. Review still applies the P1 bar.
 
 ## Template-backed Markdown
 
