@@ -240,6 +240,26 @@ class OmmlTests(unittest.TestCase):
         self.assertTrue(any(run.italic and run.text == "d" for run in runs))
         self.assertTrue(any(run.font.subscript and run.text == "36" for run in runs))
 
+    def test_standalone_defaults_use_times_and_justified_body(self) -> None:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+
+        document = render_blocks_to_doc([
+            Block("heading", "A heading", level=2),
+            Block("paragraph", "Ordinary *emphasis* and H<sub>2</sub>O."),
+        ])
+        body = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("Ordinary"))
+        self.assertEqual(body.alignment, WD_ALIGN_PARAGRAPH.JUSTIFY)
+        self.assertEqual(document.styles["Normal"].paragraph_format.alignment, WD_ALIGN_PARAGRAPH.JUSTIFY)
+        self.assertEqual(document.styles["Normal"].font.name, "Times New Roman")
+        for paragraph in document.paragraphs:
+            for run in paragraph.runs:
+                if run.text:
+                    self.assertEqual(run.font.name, "Times New Roman")
+                    self.assertEqual(run._element.rPr.rFonts.get(qn("w:eastAsia")), "Times New Roman")
+        self.assertTrue(any(run.italic and run.text == "emphasis" for run in body.runs))
+        self.assertTrue(any(run.font.subscript and run.text == "2" for run in body.runs))
+
     def test_inline_code_keeps_consolas_in_rendered_blocks(self) -> None:
         document = render_blocks_to_doc(
             [
@@ -438,6 +458,42 @@ def test_arrhenius_operator_and_upright_subscript() -> None:
     assert any(run.text.startswith("ln") and run.italic is not True for run in runs)
     assert any(run.text == "a" and run.font.subscript and run.italic is not True for run in runs)
     assert any(run.text == "E" and run.italic for run in runs)
+
+
+def test_omml_paragraphs_keep_independent_lines_and_math():
+    import shutil
+    from docforge.markdown import render_omml_paragraphs
+
+    if shutil.which("pandoc") is None:
+        pytest.skip("Pandoc is required for native Word math")
+    paragraphs = render_omml_paragraphs([
+        r"**Input:** $x_1$",
+        r"**if** $\lvert A \rvert \geq 2$ **then** $B \setminus C$",
+    ])
+    assert len(paragraphs) == 2
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main", "m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
+    assert "Input:" in "".join(paragraphs[0].xpath(".//w:t/text()", namespaces=ns))
+    assert paragraphs[0].xpath(".//m:oMath", namespaces=ns)
+    assert len(paragraphs[1].xpath(".//m:oMath", namespaces=ns)) == 2
+
+
+def test_standalone_cli_defaults_preserve_scripts_and_formatting(tmp_path: Path) -> None:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docforge.cli import main
+
+    source = tmp_path / "source.md"
+    source.write_text("Dear Reader,\n\nA *journal* and H<sub>2</sub>O are examples.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assert main(["md2docx", str(source), "-o", str(output)]) == 0
+    document = Document(output)
+    for paragraph in document.paragraphs:
+        assert paragraph.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+        assert not paragraph.paragraph_format.first_line_indent
+        assert paragraph.paragraph_format.space_after.pt == 6
+        assert all(run.font.name == "Times New Roman" for run in paragraph.runs if run.text)
+    assert any(run.font.subscript and run.text == "2" for run in document.paragraphs[1].runs)
+    assert any(run.italic and run.text == "journal" for run in document.paragraphs[1].runs)
 
 
 def test_explicit_table_caption_block_is_parsed() -> None:

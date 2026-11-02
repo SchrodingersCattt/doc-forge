@@ -63,6 +63,7 @@ from .source_edit import (
 )
 from .contract import ContractResult, build_docx_contract
 from .inline import DisplayRun, Run, display, is_caption, is_filename_alt, key
+from .paragraphs import render_omml_paragraphs
 
 __all__ = [
     "Block",
@@ -82,6 +83,7 @@ __all__ = [
     "setup_styles",
     "make_empty_doc",
     "render_blocks_to_doc",
+    "render_omml_paragraphs",
     "normalize_text",
     "normalize_typography",
     "verify_navigation_headings",

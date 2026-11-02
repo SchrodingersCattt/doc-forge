@@ -428,7 +428,7 @@ def set_run_vertical_align(run, mode: str) -> None:
     align.set(qn("w:val"), mode)
 
 
-def set_run_font(run, *, chinese: str = "仿宋", latin: str = "Times New Roman", size: float = 12.0) -> None:
+def set_run_font(run, *, chinese: str = "Times New Roman", latin: str = "Times New Roman", size: float = 12.0) -> None:
     run.font.name = latin
     run.font.size = Pt(size)
     run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
@@ -626,10 +626,12 @@ def add_heading(doc: DocumentType, text: str, level: int):
     return paragraph
 
 
-def add_body_paragraph(doc: DocumentType, text: str, *, indent: bool = True):
+def add_body_paragraph(doc: DocumentType, text: str, *, indent: bool = False):
     paragraph = doc.add_paragraph()
     _render_inline(paragraph, text)
     apply_base_format(paragraph, first_indent=indent)
+    if not indent:
+        paragraph.paragraph_format.space_after = Pt(6)
     return paragraph
 
 
@@ -954,8 +956,10 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
     normal = doc.styles["Normal"]
     if configure_normal:
         normal.font.name = "Times New Roman"
-        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "仿宋")
+        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+        normal._element.rPr.rFonts.set(qn("w:cs"), "Times New Roman")
         normal.font.size = Pt(12)
+        normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         normal.paragraph_format.line_spacing = 1.5
         normal.paragraph_format.space_after = Pt(3)
     for level in range(1, 10):
@@ -1200,7 +1204,13 @@ def render_blocks_to_doc(
             equation_number += 1
         if block.kind == "table_caption":
             table_number += 1
-    override_document_fonts(doc, latin=font_family, east_asia=east_asia_font)
+    latin = font_family or "Times New Roman"
+    east_asia = east_asia_font or latin
+    normal = doc.styles["Normal"]
+    normal.font.name = latin
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), east_asia)
+    normal._element.rPr.rFonts.set(qn("w:cs"), latin)
+    override_document_fonts(doc, latin=latin, east_asia=east_asia)
     return doc
 
 
