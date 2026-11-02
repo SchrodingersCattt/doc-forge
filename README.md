@@ -23,6 +23,7 @@ Details are in `docforge <command> --help`.
 - `tex2docx` — LaTeX to DOCX, with an optional second TeX file and a BibTeX file
 - `docx2md` — DOCX to Markdown via Pandoc
 - `docx2tex` — DOCX to LaTeX via Pandoc
+- `tex-review-export`, `tex-review-build` — conservative DOCX/TeX review bundles; see [docs/tex-review-roundtrip.md](docs/tex-review-roundtrip.md)
 - `redline` — a DOCX of Word tracked changes against a reviewed file
 - `md-export`, `md-build`, `md-roundtrip` — a reversible Markdown bundle; see [docs/docxmd-syntax.md](docs/docxmd-syntax.md)
 - `roundtrip` — copy an unchanged DOCX, or patch its package; see [docs/roundtrip-contract.md](docs/roundtrip-contract.md)

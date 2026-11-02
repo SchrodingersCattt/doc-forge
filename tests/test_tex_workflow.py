@@ -138,6 +138,39 @@ See main Figure~\ref{fig:one} and \mainref{one}.
         with self.assertRaisesRegex(ValueError, "missing-figure placeholder"):
             validate_docx_package(output, source)
 
+    def test_figure_keeps_literal_text_in_order_with_image(self):
+        source = self.root / "figure-text.tex"
+        source.write_text(
+            "\n".join((r"\begin{document}", r"\begin{figure}", r"\centering",
+                       r"c\includegraphics{figures/one.png}x", r"\caption{Example}",
+                       r"\end{figure}", r"\end{document}")),
+            encoding="utf-8",
+        )
+        output = self.root / "figure-text.docx"
+        convert_files(source, output=output)
+        paragraph = next(p for p in Document(output).paragraphs if p._p.xpath(".//w:drawing"))
+        nodes = paragraph._p.xpath(".//w:t | .//w:drawing")
+        self.assertEqual(["c", "drawing", "x"], [node.text if node.tag.endswith("}t") else "drawing" for node in nodes])
+        self.assertEqual(1, validate_docx_package(output, source)["figures"])
+
+    def test_unsupported_figure_content_fails_closed(self):
+        source = self.root / "unsupported-figure.tex"
+        source.write_text(
+            "\n".join((r"\begin{document}", r"\begin{figure}",
+                       r"\raisebox{1pt}{\includegraphics{figures/one.png}}",
+                       r"\end{figure}", r"\end{document}")),
+            encoding="utf-8",
+        )
+        output = self.root / "unsupported-figure.docx"
+        with self.assertRaisesRegex(ValueError, "Unsupported visible content"):
+            convert_files(source, output=output)
+        self.assertFalse(output.exists())
+
+    def test_spaces_next_to_figure_text_are_preserved(self):
+        from docforge.tex.converter import _figure_contents
+        items = _figure_contents(r"\begin{figure}before \includegraphics{one.png} after\end{figure}")
+        self.assertEqual([("text", "before "), ("image", "one.png"), ("text", " after")], items)
+
     def test_unresolved_float_reference_names_label(self):
         source = self.root / "unresolved-ref.tex"
         source.write_text(

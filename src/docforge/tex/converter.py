@@ -1039,7 +1039,8 @@ def _picture_source(path: Path):
 def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
                resolver: CitationResolver, width_inches: float = 6.0,
                extended: bool = False, float_prefix: str = "",
-               labels: list[str] | None = None):
+               labels: list[str] | None = None,
+               contents: list[tuple[str, str]] | None = None):
     context=_context()
     if extended:
         context.ed_fig_counter+=1
@@ -1051,12 +1052,17 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.first_line_indent = Cm(0)
-    for idx, one_path in enumerate(fig_paths):
+    items = contents if contents is not None else [("image", path) for path in fig_paths]
+    for idx, (kind, value) in enumerate(items):
+        if kind == "text":
+            add_rich_text(p, value, resolver, font_size=PT_CAPTION)
+            continue
+        one_path = value
         img = _find_figure(one_path)
         if img:
             run = p.add_run()
             run.add_picture(_picture_source(img), width=Inches(width_inches))
-            if idx < len(fig_paths) - 1:
+            if idx < len(items) - 1 and items[idx + 1][0] == "image":
                 run.add_break()
         else:
             run = p.add_run(f"[Figure: {one_path} - not found as PNG, JPG, or PDF]")
@@ -1081,6 +1087,45 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
     # resolve to this single caption.
     for label in labels or []:
         add_bookmark(cp, _reference_bookmark_name(label))
+
+
+def _figure_contents(block: str) -> list[tuple[str, str]]:
+    """Return visible text and graphics in source order, or reject unknown syntax.
+
+    Captions and labels are rendered separately. A literal next to an image is
+    still document content, not whitespace or an image option. Unknown TeX is
+    refused rather than silently discarded.
+    """
+    body = _strip_latex_comments(block)
+    body = re.sub(r"\\begin\{figure\*?\}(?:\[[^\]]*\])?|\\end\{figure\*?\}", "", body)
+    while match := re.search(r"\\(?:caption|label)\s*\{", body):
+        argument = _extract_braced_arg_at(body, match.end() - 1)
+        if argument is None or body[argument[1] - 1] != "}":
+            raise ValueError("Unclosed figure caption or label")
+        body = body[:match.start()] + " " + body[argument[1]:]
+    body = re.sub(r"\\(?:centering|hfill|small|footnotesize)\b", "", body)
+    graphics = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
+    items: list[tuple[str, str]] = []
+    position = 0
+
+    def append_text(text: str) -> None:
+        if not text.strip():
+            return
+        if any(character in text for character in "\\{}$#%&_^~"):
+            raise ValueError("Unsupported visible content in figure environment")
+        normalized = re.sub(r"\s+", " ", text)
+        if "\n" in text[:len(text) - len(text.lstrip())]:
+            normalized = normalized.lstrip()
+        if "\n" in text[len(text.rstrip()):]:
+            normalized = normalized.rstrip()
+        items.append(("text", normalized))
+
+    for match in graphics.finditer(body):
+        append_text(body[position:match.start()])
+        items.append(("image", match.group(1)))
+        position = match.end()
+    append_text(body[position:])
+    return items
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2114,7 +2159,10 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
             while j < len(lines) and r"\end{figure" not in fig_block:
                 fig_block += "\n" + lines[j]
                 j += 1
-            fig_names = re.findall(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", fig_block)
+            figure_contents = _figure_contents(fig_block)
+            fig_names = [value for kind, value in figure_contents if kind == "image"]
+            if not fig_names:
+                raise ValueError("Figure environment has no supported includegraphics")
             fig_name = fig_names if len(fig_names) > 1 else (fig_names[0] if fig_names else "")
             caption_raw = _extract_braced_arg(fig_block, r"\caption")
             figure_labels = re.findall(r"\\label\{([^}]+)\}", fig_block)
@@ -2126,6 +2174,7 @@ def _convert_tex(tex_path: Path, out_path: Path, bib: dict[str, dict],
                 extended=in_extended_data,
                 float_prefix=float_prefix,
                 labels=figure_labels,
+                contents=figure_contents,
             )
             i = j
             continue
