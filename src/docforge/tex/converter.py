@@ -1055,7 +1055,9 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
     items = contents if contents is not None else [("image", path) for path in fig_paths]
     for idx, (kind, value) in enumerate(items):
         if kind == "text":
-            add_rich_text(p, value, resolver, font_size=PT_CAPTION)
+            # Panel text uses the body size. The caption paragraph below
+            # keeps the caption size.
+            add_rich_text(p, value, resolver)
             continue
         one_path = value
         img = _find_figure(one_path)
@@ -1089,12 +1091,25 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
         add_bookmark(cp, _reference_bookmark_name(label))
 
 
+# Spacing and layout tokens between graphics are not visible text. Named
+# commands use a word boundary so ``\hfil`` does not consume ``\hfill`` and
+# ``\quad`` does not consume ``\qquad``. ``\\`` may be starred or followed by
+# a bracketed length. Graphic options are left untouched; only the text
+# outside ``\includegraphics`` is filtered.
+_FIGURE_IGNORED_TOKEN_RE = re.compile(
+    r"\\(?:centering|hfill|hfil|small|footnotesize|qquad|quad|xspace)\b"
+    r"|\\[,:;!]"
+    r"|\\\\\*?(?:\s*\[[^\]]*\])?"
+)
+
+
 def _figure_contents(block: str) -> list[tuple[str, str]]:
     """Return visible text and graphics in source order, or reject unknown syntax.
 
     Captions and labels are rendered separately. A literal next to an image is
-    still document content, not whitespace or an image option. Unknown TeX is
-    refused rather than silently discarded.
+    still document content, not whitespace or an image option. Tokens in
+    ``_FIGURE_IGNORED_TOKEN_RE`` are dropped. Any other command or special
+    character is refused rather than silently discarded.
     """
     body = _strip_latex_comments(block)
     body = re.sub(r"\\begin\{figure\*?\}(?:\[[^\]]*\])?|\\end\{figure\*?\}", "", body)
@@ -1103,12 +1118,12 @@ def _figure_contents(block: str) -> list[tuple[str, str]]:
         if argument is None or body[argument[1] - 1] != "}":
             raise ValueError("Unclosed figure caption or label")
         body = body[:match.start()] + " " + body[argument[1]:]
-    body = re.sub(r"\\(?:centering|hfill|small|footnotesize)\b", "", body)
     graphics = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
     items: list[tuple[str, str]] = []
     position = 0
 
     def append_text(text: str) -> None:
+        text = _FIGURE_IGNORED_TOKEN_RE.sub("", text)
         if not text.strip():
             return
         if any(character in text for character in "\\{}$#%&_^~"):

@@ -139,6 +139,8 @@ See main Figure~\ref{fig:one} and \mainref{one}.
             validate_docx_package(output, source)
 
     def test_figure_keeps_literal_text_in_order_with_image(self):
+        from docforge.tex.converter import PT_BODY
+
         source = self.root / "figure-text.tex"
         source.write_text(
             "\n".join((r"\begin{document}", r"\begin{figure}", r"\centering",
@@ -151,6 +153,8 @@ See main Figure~\ref{fig:one} and \mainref{one}.
         paragraph = next(p for p in Document(output).paragraphs if p._p.xpath(".//w:drawing"))
         nodes = paragraph._p.xpath(".//w:t | .//w:drawing")
         self.assertEqual(["c", "drawing", "x"], [node.text if node.tag.endswith("}t") else "drawing" for node in nodes])
+        text_runs = [run for run in paragraph.runs if run.text]
+        self.assertEqual([PT_BODY.pt, PT_BODY.pt], [run.font.size.pt for run in text_runs])
         self.assertEqual(1, validate_docx_package(output, source)["figures"])
 
     def test_unsupported_figure_content_fails_closed(self):
@@ -170,6 +174,89 @@ See main Figure~\ref{fig:one} and \mainref{one}.
         from docforge.tex.converter import _figure_contents
         items = _figure_contents(r"\begin{figure}before \includegraphics{one.png} after\end{figure}")
         self.assertEqual([("text", "before "), ("image", "one.png"), ("text", " after")], items)
+
+    def test_spacing_between_graphics_is_ignored(self):
+        from docforge.tex.converter import _figure_contents
+
+        separators = (
+            r"\quad",
+            r"\qquad",
+            r"\,",
+            r"\:",
+            r"\;",
+            r"\!",
+            r"\xspace",
+            r"\hfill",
+            r"\hfil",
+            r"\centering",
+            r"\small",
+            r"\footnotesize",
+            "\\\\",
+            "\\\\*",
+            "\\\\[0.5em]",
+        )
+        for separator in separators:
+            with self.subTest(separator=separator):
+                block = (
+                    r"\begin{figure}\includegraphics[width=\linewidth]{one.png}"
+                    + separator
+                    + r"\includegraphics{two.png}\end{figure}"
+                )
+                self.assertEqual(
+                    [("image", "one.png"), ("image", "two.png")],
+                    _figure_contents(block),
+                )
+        labeled = _figure_contents(
+            r"\begin{figure}c\quad\includegraphics{one.png}\hfill x\end{figure}"
+        )
+        self.assertEqual([("text", "c"), ("image", "one.png"), ("text", " x")], labeled)
+
+    def test_unsupported_figure_tokens_are_refused(self):
+        from docforge.tex.converter import _figure_contents
+
+        samples = (
+            r"\begin{figure}\raisebox{1pt}{\includegraphics{one.png}}\end{figure}",
+            r"\begin{figure}\includegraphics{one.png}\hspace{1em}\includegraphics{two.png}\end{figure}",
+            r"\begin{figure}\begin{minipage}{1in}\includegraphics{one.png}\end{minipage}\end{figure}",
+            r"\begin{figure}\textbf{c}\includegraphics{one.png}\end{figure}",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                with self.assertRaisesRegex(ValueError, "Unsupported visible content"):
+                    _figure_contents(sample)
+
+    def test_convert_files_keeps_graphics_separated_by_spacing(self):
+        Image.new("RGB", (8, 8), "black").save(self.figure_dir / "two.png")
+        separators = (
+            ("quad", r"\quad"),
+            ("qquad", r"\qquad"),
+            ("thin", r"\,"),
+            ("hfill", r"\hfill"),
+            ("linebreak", "\\\\"),
+            ("sized-break", "\\\\[0.5em]"),
+        )
+        for name, separator in separators:
+            with self.subTest(separator=name):
+                source = self.root / f"figure-gap-{name}.tex"
+                source.write_text(
+                    "\n".join((
+                        r"\begin{document}",
+                        r"\begin{figure}",
+                        r"\includegraphics{figures/one.png}" + separator + r"\includegraphics{figures/two.png}",
+                        r"\end{figure}",
+                        r"\end{document}",
+                    )),
+                    encoding="utf-8",
+                )
+                output = self.root / f"figure-gap-{name}.docx"
+                convert_files(source, output=output)
+                paragraph = next(p for p in Document(output).paragraphs if p._p.xpath(".//w:drawing"))
+                nodes = paragraph._p.xpath(".//w:t | .//w:drawing")
+                self.assertEqual(
+                    ["drawing", "drawing"],
+                    ["drawing" if node.tag.endswith("}drawing") else node.text for node in nodes],
+                )
+                self.assertEqual(2, validate_docx_package(output, source)["figures"])
 
     def test_unresolved_float_reference_names_label(self):
         source = self.root / "unresolved-ref.tex"

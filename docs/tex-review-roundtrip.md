@@ -17,12 +17,18 @@ The command does not modify the original inputs. Multiple changed paragraphs
 require stable matching Word paragraph IDs. Comments are retained in the
 reviewed DOCX snapshot rather than converted into TeX.
 
-If `document.tex` is unchanged, rebuilding copies the reviewed DOCX exactly
-and verifies its SHA-256. For a changed file, the edit must fall within one
-uniquely mapped plain paragraph and one existing Word text run. Only that
-run's text is changed. Other package parts, fields, images, bookmarks, and
-comment anchors remain in the source package. Snapshots and mapped text are
-verified before publication.
+If `document.tex` is unchanged, `tex-review-build` returns `EXACT_REUSE`:
+it copies the reviewed DOCX and verifies its SHA-256 again.
+`changed_paragraphs` is 0. When the file changed, the edit must fall within
+one uniquely mapped plain paragraph and one existing Word text run. Only
+that run's text is changed, and the result is `SOURCE_PATCH`.
+`changed_paragraphs` is the number of DOCX paragraphs patched.
+`tex-review-export` prints `mapped_paragraphs` (plain paragraphs with a
+unique TeX span) and `reviewed_changed_paragraphs` (paragraphs whose
+accepted text differs from the baseline). Other package parts, fields,
+images, bookmarks, and comment anchors remain in the source package.
+Snapshots and mapped text are verified before publication. Neither mode
+recompiles TeX or rebuilds figures, tables, or math.
 
 The supported subset is intentionally narrow: a body paragraph must match a
 unique, complete, standalone TeX prose line. It cannot contain TeX commands,
@@ -36,3 +42,6 @@ or applied to TeX. This workflow does not expand macros or guarantee that an
 arbitrary manuscript can be mapped; a refusal requires a separate, carefully
 reviewed edit. It is not a replacement for full TeX compilation and scientific
 review.
+
+Figure rendering is outside this bundle. How `tex2docx` keeps or refuses
+text inside a `figure` is documented in [tex-figures.md](tex-figures.md).
