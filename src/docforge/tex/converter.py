@@ -1093,11 +1093,13 @@ def add_figure(doc: Document, fig_path: str | list[str], caption_tex: str,
 
 # Spacing and layout tokens between graphics are not visible text. Named
 # commands use a word boundary so ``\hfil`` does not consume ``\hfill`` and
-# ``\quad`` does not consume ``\qquad``. ``\\`` may be starred or followed by
-# a bracketed length. Graphic options are left untouched; only the text
-# outside ``\includegraphics`` is filtered.
+# ``\quad`` does not consume ``\qquad``. ``\\``, ``\newline``, and
+# ``\linebreak`` may be starred or followed by a bracketed argument.
+# Graphic options are left untouched; only the text outside
+# ``\includegraphics`` is filtered.
 _FIGURE_IGNORED_TOKEN_RE = re.compile(
     r"\\(?:centering|hfill|hfil|small|footnotesize|qquad|quad|xspace)\b"
+    r"|\\(?:newline|linebreak)\b\*?(?:\s*\[[^\]]*\])?"
     r"|\\[,:;!]"
     r"|\\\\\*?(?:\s*\[[^\]]*\])?"
 )

@@ -194,6 +194,12 @@ See main Figure~\ref{fig:one} and \mainref{one}.
             "\\\\",
             "\\\\*",
             "\\\\[0.5em]",
+            r"\newline",
+            r"\newline*",
+            r"\newline[0.5em]",
+            r"\linebreak",
+            r"\linebreak*",
+            r"\linebreak[4]",
         )
         for separator in separators:
             with self.subTest(separator=separator):
@@ -219,6 +225,7 @@ See main Figure~\ref{fig:one} and \mainref{one}.
             r"\begin{figure}\includegraphics{one.png}\hspace{1em}\includegraphics{two.png}\end{figure}",
             r"\begin{figure}\begin{minipage}{1in}\includegraphics{one.png}\end{minipage}\end{figure}",
             r"\begin{figure}\textbf{c}\includegraphics{one.png}\end{figure}",
+            r"\begin{figure}\includegraphics{one.png}\nolinebreak\includegraphics{two.png}\end{figure}",
         )
         for sample in samples:
             with self.subTest(sample=sample):
@@ -234,6 +241,10 @@ See main Figure~\ref{fig:one} and \mainref{one}.
             ("hfill", r"\hfill"),
             ("linebreak", "\\\\"),
             ("sized-break", "\\\\[0.5em]"),
+            ("newline", r"\newline"),
+            ("newline-opt", r"\newline[0.5em]"),
+            ("break-cmd", r"\linebreak"),
+            ("break-opt", r"\linebreak[4]"),
         )
         for name, separator in separators:
             with self.subTest(separator=name):

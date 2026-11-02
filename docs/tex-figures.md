@@ -15,8 +15,9 @@ These tokens carry no visible figure text, so they are ignored. Each
 - layout and size switches: `\centering`, `\hfill`, `\hfil`, `\small`,
   `\footnotesize`
 - spacing: `\quad`, `\qquad`, `\xspace`, `\,`, `\:`, `\;`, `\!`
-- line breaks: `\\`, `\\*`, and `\\` with a bracketed length such as
-  `\\[0.5em]`
+- line breaks: `\\`, `\newline`, and `\linebreak`. A star or a bracketed
+  argument is ignored with the command, as in `\\*`, `\\[0.5em]`,
+  `\newline[0.5em]`, and `\linebreak[4]`
 
 Any other command, math, or special character (`\ { } $ # % & _ ^ ~`) in
 the figure body stops conversion. The error is `Unsupported visible content
