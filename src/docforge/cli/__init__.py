@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--template", type=Path, help="DOCX template to preserve while assembling Markdown")
     md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
     md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
+    md.add_argument("--manifest-dir", type=Path, help="Directory for the template assembly JSON manifest (default: next to the DOCX)")
     md.add_argument("--citation-base", type=Path, help="Existing manifest whose citation numbers a supplement should reuse")
     md.add_argument("--citation-format", choices=("template", "bracketed", "superscript", "superscript-bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")

@@ -2671,6 +2671,7 @@ def write_assembly_sidecars(
     bibliography_path: Path | None,
     command: Sequence[str],
     citation_base_path: Path | None = None,
+    manifest_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     import docx
     import lxml
@@ -2744,6 +2745,9 @@ def write_assembly_sidecars(
         },
     }
     manifest_path = result.output.with_suffix(".manifest.json")
+    if manifest_dir is not None:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = manifest_dir / manifest_path.name
     checksum_path = result.output.with_suffix(".sha256")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     checksum_path.write_text(f"{output['sha256']}  {result.output.name}\n", encoding="utf-8")
