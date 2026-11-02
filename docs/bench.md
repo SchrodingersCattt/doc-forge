@@ -14,7 +14,7 @@ Synthetic fixtures only. Nothing here is a manuscript, a consumer template, or a
 | `exact-reuse` | `convert` from that DOCX to a second DOCX. The build of the source DOCX is not included. |
 | `restyle` | `restyle` of that DOCX with a Normal 12 pt profile. The build of the source DOCX is not included. |
 
-Peak RSS is `ru_maxrss` for that process, in kilobytes, as reported by Linux. Package size is the output DOCX in bytes.
+Peak RSS is reported in KiB for the worker process: `ru_maxrss` on Unix and the peak working set on Windows. Package size is the output DOCX in bytes.
 
 ## This run
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import resource
 import statistics
 import subprocess
 import sys
@@ -22,6 +21,45 @@ from pathlib import Path
 
 KINDS = ("small", "medium", "complex")
 OPS = ("md-docx", "exact-reuse", "restyle")
+
+
+def _peak_rss_kb() -> int:
+    """Return the current process's peak resident memory in KiB."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(ProcessMemoryCounters), wintypes.DWORD,
+        )
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        if not psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(counters.PeakWorkingSetSize // 1024)
+
+    import resource
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak // 1024 if sys.platform == "darwin" else peak)
 
 
 def markdown_for(kind: str, root: Path) -> str:
@@ -89,7 +127,7 @@ def run_case(op: str, kind: str, root: Path) -> dict[str, object]:
         "op": op,
         "kind": kind,
         "seconds": time.perf_counter() - start,
-        "rss_kb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "rss_kb": _peak_rss_kb(),
         "bytes": target.stat().st_size,
     }
 
