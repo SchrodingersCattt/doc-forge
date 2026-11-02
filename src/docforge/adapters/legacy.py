@@ -20,6 +20,9 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         _detect_format(args.template)
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
+    manifest_dir = getattr(args, "manifest_dir", None)
+    if manifest_dir is not None and args.template is None:
+        raise ValueError("--manifest-dir requires --template")
     if args.roundtrip_manifest is not None:
         if reuse_unchanged_roundtrip_source(
             args.roundtrip_manifest, args.output, force=args.force, validate_format=True,
@@ -79,6 +82,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             metadata_path=args.metadata,
             bibliography_path=args.bibliography,
             citation_base_path=args.citation_base,
+            manifest_dir=manifest_dir,
             command=getattr(args, "_command_argv", ["docforge", "md2docx"]),
         )
         _echo(echo, result.output)
