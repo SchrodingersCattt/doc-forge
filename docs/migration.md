@@ -31,6 +31,10 @@ Supported `SOURCE_PATCH` content edits are confined to simple body paragraphs an
 
 `assemble_markdown_template(..., style_authority=profile)` applies the profile after assembly; the CLI accepts the same v1 schema through `--style`. `convert(..., style=profile)` and `write(..., style=profile)` drop the same direct defaults from the freshly rebuilt DOCX before restyle. For existing documents, `preserve` retains direct formatting. `clear_all` removes run presentation and paragraph spacing, indents, tabs, and alignment while retaining bold, italic, scripts, character styles, and structural properties. `clear_conflicting` clears properties supplied by the target style, its base styles, document defaults, or explicit role overrides; emphasis remains unless the role explicitly overrides it. Nested hyperlink runs are included.
 
+## Table notes (#63)
+
+`--table-notes` defaults to `legacy` so existing manuscripts keep historical recognition: `Table note:` / `Table foot:` lines and post-table `[a]` heuristics. Opt into `--table-notes explicit` for declaration-only notes that stay scoped to the preceding table. Escape a literal directive with a leading backslash. Table notes remain body paragraphs; they are not Word page footnotes. See [template roles and layout](template-layout.md).
+
 ## Intentionally unchanged
 
 Legacy `md2docx` and `tex2docx` stay, including when no StyleProfile is passed.

@@ -63,6 +63,9 @@ def _role(block: Block) -> str:
         "separator": "body",
         "image": "caption",
         "table_caption": "caption",
+        "table_foot": "table_foot",
+        "keywords": "keywords",
+        "algorithm": "algorithm",
         "reference": "reference",
     }.get(block.kind, "body")
 
