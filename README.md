@@ -20,9 +20,10 @@ Python 3.10+.
 Details are in `docforge <command> --help`.
 
 - `md2docx` — Markdown to DOCX
-- `tex2docx` — LaTeX to DOCX, with an optional second TeX file and a BibTeX file
+- `tex2docx` — LaTeX to DOCX, with an optional second TeX file and a BibTeX file. Literal text in a figure is kept; unsupported figure markup is refused. See [docs/tex-figures.md](docs/tex-figures.md)
 - `docx2md` — DOCX to Markdown via Pandoc
 - `docx2tex` — DOCX to LaTeX via Pandoc
+- `tex-review-export`, `tex-review-build` — conservative DOCX/TeX review bundles; see [docs/tex-review-roundtrip.md](docs/tex-review-roundtrip.md)
 - `redline` — a DOCX of Word tracked changes against a reviewed file
 - `md-export`, `md-build`, `md-roundtrip` — a reversible Markdown bundle; see [docs/docxmd-syntax.md](docs/docxmd-syntax.md)
 - `roundtrip` — copy an unchanged DOCX, or patch its package; see [docs/roundtrip-contract.md](docs/roundtrip-contract.md)
@@ -87,6 +88,8 @@ Figure 1. Caption text.
 ```
 
 `--figure-span column|page` sets the default width. Figures also fit within the active section text height, reserving estimated caption space and preserving aspect ratio. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
+
+In LaTeX, `tex2docx` keeps literal text inside a `figure` in source order with each `\includegraphics`, at the body font size. Spacing between graphics is ignored. Any other figure markup is refused and no DOCX is written. The token list is in [TeX figures](docs/tex-figures.md).
 
 `--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.
 
