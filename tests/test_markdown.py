@@ -156,6 +156,12 @@ class OmmlTests(unittest.TestCase):
         text = document.paragraphs[0].text
         self.assertEqual(text, "A → B and C ⟶ D.")
 
+    def test_inline_math_preserves_triangle_markers(self) -> None:
+        document = render_blocks_to_doc(
+            [Block("paragraph", r"Series A ($\triangle$) and B ($\triangledown$).")]
+        )
+        self.assertEqual(document.paragraphs[0].text, "Series A (△) and B (▽).")
+
     def test_inline_math_greek_symbols_and_unbraced_macro_subscript(self) -> None:
         document = render_blocks_to_doc(
             [Block("paragraph", r"$\mathbf v_\kappa$, $\Pi_{i,\eta\kappa}$, "

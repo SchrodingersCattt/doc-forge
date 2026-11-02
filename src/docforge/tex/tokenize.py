@@ -58,6 +58,8 @@ GREEK = {
     r"\AA": "Å",
     r"\star": "★",
     r"\ast": "*",
+    r"\triangle": "△",
+    r"\triangledown": "▽",
     r"\lvert": "|",
     r"\rvert": "|",
     r"\langle": "⟨",

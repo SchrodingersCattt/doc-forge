@@ -102,6 +102,53 @@ def _one_section_template(path: Path) -> None:
     document.save(path)
 
 
+def test_table_cells_use_table_prototypes_without_losing_emphasis(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    document = Document(template)
+    body_style = document.styles["TA_Main_Text"]
+    lead = document.add_paragraph("Special lead-in", style=body_style)
+    lead.runs[0].italic = True
+    document.add_paragraph("Ordinary body text.", style=body_style)
+    sample = document.add_table(rows=2, cols=2)
+    sample.cell(0, 0).text = "Sample heading"
+    sample.cell(1, 0).text = "Ordinary sample"
+    document.save(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "| **Heading** | **Value** |\n| --- | --- |\n"
+        "| Plain text | *emphasis* and $x_2$ |\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, title="A title")
+    table = Document(output).tables[0]
+    assert not table.cell(1, 0).paragraphs[0].runs[0].italic
+    value = table.cell(1, 1).paragraphs[0]
+    assert any(run.text == "emphasis" and run.italic for run in value.runs)
+    assert any(run.text == "x" and run.italic for run in value.runs)
+    assert any(run.text == "2" and run.font.subscript for run in value.runs)
+    assert any(run.text == "Heading" and run.bold for run in table.cell(0, 0).paragraphs[0].runs)
+
+
+def test_named_body_style_wins_over_unrelated_italic_fragment(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    document = Document(template)
+    body = document.add_paragraph("[BODY TEXT] [placeholder text]", style="TA_Main_Text")
+    body.runs[0].italic = False
+    fragment = document.add_paragraph("[BODY TEXT] [placeholder tex")
+    fragment.runs[0].italic = True
+    document.save(template)
+    source = tmp_path / "source.md"
+    source.write_text("Ordinary words and *authored emphasis*.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, title="A title")
+    paragraph = next(p for p in Document(output).paragraphs if "Ordinary words" in p.text)
+    assert any("Ordinary words" in run.text and not run.italic for run in paragraph.runs)
+    assert any(run.text == "authored emphasis" and run.italic for run in paragraph.runs)
+
+
 def _figure_template(path: Path, image: Path) -> None:
     document = Document()
     for name in ("BB_Author_Name", "BD_Abstract", "TA_Main_Text", "Caption", "EndNote Bibliography"):

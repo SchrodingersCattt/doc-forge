@@ -1309,6 +1309,11 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
         return not any(token in text for token in FORBIDDEN_TOKENS)
 
     body_pool = post_front or [node for _, node in body_candidates]
+    # A named body style is more authoritative than the default style's
+    # incidental fragments, even when the named samples are placeholders.
+    styled_body = [node for node in body_pool if node.style.style_id == styles["body"]]
+    if styled_body:
+        body_pool = styled_body
     usable_pool = [node for node in body_pool if usable_body(node)] or body_pool
     body = copy.deepcopy(max(usable_pool, key=lambda node: len(_text_of(node._p)))._p) if usable_pool else choose("body")
     caption = choose("caption", long=True)
@@ -1357,6 +1362,25 @@ def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regi
     for role in ("table_caption", "table_head", "table_body", "table_foot", "keywords",
                  "back_matter_heading", "back_matter_body", "toc_text", "algorithm"):
         paragraphs_map[role] = choose(role)
+    # If a template has no separate table paragraph style, its first body
+    # paragraph can be a specially formatted title or lead-in.  Use the
+    # template's own table cells as prototypes instead of borrowing that
+    # unrelated paragraph's direct formatting for every generated cell.
+    for role, row_index in (("table_head", 0), ("table_body", 1)):
+        if styles[role] != styles["body"]:
+            continue
+        sample = next(
+            (
+                paragraph._p
+                for table in document.tables
+                if len(table.rows) > row_index
+                for cell in table.rows[row_index].cells
+                for paragraph in cell.paragraphs
+                if paragraph.text.strip()
+            ),
+            None,
+        )
+        paragraphs_map[role] = copy.deepcopy(sample) if sample is not None else body
     figure_regions = _template_inline_figure_slots(regions)
     if not figure_regions:
         figure_regions = tuple(region for region in regions if region.figure)
