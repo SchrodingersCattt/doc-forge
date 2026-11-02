@@ -486,6 +486,17 @@ class StageContext:
         return self.output_path(ref.path)
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Recognize symbolic links and Windows directory junctions before resolving them."""
+    if path.is_symlink():
+        return True
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return getattr(info, "st_reparse_tag", None) == 0xA0000003
+
+
 def confined_path(root: Path, relative: str | os.PathLike[str], *, allow_missing: bool = True, reject_symlink: bool = True) -> Path:
     """Resolve *relative* under *root* and reject traversal/symlink escapes."""
 
@@ -495,10 +506,10 @@ def confined_path(root: Path, relative: str | os.PathLike[str], *, allow_missing
         current = root
         for part in Path(portable).parts:
             current = current / part
-            if current.is_symlink():
+            if _is_link_or_junction(current):
                 # A link is rejected even when it happens to point back inside
                 # the workspace: link targets are not stable across machines.
-                raise ValueError(f"symlink paths are not allowed: {relative}")
+                raise ValueError(f"symlink or junction paths are not allowed: {relative}")
     candidate = (root / portable).resolve(strict=False)
     try:
         candidate.relative_to(root)

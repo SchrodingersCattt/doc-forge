@@ -71,7 +71,7 @@ Synthetic fixtures live in `tests/fixtures/pairs/`. `pytest tests/test_pair_corp
 | MD → DOCX | API and CLI on `layout.md`. Heading text, emphasis, subscript, inline math text, table grid, figure SHA-256, and list item text. `body-style.yaml` keeps paragraph text and sets the body size. |
 | DOCX → MD | Semantic read of `native.docx`, plus `export --fidelity preserve` for the reversible bundle. Readable Pandoc Markdown when Pandoc is installed. |
 | TeX → DOCX | API and CLI on `layout.tex` with `refs.bib`. Section, emphasis, table, figure bytes, and legacy citation and cross-reference numbers. |
-| DOCX → TeX | Pandoc LaTeX for `native.docx` when Pandoc is installed. Unsupported text boxes stay on the loss report. |
+| DOCX → TeX | Pandoc LaTeX for `native.docx` when Pandoc is installed. Text-box geometry stays on the loss report; Pandoc may project its text into the document flow. |
 | MD → TeX | `semantic.md` matches checked-in `semantic.tex` and the shared semantic view, including math, citations, and cross-references. |
 | TeX → MD | That same view, then back to TeX. |
 

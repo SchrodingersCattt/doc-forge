@@ -136,15 +136,34 @@ def test_exception_message_redaction_preserves_closing_quotes():
     assert details["double_quoted_windows"] == 'No such file: "<absolute-path>"'
 
 
-def test_confined_path_rejects_traversal_and_symlinks(tmp_path: Path):
+def test_confined_path_rejects_traversal_and_links(tmp_path: Path, directory_link):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     with pytest.raises(ValueError):
-        confined_path(tmp_path, "../escape.txt")
-    outside = tmp_path.parent / "outside.txt"
-    outside.write_text("x", encoding="utf-8")
-    link = tmp_path / "link"
-    link.symlink_to(outside)
+        confined_path(workspace, "../escape.txt")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("x", encoding="utf-8")
+    directory_link(workspace / "link", outside)
     with pytest.raises(ValueError, match="symlink"):
-        confined_path(tmp_path, "link")
+        confined_path(workspace, "link/file.txt")
+    inside = workspace / "inside"
+    inside.mkdir()
+    directory_link(workspace / "internal-link", inside)
+    with pytest.raises(ValueError, match="symlink"):
+        confined_path(workspace, "internal-link/file.txt")
+
+
+def test_pipeline_rejects_linked_output_before_resolving(tmp_path: Path, directory_link):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = tmp_path / "real-output"
+    target.mkdir()
+    link = directory_link(tmp_path / "linked-output", target)
+    registry = Registry().register_stage("writer", WriteStage("doc.txt", "new"))
+    with pytest.raises(ValueError, match="symlink or junction"):
+        PipelineRunner(registry).run(spec(), workspace, output_dir=link)
+    assert target.is_dir()
 
 
 def test_publication_rejects_workspace_ancestor_and_unmarked_target(tmp_path: Path):

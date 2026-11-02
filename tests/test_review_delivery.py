@@ -377,15 +377,17 @@ def test_review_rejects_malformed_docx_before_delivery(tmp_path: Path) -> None:
     assert not (tmp_path / "delivery").exists()
 
 
-def test_review_rejects_mapped_source_symlink_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_review_rejects_mapped_source_symlink_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory_link) -> None:
     source_dir = tmp_path / "sources"
     source_dir.mkdir()
-    outside = tmp_path / "outside.md"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside = outside_dir / "outside.md"
     outside.write_text("outside\n", encoding="utf-8")
-    (source_dir / "link.md").symlink_to(outside)
+    directory_link(source_dir / "link", outside_dir)
     _revision_docx(tmp_path / "reviewed.docx", [("outside", "new", "p1")])
     section_map = {"sections": [{
-        "file": "link.md", "start_line": 1, "end_line": 1,
+        "file": "link/outside.md", "start_line": 1, "end_line": 1,
         "reviewed_start_line": 1, "reviewed_end_line": 1,
         "hash": delivery_module._sha256_text("outside\n"),
         "reviewed_paragraph": {"id": "p1", "hash": delivery_module._sha256_text("new\n")},

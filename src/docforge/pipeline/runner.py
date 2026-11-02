@@ -22,6 +22,7 @@ from .models import (
     StageResult,
     StageSpec,
     ValidationReport,
+    _is_link_or_junction,
     _portable_path,
     canonical_json,
     confined_path,
@@ -304,11 +305,12 @@ class PipelineRunner:
         source_root = Path(workspace).resolve()
         if not source_root.is_dir():
             raise FileNotFoundError(source_root)
-        target = Path(output_dir or source_root / "dist").resolve()
+        requested_target = Path(output_dir or source_root / "dist").absolute()
+        if _is_link_or_junction(requested_target):
+            raise ValueError("output_dir must not be a symlink or junction")
+        target = requested_target.resolve()
         if target == source_root or target in source_root.parents:
             raise ValueError("output_dir must not equal or contain the workspace")
-        if target.exists() and target.is_symlink():
-            raise ValueError("output_dir must not be a symlink")
         rid = run_id or new_run_id()
         parent = target.parent
         parent.mkdir(parents=True, exist_ok=True)
@@ -521,10 +523,10 @@ class PipelineRunner:
     def _has_publication_marker(path: Path) -> bool:
         """Return true only for a directory produced by this pipeline."""
 
-        if not path.is_dir() or path.is_symlink():
+        if not path.is_dir() or _is_link_or_junction(path):
             return False
         marker = path / "manifest.json"
-        if not marker.is_file() or marker.is_symlink():
+        if not marker.is_file() or _is_link_or_junction(marker):
             return False
         try:
             payload = json.loads(marker.read_text(encoding="utf-8"))
@@ -534,8 +536,8 @@ class PipelineRunner:
 
     @classmethod
     def _publish(cls, stage_root: Path, target: Path, *, retain_previous: bool) -> None:
-        if target.exists() and target.is_symlink():
-            raise ValueError("output_dir must not be a symlink")
+        if _is_link_or_junction(target):
+            raise ValueError("output_dir must not be a symlink or junction")
         backup = target.with_name(target.name + ".previous")
         for existing, label in ((target, "output_dir"), (backup, "previous publication")):
             if existing.exists() or existing.is_symlink():
