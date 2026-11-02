@@ -1,5 +1,4 @@
 from docx import Document
-from lxml import etree
 
 from docforge.docxdiff import create_tracked_docx
 from docforge.docxdiff.package import Package
