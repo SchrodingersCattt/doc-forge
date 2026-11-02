@@ -1030,11 +1030,13 @@ def _tokenize(
     spans: list[tuple[int, int, Style]],
     split_offsets: set[int] | None = None,
     *,
-    preserve_splits: set[int] | None = None,
+    glue_breaks: set[int] | None = None,
 ) -> list[Token]:
     split_offsets = set(split_offsets or ())
-    preserve_splits = set(preserve_splits or ())
-    split_offsets.update(preserve_splits)
+    glue_breaks = set(glue_breaks or ())
+    # ``glue_breaks`` only suppresses the punctuation-glue step below. Folding
+    # those offsets into ``split_offsets`` would divide a word and turn a
+    # one-character insertion such as color/colour into a character revision.
     # Preserve character-level formatting boundaries (e.g. true Word
     # subscript/superscript inside chemical formulae) even when the tokenizer
     # would otherwise treat the whole alphanumeric formula as one token.  Do
@@ -1057,7 +1059,7 @@ def _tokenize(
             if (
                 token.text in CLOSING_PUNCTUATION
                 and result and result[-1].end == start
-                and start not in preserve_splits
+                and start not in glue_breaks
             ):
                 previous = result[-1]
                 # Chinese closing punctuation must stay with the preceding
@@ -1406,27 +1408,28 @@ def _merge_paragraph(
     # are handled by the passthrough branch above.
     if base_text == current_text and not comments_moved:
         return copy.deepcopy(base)
-    # A pure insertion immediately before punctuation must not turn the old
-    # punctuation into a deletion and a replacement. Restrict the finer
-    # boundaries to one unambiguous insertion in plain text; existing event
-    # boundaries retain the ordinary punctuation behavior.
-    base_insert_splits: set[int] = set()
-    current_insert_splits: set[int] = set()
-    if not atomic_math and not base_has_revisions and base_text != current_text:
-        changes = [
-            op for op in difflib.SequenceMatcher(None, base_text, current_text, autojunk=False).get_opcodes()
-            if op[0] != "equal"
-        ]
-        if len(changes) == 1 and changes[0][0] == "insert":
-            _, start, _, current_start, current_end = changes[0]
-            base_insert_splits.add(start)
-            current_insert_splits.update((current_start, current_end))
+    # Closing punctuation stays glued to the preceding token so an unchanged
+    # mark does not become its own revision run. An edit that starts or ends
+    # on that mark must not take the mark with it: otherwise inserting text
+    # before ")" or "）" deletes the original punctuation and inserts a copy.
+    # Every insert, delete, and replacement edge is such a boundary, including
+    # when the paragraph also contains a drawing or more than one edit.
+    base_glue_breaks: set[int] = set()
+    current_glue_breaks: set[int] = set()
+    if not base_has_revisions and base_text != current_text:
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, base_text, current_text, autojunk=False
+        ).get_opcodes():
+            if tag == "equal":
+                continue
+            base_glue_breaks.update((i1, i2))
+            current_glue_breaks.update((j1, j2))
     base_tokens = _tokenize(
-        base_text, base_spans, {event.offset for event in events}, preserve_splits=base_insert_splits
+        base_text, base_spans, {event.offset for event in events}, glue_breaks=base_glue_breaks
     )
     current_tokens = _tokenize(
         current_text, current_spans, {event.offset for event in current_comments},
-        preserve_splits=current_insert_splits,
+        glue_breaks=current_glue_breaks,
     )
     current_index = {0: 0}
     for index, token in enumerate(current_tokens, 1):
@@ -1728,6 +1731,55 @@ def _base_relationships(base_package: Package, current_package: Package):
     used = {rel.get("Id") for rel in current}
     # Maps baseline rId -> new rId, or None when the target was intentionally dropped.
     copied: dict[str, str | None] = {}
+    # Relationships and media parts introduced for baseline drawings. Parts the
+    # rendered document never references are removed again in ``save``.
+    added_relationships: list[tuple[str, str | None]] = []
+
+    def fresh_id() -> tuple[int, str]:
+        number = 1
+        while f"rId{number}" in used:
+            number += 1
+        new_id = f"rId{number}"
+        used.add(new_id)
+        return number, new_id
+
+    def map_relationship(old_id: str) -> str | None:
+        rel = copy.deepcopy(sources[old_id])
+        existing = current_sources.get(old_id)
+        target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
+        if (
+            existing is not None
+            and all(existing.get(key) == rel.get(key) for key in ("Type", "Target", "TargetMode"))
+            and target.startswith("word/media/")
+            and target in base_package.parts
+            and base_package.parts[target] == current_package.parts.get(target)
+        ):
+            return old_id
+        if rel.get("TargetMode") != "External":
+            # Only media payloads can be safely re-homed into the current
+            # package. Header/footer/other part refs from deleted baseline
+            # runs are dropped so redline can finish (AML baselines may cite
+            # word/header*.xml). Never leave the reference element without
+            # r:id — Word refuses to open sectPr header/footer refs that lack
+            # the attribute.
+            if not target.startswith("word/media/") or target not in base_package.parts:
+                return None
+            number, new_id = fresh_id()
+            rel.set("Id", new_id)
+            suffix = posixpath.splitext(target)[1]
+            new_target = f"media/redline_base_{number}{suffix}"
+            part = f"word/{new_target}"
+            current_package.parts[part] = base_package.parts[target]
+            ensure_media_content_type(part)
+            rel.set("Target", new_target)
+            current.append(rel)
+            added_relationships.append((new_id, part))
+            return new_id
+        _number, new_id = fresh_id()
+        rel.set("Id", new_id)
+        current.append(rel)
+        added_relationships.append((new_id, None))
+        return new_id
 
     def carry(paragraph: etree._Element) -> etree._Element:
         result = copy.deepcopy(paragraph)
@@ -1740,52 +1792,7 @@ def _base_relationships(base_package: Package, current_package: Package):
                 if old_id not in sources:
                     raise ValueError(f"Missing baseline relationship: {old_id}")
                 if old_id not in copied:
-                    rel = copy.deepcopy(sources[old_id])
-                    existing = current_sources.get(old_id)
-                    target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
-                    if (
-                        existing is not None
-                        and all(existing.get(key) == rel.get(key) for key in ("Type", "Target", "TargetMode"))
-                        and target.startswith("word/media/")
-                        and target in base_package.parts
-                        and base_package.parts[target] == current_package.parts.get(target)
-                    ):
-                        copied[old_id] = old_id
-                        continue
-                    if rel.get("TargetMode") != "External":
-                        target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
-                        # Only media payloads can be safely re-homed into the
-                        # current package. Header/footer/other part refs from
-                        # deleted baseline runs are dropped so redline can
-                        # finish (AML baselines may cite word/header*.xml).
-                        # Never leave the reference element without r:id —
-                        # Word refuses to open sectPr header/footer refs that
-                        # lack the attribute.
-                        if not target.startswith("word/media/") or target not in base_package.parts:
-                            copied[old_id] = None
-                        else:
-                            number = 1
-                            while f"rId{number}" in used:
-                                number += 1
-                            new_id = f"rId{number}"
-                            used.add(new_id)
-                            rel.set("Id", new_id)
-                            suffix = posixpath.splitext(target)[1]
-                            new_target = f"media/redline_base_{number}{suffix}"
-                            current_package.parts[f"word/{new_target}"] = base_package.parts[target]
-                            ensure_media_content_type(f"word/{new_target}")
-                            rel.set("Target", new_target)
-                            current.append(rel)
-                            copied[old_id] = new_id
-                    else:
-                        number = 1
-                        while f"rId{number}" in used:
-                            number += 1
-                        new_id = f"rId{number}"
-                        used.add(new_id)
-                        rel.set("Id", new_id)
-                        current.append(rel)
-                        copied[old_id] = new_id
+                    copied[old_id] = map_relationship(old_id)
                 mapped = copied[old_id]
                 if mapped is None:
                     node.attrib.pop(attr, None)
@@ -1800,10 +1807,39 @@ def _base_relationships(base_package: Package, current_package: Package):
         return result
 
     def save() -> None:
+        if "word/document.xml" in current_package.parts:
+            document = current_package.xml("word/document.xml")
+            referenced: set[str] = set()
+            for node in document.iter():
+                for attr in (f"{{{R}}}id", f"{{{R}}}embed", f"{{{R}}}link"):
+                    value = node.get(attr)
+                    if value:
+                        referenced.add(value)
+            for rid, part in added_relationships:
+                if rid in referenced:
+                    continue
+                for rel in list(current):
+                    if rel.get("Id") == rid:
+                        current.remove(rel)
+                if part is None:
+                    continue
+                current_package.parts.pop(part, None)
+                part_name = "/" + part.replace("\\", "/")
+                for override in list(current_content_types.findall(f"{{{CONTENT_TYPES}}}Override")):
+                    if override.get("PartName") == part_name:
+                        current_content_types.remove(override)
+                        content_type_overrides.pop(part_name, None)
         current_package.set_xml(rel_name, current)
         current_package.set_xml("[Content_Types].xml", current_content_types)
 
     return carry, save
+
+
+def _carry_if_drawing(element: etree._Element, carry_base) -> etree._Element:
+    """Remap package-local relationships when baseline XML keeps a drawing."""
+    if element.find(".//w:drawing", NS) is None:
+        return element
+    return carry_base(element)
 
 
 def _drawing_payloads(paragraph: etree._Element, package: Package) -> list[bytes]:
@@ -1884,7 +1920,7 @@ def _merge_row_cells(
                 parent.insert(index + 1, _mark_paragraph(current_paragraph, "ins", context))
                 continue
             merged = _merge_paragraph(
-                base_paragraph,
+                _carry_if_drawing(base_paragraph, carry_base),
                 current_paragraph,
                 context,
                 preserve_base_revisions=preserve_base_revisions,
@@ -1940,7 +1976,7 @@ def _merge_table(
                 )
         else:
             for base_row in base_rows[i1:i2]:
-                output_rows.append(_row_revision(base_row, "del", context))
+                output_rows.append(_row_revision(_carry_if_drawing(base_row, carry_base), "del", context))
                 row_revision = True
             for current_row in current_rows[j1:j2]:
                 output_rows.append(_row_revision(current_row, "ins", context))
@@ -2602,7 +2638,7 @@ def create_tracked_docx(
                 # package-local relationships before merging into the output.
                 children.append(
                     _merge_paragraph(
-                        carry_base(old.element) if old.drawing else old.element,
+                        _carry_if_drawing(old.element, carry_base),
                         new.element,
                         context,
                         preserve_base_revisions=baseline_preserve,
@@ -2666,7 +2702,7 @@ def create_tracked_docx(
                     _mark_paragraph(carry_base(old.companion), "del", context) if old.companion is not None else None,
                 )
             elif old.kind == "tbl":
-                children.append(_mark_table(old.element, "del", context))
+                children.append(_mark_table(_carry_if_drawing(old.element, carry_base), "del", context))
             else:
                 children.append(copy.deepcopy(old.element))
             summary["deleted"] += 1
