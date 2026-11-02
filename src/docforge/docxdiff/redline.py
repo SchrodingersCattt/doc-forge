@@ -1026,9 +1026,15 @@ def _style_signature(style: Style) -> tuple[bytes | None, tuple[tuple[str, str],
 
 
 def _tokenize(
-    text: str, spans: list[tuple[int, int, Style]], split_offsets: set[int] | None = None
+    text: str,
+    spans: list[tuple[int, int, Style]],
+    split_offsets: set[int] | None = None,
+    *,
+    preserve_splits: set[int] | None = None,
 ) -> list[Token]:
     split_offsets = set(split_offsets or ())
+    preserve_splits = set(preserve_splits or ())
+    split_offsets.update(preserve_splits)
     # Preserve character-level formatting boundaries (e.g. true Word
     # subscript/superscript inside chemical formulae) even when the tokenizer
     # would otherwise treat the whole alphanumeric formula as one token.  Do
@@ -1048,7 +1054,11 @@ def _tokenize(
         ]
         for start, end in zip(points, points[1:]):
             token = Token(text[start:end], start, end, _style_at(spans, start))
-            if token.text in CLOSING_PUNCTUATION and result and result[-1].end == start:
+            if (
+                token.text in CLOSING_PUNCTUATION
+                and result and result[-1].end == start
+                and start not in preserve_splits
+            ):
                 previous = result[-1]
                 # Chinese closing punctuation must stay with the preceding
                 # token. Word frequently stores it in a separate run (or at a
@@ -1396,8 +1406,28 @@ def _merge_paragraph(
     # are handled by the passthrough branch above.
     if base_text == current_text and not comments_moved:
         return copy.deepcopy(base)
-    base_tokens = _tokenize(base_text, base_spans, {event.offset for event in events})
-    current_tokens = _tokenize(current_text, current_spans, {event.offset for event in current_comments})
+    # A pure insertion immediately before punctuation must not turn the old
+    # punctuation into a deletion and a replacement. Restrict the finer
+    # boundaries to one unambiguous insertion in plain text; existing event
+    # boundaries retain the ordinary punctuation behavior.
+    base_insert_splits: set[int] = set()
+    current_insert_splits: set[int] = set()
+    if not atomic_math and not base_has_revisions and base_text != current_text:
+        changes = [
+            op for op in difflib.SequenceMatcher(None, base_text, current_text, autojunk=False).get_opcodes()
+            if op[0] != "equal"
+        ]
+        if len(changes) == 1 and changes[0][0] == "insert":
+            _, start, _, current_start, current_end = changes[0]
+            base_insert_splits.add(start)
+            current_insert_splits.update((current_start, current_end))
+    base_tokens = _tokenize(
+        base_text, base_spans, {event.offset for event in events}, preserve_splits=base_insert_splits
+    )
+    current_tokens = _tokenize(
+        current_text, current_spans, {event.offset for event in current_comments},
+        preserve_splits=current_insert_splits,
+    )
     current_index = {0: 0}
     for index, token in enumerate(current_tokens, 1):
         current_index[token.end] = index
@@ -1694,6 +1724,7 @@ def _base_relationships(base_package: Package, current_package: Package):
             current_content_types.append(copy.deepcopy(base_default))
             content_type_defaults[suffix] = base_default.get("ContentType", "")
     sources = {rel.get("Id"): rel for rel in original}
+    current_sources = {rel.get("Id"): rel for rel in current}
     used = {rel.get("Id") for rel in current}
     # Maps baseline rId -> new rId, or None when the target was intentionally dropped.
     copied: dict[str, str | None] = {}
@@ -1710,6 +1741,17 @@ def _base_relationships(base_package: Package, current_package: Package):
                     raise ValueError(f"Missing baseline relationship: {old_id}")
                 if old_id not in copied:
                     rel = copy.deepcopy(sources[old_id])
+                    existing = current_sources.get(old_id)
+                    target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
+                    if (
+                        existing is not None
+                        and all(existing.get(key) == rel.get(key) for key in ("Type", "Target", "TargetMode"))
+                        and target.startswith("word/media/")
+                        and target in base_package.parts
+                        and base_package.parts[target] == current_package.parts.get(target)
+                    ):
+                        copied[old_id] = old_id
+                        continue
                     if rel.get("TargetMode") != "External":
                         target = posixpath.normpath(posixpath.join("word", rel.get("Target", "")))
                         # Only media payloads can be safely re-homed into the

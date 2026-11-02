@@ -33,3 +33,19 @@ def test_inline_drawing_from_baseline_uses_output_relationship(tmp_path):
     ids = root.xpath('//a:blip/@r:embed', namespaces=ns)
     assert ids
     assert all(relationships[rid].get('Type') == RELATIONSHIP_TYPE.IMAGE for rid in ids)
+
+
+def test_matching_image_relationship_reuses_original_media(tmp_path):
+    image = tmp_path / 'sample.png'
+    Image.new('RGB', (4, 4), 'red').save(image)
+    base, current, output = (tmp_path / name for name in ('base.docx', 'current.docx', 'tracked.docx'))
+    for path, text in ((base, 'Old text '), (current, 'New text ')):
+        document = Document()
+        document.add_paragraph('Shared context remains.')
+        paragraph = document.add_paragraph(text)
+        paragraph.add_run().add_picture(str(image))
+        document.add_paragraph('Additional shared context.')
+        document.save(path)
+    create_tracked_docx(base, current, output, workers=1)
+    package = Package.load(output)
+    assert [name for name in package.parts if name.startswith('word/media/')] == ['word/media/image1.png']
