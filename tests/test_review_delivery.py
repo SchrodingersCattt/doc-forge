@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,6 +149,9 @@ def test_delivery_rejects_colliding_artifact_destinations(tmp_path: Path) -> Non
 
 
 def test_review_source_ranges_are_staged_and_hash_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.name == "nt" and len(str(tmp_path)) < 185:
+        tmp_path = tmp_path / ("p" * (184 - len(str(tmp_path))))
+        tmp_path.mkdir()
     source = tmp_path / "body.md"
     source.write_text("old\nkeep\n", encoding="utf-8")
     template = Document()

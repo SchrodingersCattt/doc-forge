@@ -567,8 +567,13 @@ def _prepare_review(entry: Mapping[str, Any], base: Path, stage_root: Path) -> _
     ]
     if missing:
         raise ValueError("revision map requires source path/range/hash and reviewed paragraph identity/hash: " + ", ".join(missing))
-    full_md = stage_root / "reviewed" / f"{hashlib.sha1(str(reviewed_path).encode()).hexdigest()}.md"
-    full_md.parent.mkdir(parents=True, exist_ok=True)
+    reviewed_dir = stage_root / "reviewed"
+    reviewed_dir.mkdir(parents=True, exist_ok=True)
+    # Use a short, atomically reserved name: long consumer paths can otherwise
+    # exceed the Windows path limit before conversion starts.
+    descriptor, filename = tempfile.mkstemp(prefix="r-", suffix=".md", dir=reviewed_dir)
+    os.close(descriptor)
+    full_md = Path(filename)
     docx_to_markdown(reviewed_path, output=full_md, track_changes="accept", force=True)
     chunks = _review_chunks(full_md.read_text(encoding="utf-8"), mapped)
     reviewed_paragraphs = _docx_paragraph_records(reviewed_path)
