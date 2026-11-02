@@ -189,4 +189,7 @@ def latex_to_omml(source: str) -> etree._Element:
         raise MathConversionError("pandoc returned an empty OMML display equation")
     if re.search(r"(?<!\\)&", backend_source):
         _remove_alignment_markers(result)
+    from ..markdown.omml import normalize_bar_delimiters
+
+    normalize_bar_delimiters(result)
     return result

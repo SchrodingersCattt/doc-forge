@@ -284,6 +284,8 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             i += 1 if i < len(lines) else 0
             if language.lower() in {"math", "tex", "latex"}:
                 blocks.append(Block("equation", " ".join(part.strip() for part in code)))
+            elif language.lower() in {"algorithm", "pseudocode"}:
+                blocks.append(Block("algorithm", "\n".join(code), language=language))
             else:
                 blocks.append(Block("code", "\n".join(code), language=language))
             continue
@@ -356,6 +358,21 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         if REFERENCE_RE.match(stripped):
             flush_paragraph()
             blocks.append(Block("reference", stripped))
+            i += 1
+            continue
+        if re.match(r"(?i)^keywords\s*:", stripped):
+            flush_paragraph()
+            blocks.append(Block("keywords", stripped))
+            i += 1
+            continue
+        if re.match(r"(?i)^table\s+(?:note|foot)\s*:", stripped):
+            flush_paragraph()
+            blocks.append(Block("table_foot", re.sub(r"(?i)^table\s+(?:note|foot)\s*:\s*", "", stripped)))
+            i += 1
+            continue
+        if re.match(r"^\[[a-z]\]\s+", stripped) and blocks and blocks[-1].kind in {"table", "table_foot"}:
+            flush_paragraph()
+            blocks.append(Block("table_foot", stripped))
             i += 1
             continue
         table_caption = TABLE_CAPTION_RE.match(stripped)
@@ -493,6 +510,17 @@ def set_highlight(run, fill: str = "FFF2CC") -> None:
         shading = OxmlElement("w:shd")
         rpr.append(shading)
     shading.set(qn("w:fill"), fill)
+
+
+def append_inline_omml(
+    paragraph, expression: str, *, bold_default: bool = False, size: float = 11.0
+) -> None:
+    """Append real inline Office Math using the strict math compiler."""
+    from ..math.pandoc import latex_to_omml
+
+    compiled = latex_to_omml(expression)
+    for math in compiled.findall(MATH + "oMath"):
+        paragraph._p.append(copy.deepcopy(math))
 
 
 def append_inline_math(
@@ -812,17 +840,19 @@ def set_repeat_table_header(row) -> None:
 
 
 def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> None:
-    """Restore simple vertical rowspans expanded by ``docx2md``.
+    """Merge repeated labels only in semantically named grouping columns.
 
-    Pandoc expands rowspans when it serializes complex Word tables.  Rejoining
-    consecutive identical labels keeps generated tables visually compatible
-    with the reviewed template and gives the redline engine stable row
-    signatures for row-level insertions.
+    Pipe tables cannot express row spans. Repeated measurements in data
+    columns must therefore stay visible in each source row.
     """
     if len(rows) < 3:
         return
     width = max(len(row) for row in rows)
+    from ..tables import is_grouping_column
+
     for col in range(width):
+        if not is_grouping_column(rows[0][col] if col < len(rows[0]) else ""):
+            continue
         start = 1  # header row is never merged
         while start < len(rows):
             value = rows[start][col] if col < len(rows[start]) else ""
@@ -891,7 +921,7 @@ def add_block(
 ) -> None:
     if block.kind == "heading":
         add_heading(doc, block.text, block.level)
-    elif block.kind == "paragraph":
+    elif block.kind in {"paragraph", "keywords", "table_foot"}:
         add_body_paragraph(doc, block.text)
     elif block.kind == "ordered":
         add_list_paragraph(doc, block.text, block.level, ordered=True)
@@ -899,7 +929,7 @@ def add_block(
         add_list_paragraph(doc, block.text, block.level, ordered=False)
     elif block.kind == "reference":
         add_body_paragraph(doc, block.text, indent=False)
-    elif block.kind == "code":
+    elif block.kind in {"code", "algorithm"}:
         add_code_block(doc, block.text)
     elif block.kind == "equation":
         add_equation(doc, block.text, number=equation_number, number_prefix=number_prefix)

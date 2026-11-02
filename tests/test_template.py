@@ -117,7 +117,7 @@ def _figure_template(path: Path, image: Path) -> None:
     document.save(path)
 
 
-def test_angewandte_communication_styles_are_not_collapsed_to_normal(tmp_path: Path) -> None:
+def test_custom_semantic_styles_are_not_collapsed_to_normal(tmp_path: Path) -> None:
     document = Document()
     created: dict[str, str] = {}
     for name, size in (
@@ -151,7 +151,7 @@ def test_angewandte_communication_styles_are_not_collapsed_to_normal(tmp_path: P
     assert styles["caption"] == created["FigureCaption"]
     assert styles["reference"] == created["References"]
 
-    template = tmp_path / "angew.docx"
+    template = tmp_path / "custom.docx"
     document.save(template)
     metadata = tmp_path / "metadata.md"
     metadata.write_text(
@@ -167,7 +167,7 @@ def test_angewandte_communication_styles_are_not_collapsed_to_normal(tmp_path: P
     assert body.style.style_id == created["P1"]
     alignment = body._p.find(".//" + qn("w:jc"))
     assert alignment is None or alignment.get(qn("w:val")) != "center"
-    assert all(run._r.rPr.sz.get(qn("w:val")) == "22" for run in body.runs if run.text)
+    assert not body._p.findall(".//" + qn("w:sz"))
     title = next(p for p in rendered.paragraphs if p.text == "A title")
     assert title.style.style_id == created["Title1"]
     for run in title.runs:
@@ -609,8 +609,8 @@ def test_style_profile_authority_beats_historical_size_and_color(tmp_path: Path)
     assemble_markdown_template([source], template_path=template, output=legacy, metadata_path=metadata)
     legacy_runs = [row for row in _direct_runs(legacy) if "Hello body" in row["paragraph"]]
     assert legacy_runs
-    assert any(row["sz"] == "22" for row in legacy_runs)
-    assert any(row["color"] == "000000" for row in legacy_runs)
+    assert all(row["sz"] is None for row in legacy_runs)
+    assert all(row["color"] is None for row in legacy_runs)
 
     authority = tmp_path / "authority.docx"
     assemble_markdown_template(
@@ -1344,10 +1344,10 @@ def test_template_body_and_caption_typography(tmp_path: Path) -> None:
     )
     document = Document(output)
     body = next(p for p in document.paragraphs if p.text == "Body text.")
-    assert all(run._r.rPr.sz.get(qn("w:val")) == "22" for run in body.runs if run.text)
+    assert not body._p.findall(".//" + qn("w:sz"))
     for prefix in ("Table S1.", "Figure S1."):
         caption = next(p for p in document.paragraphs if p.text.startswith(prefix))
-        assert all(run._r.rPr.sz.get(qn("w:val")) == "20" for run in caption.runs if run.text)
+        assert not caption._p.findall(".//" + qn("w:sz"))
         assert caption.runs[0].bold is True
         assert all(run.bold is not True and run.italic is not True for run in caption.runs[1:] if run.text.strip())
     assert result.figures[0]["orientation"] == "portrait"

@@ -68,7 +68,7 @@ _OPTION_KEYS = (
     "title", "keep_comments", "skip_images", "columns", "figure_span", "font_family",
     "east_asia_font", "style_profile", "line_numbers", "include_title",
     "strip_level_one_headings", "heading_before", "numbering_prefix", "bibliography_scope",
-    "citation_numbering", "bibliography_profile", "include_metadata_back_matter", "native_toc",
+    "citation_numbering", "bibliography_profile", "include_metadata_back_matter", "native_toc", "inline_math", "end_matter_placement",
     "restart_heading_numbering", "body_first_line_chars", "page_break_before_h1",
     "body_font_size", "abstract_font_size", "caption_font_size", "reference_font_size",
 )

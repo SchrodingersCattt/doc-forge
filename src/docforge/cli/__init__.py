@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
+    md.add_argument("--end-matter-placement", choices=("source", "end"), default="source", help="Place source TOC/graphical abstract sections after references on a new page (requires --template)")
+    md.add_argument("--inline-math", choices=("runs", "omml"), default="runs", help="Inline math representation; omml requires Pandoc and --template")
     md.add_argument("--native-toc", action="store_true", help="Insert a native Word table of contents after template front matter")
     md.add_argument("--restart-heading-numbering", action="store_true", help="Restart H2 decimal numbering after each H1")
     md.add_argument("--body-first-line-chars", type=float, default=None, help="Body paragraph first-line indent in character units")
@@ -207,6 +209,17 @@ def build_parser() -> argparse.ArgumentParser:
     docx_tex.add_argument("--body-only", action="store_true", help="Write Pandoc body without a preamble")
     docx_tex.add_argument("--force", action="store_true", help="Overwrite an existing output file")
 
+    review_export = sub.add_parser("tex-review-export", help="Export supported reviewed DOCX changes into an audited TeX bundle")
+    review_export.add_argument("baseline", type=Path, help="DOCX on which the review was based")
+    review_export.add_argument("reviewed", type=Path, help="Reviewed DOCX including revisions and comments")
+    review_export.add_argument("source", type=Path, help="Original UTF-8 TeX source")
+    review_export.add_argument("--workdir", type=Path, required=True, help="New private review bundle directory")
+
+    review_build = sub.add_parser("tex-review-build", help="Reuse or patch the reviewed DOCX from an edited TeX bundle")
+    review_build.add_argument("workdir", type=Path, help="Private review bundle directory")
+    review_build.add_argument("-o", "--output", type=Path, required=True, help="Output DOCX path")
+    review_build.add_argument("--force", action="store_true", help="Replace an existing output")
+
     aigc = sub.add_parser("aigc", help="Generate figures from Markdown prompt files")
     aigc.add_argument("prompt_dir", type=Path, help="Directory containing *_prompt.md files")
     aigc.add_argument("--output", type=Path, default=None, help="Output directory (default: next to prompts)")
@@ -344,6 +357,15 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_tex2docx(args)
         if args.command == "docx2tex":
             return _cmd_docx2tex(args)
+        if args.command == "tex-review-export":
+            from ..tex import export_review_bundle
+            result = export_review_bundle(args.baseline, args.reviewed, args.source, args.workdir)
+            print(json.dumps({"mapped_paragraphs": len(result["blocks"]), "reviewed_changed_paragraphs": result["reviewed_changed_paragraphs"]}))
+            return 0
+        if args.command == "tex-review-build":
+            from ..tex import build_reviewed_docx
+            print(json.dumps(build_reviewed_docx(args.workdir, args.output, force=args.force)))
+            return 0
         if args.command == "aigc":
             return _cmd_aigc(args)
         if args.command == "sourcepack":
