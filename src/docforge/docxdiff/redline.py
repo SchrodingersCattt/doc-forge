@@ -2556,9 +2556,11 @@ def create_tracked_docx(
                         summary_key="changed",
                     )
                     continue
+                # Atomic drawing revisions may retain baseline XML. Remap its
+                # package-local relationships before merging into the output.
                 children.append(
                     _merge_paragraph(
-                        old.element,
+                        carry_base(old.element) if old.drawing else old.element,
                         new.element,
                         context,
                         preserve_base_revisions=baseline_preserve,
