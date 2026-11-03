@@ -348,7 +348,11 @@ def _find_style(
     metadata, captions, or references.  Callers that genuinely need a
     fallback (for example the optional TOC heading) can opt into one.
     """
-    styles = list(document.styles)
+    # These roles always attach to paragraphs.  Word templates may reuse a
+    # candidate name or ID for a list, character, or table style; treating
+    # one of those as a paragraph style both changes formatting and makes
+    # typography inspection fail (e.g. numbering styles have no font).
+    styles = [style for style in document.styles if style.type == WD_STYLE_TYPE.PARAGRAPH]
     by_id = {style.style_id: style for style in styles}
     by_name = {style.name: style for style in styles}
     by_norm = {_norm_style(style.name): style for style in styles}
@@ -466,11 +470,14 @@ def _resolve_style_profile(
     unknown = sorted(str(key) for key in payload if key not in known)
     if unknown:
         raise ValueError(f"Style profile contains unknown roles: {', '.join(unknown)}")
-    available = {style.style_id for style in document.styles} | {style.name for style in document.styles}
+    paragraph_styles = [style for style in document.styles if style.type == WD_STYLE_TYPE.PARAGRAPH]
+    paragraph_by_id = {style.style_id: style for style in paragraph_styles}
+    paragraph_by_name = {style.name: style for style in paragraph_styles}
+    available = set(paragraph_by_id) | set(paragraph_by_name)
     for role, value in payload.items():
         if not isinstance(value, str) or value not in available:
             raise ValueError(f"Style profile names an unavailable style: {role}={value!r}")
-        result[role] = document.styles[value].style_id if value in {style.name for style in document.styles} else value
+        result[role] = (paragraph_by_name.get(value) or paragraph_by_id[value]).style_id
     return result
 
 

@@ -248,6 +248,33 @@ def _figure_template(path: Path, image: Path) -> None:
     document.save(path)
 
 
+def test_semantic_caption_style_ignores_numbering_style_with_candidate_id(tmp_path: Path) -> None:
+    image = tmp_path / "figure.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, image)
+    document = Document(template)
+    document.styles.add_style("a4", WD_STYLE_TYPE.LIST)
+    document.save(template)
+
+    styles = discover_template_styles(Document(template))
+    assert Document(template).styles[styles["caption"]].type == WD_STYLE_TYPE.PARAGRAPH
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nExample title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text("Example body.\n\n![Figure 1](figure.png)\n\nFigure 1. Example.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    assert output.is_file()
+    profile = tmp_path / "styles.json"
+    profile.write_text(json.dumps({"caption": "a4"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="Style profile names an unavailable style"):
+        assemble_markdown_template(
+            [source], template_path=template, output=tmp_path / "bad.docx",
+            metadata_path=metadata, style_profile=str(profile),
+        )
+
+
 def test_custom_semantic_styles_are_not_collapsed_to_normal(tmp_path: Path) -> None:
     document = Document()
     created: dict[str, str] = {}
