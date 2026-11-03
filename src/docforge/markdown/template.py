@@ -122,6 +122,7 @@ class AssemblyResult:
     font_family: str | None = None
     east_asia_font: str | None = None
     style_profile: str = "template"
+    preserve_metadata_prototypes: bool = False
     line_numbers: str = "template"
     contacts: tuple[str, ...] = ()
     include_title: bool = True
@@ -823,7 +824,10 @@ def _add_template_inline(paragraph, text: str, *, bold_default: bool = False, si
     render_inline(paragraph, text, bold_default=bold_default, size=size, math_renderer=append_inline_math)
 
 
-def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *, prototype=None):
+def _new_metadata_paragraph(
+    document: DocumentType, style_id: str, text: str, *, prototype=None,
+    preserve_prototype: bool = False,
+):
     """Render metadata literally so correspondence asterisks cannot become emphasis."""
     temporary = Document()
     paragraph = temporary.add_paragraph()
@@ -833,7 +837,9 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
         properties = element.find(qn("w:pPr"))
         if properties is not None:
             element.remove(properties)
-        original_properties = _clean_paragraph_prototype(prototype).find(qn("w:pPr"))
+        original_properties = _clean_paragraph_prototype(
+            prototype, keep_alignment=preserve_prototype,
+        ).find(qn("w:pPr"))
         if original_properties is not None:
             element.insert(0, original_properties)
     properties = element.find(qn("w:pPr"))
@@ -844,17 +850,31 @@ def _new_metadata_paragraph(document: DocumentType, style_id: str, text: str, *,
     if style is None:
         style = OxmlElement("w:pStyle")
         properties.insert(0, style)
-    # The prototype supplies direct paragraph formatting, while the semantic
-    # role decides which named style the generated metadata follows.  Keeping
-    # the prototype's pStyle here makes an explicit style profile ineffective.
-    style.set(qn("w:val"), style_id)
-    _apply_style_to_paragraph(element, document, style_id)
-    base_run = (
-        _run_prototype(prototype, prefer_long=True)
-        if prototype is not None and style_id != "Normal"
-        else None
-    )
-    base_rpr = _sanitize_run_properties(base_run.find(qn("w:rPr")) if base_run is not None else None)
+    # Named semantic styles remain authoritative by default.  Prototype mode
+    # is explicit: it reuses the role sample's actual style and direct layout.
+    if preserve_prototype and prototype is not None:
+        source_properties = prototype.find(qn("w:pPr"))
+        source_style = source_properties.find(qn("w:pStyle")) if source_properties is not None else None
+        actual_style = source_style.get(qn("w:val")) if source_style is not None else document.styles.default(WD_STYLE_TYPE.PARAGRAPH).style_id
+        style.set(qn("w:val"), actual_style)
+    else:
+        style.set(qn("w:val"), style_id)
+        _apply_style_to_paragraph(element, document, style_id)
+    if prototype is not None and preserve_prototype:
+        runs = [run for run in prototype.findall(".//" + qn("w:r")) if _text_of(run).strip()]
+        base_run = max(runs, key=lambda run: len(_text_of(run))) if runs else None
+    elif prototype is not None and style_id != "Normal":
+        base_run = _run_prototype(prototype, prefer_long=True)
+    else:
+        base_run = None
+    prototype_rpr = base_run.find(qn("w:rPr")) if base_run is not None else None
+    if preserve_prototype and prototype_rpr is not None:
+        base_rpr = copy.deepcopy(prototype_rpr)
+        for tag in ("highlight", "shd", "rStyle", "rPrChange"):
+            for child in list(base_rpr.findall(qn("w:" + tag))):
+                base_rpr.remove(child)
+    else:
+        base_rpr = _sanitize_run_properties(prototype_rpr)
     for run in element.findall(".//" + qn("w:r")):
         existing = run.find(qn("w:rPr"))
         if existing is not None:
@@ -2229,6 +2249,7 @@ def assemble_markdown_template(
     font_family: str | None = None,
     east_asia_font: str | None = None,
     style_profile: str = "template",
+    preserve_metadata_prototypes: bool = False,
     line_numbers: str = "template",
     include_title: bool = True,
     strip_level_one_headings: bool = False,
@@ -2499,7 +2520,7 @@ def assemble_markdown_template(
     body_columns_after = _section_column_count(adjusted(body_regions[0].section))
     front = []
     if prototypes.paragraphs.get("supporting_information") is not None:
-        front.append(_new_metadata_paragraph(template, styles["body"], "Supporting Information", prototype=prototypes.paragraphs.get("supporting_information")))
+        front.append(_new_metadata_paragraph(template, styles["body"], "Supporting Information", prototype=prototypes.paragraphs.get("supporting_information"), preserve_prototype=preserve_metadata_prototypes))
     if front_note is not None and prototypes.paragraphs.get("front_note") is not None:
         note_prototype = prototypes.paragraphs["front_note"]
         note_properties = note_prototype.find(qn("w:pPr"))
@@ -2507,13 +2528,13 @@ def assemble_markdown_template(
         note_style_id = note_style.get(qn("w:val")) if note_style is not None else styles["body"]
         front.append(_new_paragraph(template, note_style_id, front_note.text, prototype=note_prototype, bold_default=False))
     if include_title:
-        front.append(_new_metadata_paragraph(template, styles["title"], resolved_title, prototype=prototypes.paragraphs.get("title")))
+        front.append(_new_metadata_paragraph(template, styles["title"], resolved_title, prototype=prototypes.paragraphs.get("title"), preserve_prototype=preserve_metadata_prototypes))
     if metadata.authors:
-        front.append(_new_metadata_paragraph(template, styles["authors"], metadata.authors, prototype=prototypes.paragraphs.get("authors")))
+        front.append(_new_metadata_paragraph(template, styles["authors"], metadata.authors, prototype=prototypes.paragraphs.get("authors"), preserve_prototype=preserve_metadata_prototypes))
     if metadata.affiliations:
-        front.append(_new_metadata_paragraph(template, styles["affiliations"], metadata.affiliations, prototype=prototypes.paragraphs.get("affiliations")))
+        front.append(_new_metadata_paragraph(template, styles["affiliations"], metadata.affiliations, prototype=prototypes.paragraphs.get("affiliations"), preserve_prototype=preserve_metadata_prototypes))
     for contact in metadata.contacts:
-        front.append(_new_metadata_paragraph(template, styles["affiliations"], contact, prototype=prototypes.paragraphs.get("contacts")))
+        front.append(_new_metadata_paragraph(template, styles["affiliations"], contact, prototype=prototypes.paragraphs.get("contacts"), preserve_prototype=preserve_metadata_prototypes))
     if abstract:
         abstract_prototype = prototypes.paragraphs.get("abstract")
         # Some templates carry the label and the abstract in one styled paragraph.
@@ -2923,6 +2944,7 @@ def assemble_markdown_template(
         font_family=font_family,
         east_asia_font=east_asia_font,
         style_profile=requested_style_profile,
+        preserve_metadata_prototypes=preserve_metadata_prototypes,
         line_numbers=line_numbers,
         contacts=metadata.contacts,
         include_title=include_title,
@@ -2996,6 +3018,7 @@ def write_assembly_sidecars(
             "font_family": result.font_family,
             "east_asia_font": result.east_asia_font,
             "style_profile": result.style_profile,
+            "preserve_metadata_prototypes": result.preserve_metadata_prototypes,
             "line_numbers": result.line_numbers,
             "include_title": result.include_title,
             "strip_level_one_headings": result.strip_level_one_headings,

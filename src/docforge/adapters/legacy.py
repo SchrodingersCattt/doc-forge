@@ -36,6 +36,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
     if args.template is not None:
         from ..markdown import assemble_markdown_template, write_assembly_sidecars
 
+        if getattr(args, "standalone_style", "legacy") != "legacy":
+            raise ValueError("--standalone-style requires a standalone conversion without --template")
         if args.metadata is None:
             raise ValueError("Template assembly requires --metadata")
         result = assemble_markdown_template(
@@ -54,6 +56,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             font_family=args.font_family,
             east_asia_font=args.east_asia_font,
             style_profile=args.style_profile,
+            preserve_metadata_prototypes=getattr(args, "preserve_metadata_prototypes", False),
             line_numbers=args.line_numbers,
             include_title=True,
             strip_level_one_headings=args.no_title,
@@ -96,6 +99,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         or getattr(args, "end_matter_placement", "source") != "source"
         or getattr(args, "inline_math", "runs") != "runs"
         or args.style_profile != "template"
+        or getattr(args, "preserve_metadata_prototypes", False)
         or args.line_numbers != "template"
         or args.figure_span != "column"
         or args.body_font_size is not None
@@ -123,6 +127,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         heading_before=args.heading_before,
         font_family=args.font_family,
         east_asia_font=args.east_asia_font,
+        standalone_style=getattr(args, "standalone_style", "legacy"),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(args.output))

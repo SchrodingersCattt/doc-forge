@@ -13,7 +13,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 from PIL import Image
-from docforge.cli import build_parser
+from docforge.cli import build_parser, main
 
 from docforge.markdown import (
     _format_bibliography_record,
@@ -424,6 +424,78 @@ def test_metadata_follows_requested_style_instead_of_prototype(tmp_path: Path) -
     rendered = Document(output)
     title = next(paragraph for paragraph in rendered.paragraphs if paragraph.text == "A title")
     assert title.style.style_id == result.style_map["title"] == "MetadataTitle"
+
+
+def test_metadata_prototypes_can_preserve_direct_formatting(tmp_path: Path) -> None:
+    document = Document()
+    for name in ("P1", "FigureCaption", "References", "Authors", "Address"):
+        if name not in document.styles:
+            document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    for text, size, bold, italic in (
+        ("Supporting Information", 12, False, True),
+        ("Placeholder title", 16, True, False),
+        ("Placeholder author", 12, False, False),
+        ("Placeholder affiliation", 12, False, True),
+        ("sample@example.org", 12, False, False),
+    ):
+        paragraph = document.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if text == "Placeholder title":
+            # A short neutral fragment must not replace the dominant title style.
+            paragraph.add_run("x").font.size = Pt(8)
+        run = paragraph.add_run(text)
+        run.font.name = "Arial"
+        run.font.size = Pt(size)
+        run.bold, run.italic = bold, italic
+        run.font.color.rgb = RGBColor(0, 0, 0)
+    document.add_paragraph("Methods", style="Heading 1")
+    document.add_paragraph("A body sample.", style="P1")
+    document.add_paragraph("Figure 1. A caption.", style="FigureCaption")
+    document.add_paragraph("References", style="Heading 1")
+    document.add_paragraph("A citation.", style="References")
+    template = tmp_path / "template.docx"
+    document.save(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text(
+        "# TITLE\n\nAn article title\n\n# AUTHOR\n\nA. Author\n\n"
+        "# AFFILIATION\n\nExample institute\n\n# EMAILS\n\none@example.org\n\ntwo@example.org\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.md"
+    source.write_text("# Methods\n\nOrdinary body text.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+        preserve_metadata_prototypes=True,
+    )
+    rendered = Document(output)
+    text = [p for p in rendered.paragraphs if p.text]
+    cover = text[:6]
+    assert [p.text for p in cover] == [
+        "Supporting Information", "An article title", "A. Author",
+        "Example institute", "one@example.org", "two@example.org",
+    ]
+    assert all(p.style.style_id == "Normal" for p in cover)
+    assert all(p.alignment == WD_ALIGN_PARAGRAPH.CENTER for p in cover)
+    assert [p.runs[0].font.size.pt for p in cover] == [12, 16, 12, 12, 12, 12]
+    assert [p.runs[0].italic for p in cover] == [True, False, False, True, False, False]
+    assert cover[1].runs[0].bold is True
+    assert all(p.runs[0].font.color.rgb == RGBColor(0, 0, 0) for p in cover)
+    body = next(p for p in text if p.text == "Ordinary body text.")
+    assert body.alignment != WD_ALIGN_PARAGRAPH.CENTER
+    assert result.preserve_metadata_prototypes is True
+
+    cli_output = tmp_path / "cli.docx"
+    assert main([
+        "md2docx", str(source), "-o", str(cli_output), "--template", str(template),
+        "--metadata", str(metadata), "--preserve-metadata-prototypes", "--font", "Georgia",
+    ]) == 0
+    title = next(p for p in Document(cli_output).paragraphs if p.text == "An article title")
+    assert title.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert title.runs[0].font.name == "Georgia"  # Explicit font overrides the sample.
+    assert title.runs[0].font.size.pt == 16
+    manifest = json.loads(cli_output.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rendering"]["preserve_metadata_prototypes"] is True
 
 
 def test_body_follows_role_style_instead_of_sample_paragraph(tmp_path: Path) -> None:

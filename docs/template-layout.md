@@ -2,6 +2,29 @@
 
 `docforge md2docx source.md -o output.docx --template template.docx --metadata metadata.md` discovers semantic paragraph styles from the supplied template. Font family, size, and color inherit from those styles; reference paragraphs also inherit hanging indents and spacing. Sample run typography does not become direct formatting on generated text. Explicit typography flags remain available.
 
+Some templates format their cover samples directly instead of defining named
+styles. Pass `--preserve-metadata-prototypes` to reuse the detected cover
+samples' paragraph style, alignment, font size, color, and emphasis for the
+banner, title, authors, affiliation, and contact lines. Each generated line
+uses the presentation of the longest text run in its sample paragraph. Sample text itself is
+never copied; review markup and highlighting are discarded. The option affects
+cover metadata only. Body and heading roles still use the named styles. It
+intentionally takes precedence over the semantic style chosen for those
+metadata paragraphs; an explicit `--font` or `--east-asia-font` overrides the
+sample fonts, and a subsequent restyle profile can apply its own policy.
+
+The same choice is available to Python callers as
+`assemble_markdown_template(..., preserve_metadata_prototypes=True)` and is
+recorded in the assembly manifest. Omit it when the template's named role
+styles, rather than its sample paragraphs, should remain authoritative.
+
+For a document without a template, `--standalone-style manuscript` selects a
+neutral left-aligned 11 pt body and maps Markdown heading levels to their
+corresponding Word Heading levels. A supplied standalone title uses the Word
+Title style. The pre-existing standalone defaults remain available as
+`--standalone-style legacy`, which is the default for backward compatibility.
+Template conversions should use the template's own styles instead.
+
 ## Semantic roles
 
 Existing roles include `title`, `authors`, `affiliations`, `abstract`, `heading_1` through `heading_3`, `body`, `caption`, and `reference`. Additional roles are optional and fall back as shown:

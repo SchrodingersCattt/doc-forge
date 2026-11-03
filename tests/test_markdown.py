@@ -67,6 +67,21 @@ class BlockTests(unittest.TestCase):
             self.assertIn("[TODO: internal Chinese blueprint]", [block.text for block in kept])
 
 
+def test_cli_standalone_manuscript_preset(tmp_path: Path) -> None:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docforge.cli import main
+
+    source = tmp_path / "source.md"
+    source.write_text("# Heading\n\nExample paragraph.\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assert main(["md2docx", str(source), "-o", str(output), "--standalone-style", "manuscript"]) == 0
+    heading, body = Document(output).paragraphs
+    assert heading.style.name == "Heading 1"
+    assert body.alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert body.runs[0].font.size.pt == 11
+
+
 class OmmlTests(unittest.TestCase):
     def test_math_commands_table(self) -> None:
         from docforge.markdown.omml import MATH_COMMANDS
@@ -257,6 +272,29 @@ class OmmlTests(unittest.TestCase):
                 if run.text:
                     self.assertEqual(run.font.name, "Times New Roman")
                     self.assertEqual(run._element.rPr.rFonts.get(qn("w:eastAsia")), "Times New Roman")
+        self.assertTrue(any(run.italic and run.text == "emphasis" for run in body.runs))
+        self.assertTrue(any(run.font.subscript and run.text == "2" for run in body.runs))
+
+    def test_standalone_manuscript_preset_has_honest_heading_levels(self) -> None:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+
+        document = render_blocks_to_doc(
+            [Block("heading", "Methods", level=1), Block("heading", "Details", level=2),
+             Block("paragraph", "Plain *emphasis* and H<sub>2</sub>O.")],
+            title="An example", standalone_style="manuscript",
+        )
+        title, first, second, body = document.paragraphs
+        self.assertEqual(title.style.name, "Title")
+        self.assertIsNone(title.style._element.get_or_add_pPr().find(qn("w:pBdr")))
+        self.assertEqual(str(title.style.font.color.rgb), "000000")
+        self.assertEqual(first.style.name, "Heading 1")
+        self.assertEqual(second.style.name, "Heading 2")
+        self.assertEqual(first._p.pPr.find(qn("w:outlineLvl")).get(qn("w:val")), "0")
+        self.assertEqual(second._p.pPr.find(qn("w:outlineLvl")).get(qn("w:val")), "1")
+        self.assertEqual(body.alignment, WD_ALIGN_PARAGRAPH.LEFT)
+        self.assertEqual(document.styles["Normal"].font.size.pt, 11)
+        self.assertTrue(all(run.font.size.pt == 11 for run in body.runs if run.text))
         self.assertTrue(any(run.italic and run.text == "emphasis" for run in body.runs))
         self.assertTrue(any(run.font.subscript and run.text == "2" for run in body.runs))
 

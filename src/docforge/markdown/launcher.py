@@ -1265,13 +1265,30 @@ def render_blocks_to_doc(
     heading_before: float | None = None,
     font_family: str | None = None,
     east_asia_font: str | None = None,
+    standalone_style: str = "legacy",
 ) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
+    if standalone_style not in {"legacy", "manuscript"}:
+        raise ValueError("standalone_style must be legacy or manuscript")
     blocks = tuple(blocks)
     reserved = _reserved_table_labels(blocks)
     doc = make_empty_doc()
     if title:
-        add_heading(doc, title, 1)
+        title_paragraph = add_heading(doc, title, 1)
+        if standalone_style == "manuscript":
+            title_style = doc.styles["Title"]
+            title_style.font.color.rgb = RGBColor(0, 0, 0)
+            title_style.font.size = Pt(16)
+            title_properties = title_style._element.get_or_add_pPr()
+            border = title_properties.find(qn("w:pBdr"))
+            if border is not None:
+                title_properties.remove(border)
+            title_paragraph.style = title_style
+            outline = title_paragraph._p.pPr.find(qn("w:outlineLvl"))
+            if outline is not None:
+                title_paragraph._p.pPr.remove(outline)
+            for run in title_paragraph.runs:
+                run.font.size = Pt(16)
     equation_number = equation_start
     table_number = 1
     for block in blocks:
@@ -1284,6 +1301,20 @@ def render_blocks_to_doc(
             table_number=table_number if block.kind == "table_caption" else None,
             number_prefix=number_prefix,
         )
+        if standalone_style == "manuscript" and block.kind == "heading" and doc.paragraphs:
+            paragraph = doc.paragraphs[-1]
+            level = max(1, min(block.level, 9))
+            paragraph.style = doc.styles[f"Heading {level}"]
+            paragraph._p.pPr.find(qn("w:outlineLvl")).set(qn("w:val"), str(level - 1))
+            for run in paragraph.runs:
+                run.font.size = Pt(14 if level == 1 else 12 if level == 2 else 11)
+        elif standalone_style == "manuscript" and block.kind in {"paragraph", "keywords", "table_foot", "ordered", "bullet", "reference"} and doc.paragraphs:
+            paragraph = doc.paragraphs[-1]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            paragraph.paragraph_format.line_spacing = 1.2
+            for run in paragraph.runs:
+                if run.font.name != "Consolas":
+                    run.font.size = Pt(11)
         if block.kind == "heading" and heading_before is not None and doc.paragraphs:
             doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
         if block.kind == "equation":
@@ -1294,6 +1325,10 @@ def render_blocks_to_doc(
     latin = font_family or "Times New Roman"
     east_asia = east_asia_font or latin
     normal = doc.styles["Normal"]
+    if standalone_style == "manuscript":
+        normal.font.size = Pt(11)
+        normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        normal.paragraph_format.line_spacing = 1.2
     normal.font.name = latin
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), east_asia)
     normal._element.rPr.rFonts.set(qn("w:cs"), latin)
