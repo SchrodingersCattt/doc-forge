@@ -140,6 +140,7 @@ def replace_block_citations(
             language=block.language,
             path=block.path,
             options=block.options,
+            alignments=block.alignments,
         )
         for block in blocks
     )

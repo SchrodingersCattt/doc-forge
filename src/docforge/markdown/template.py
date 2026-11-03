@@ -24,8 +24,10 @@ from typing import Iterable, Mapping, Sequence
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 from lxml import etree
 from PIL import Image
 
@@ -43,6 +45,10 @@ from .citations import (
 from ..output import _detect_format, validate_output_path
 from .launcher import (
     accept_docx_revisions,
+    _explicit_table_label,
+    _next_table_number,
+    _reserved_table_labels,
+    _table_label_key,
     append_inline_math,
     convert_unicode_scripts_in_docx,
     normalize_document_typography,
@@ -1642,8 +1648,12 @@ def _clone_rendered_block(
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
     if block.kind == "table_caption":
+        options = dict(block.options)
+        authored_label = options.get("caption_label", "")
         supplementary = re.match(r"(?i)supplementary\s+table\b", block.text or "")
-        if table_number is None:
+        if authored_label:
+            label = authored_label + options.get("caption_punctuation", ".")
+        elif table_number is None:
             label = "Supplementary Table." if supplementary else "Table."
         elif supplementary:
             label = f"Supplementary Table {number_prefix}{table_number}."
@@ -1652,10 +1662,11 @@ def _clone_rendered_block(
         body = block.text or ""
         if supplementary:
             body = re.sub(r"(?i)^supplementary\s+table\s*\d*\s*[.:]?\s*", "", body).strip()
+        gap = options.get("caption_gap", " ") if authored_label else " "
         paragraph = _new_paragraph(
             target,
             styles["table_caption"],
-            f"**{label}** {body}".strip(),
+            f"**{label}**{gap if body else ''}{body}".strip(),
             prototype=p.get("table_caption"),
         )
         _format_caption_runs(paragraph, caption_font_size)
@@ -1668,7 +1679,6 @@ def _clone_rendered_block(
             _set_heading_outline(paragraph, 1)
         return [paragraph]
     if block.kind == "algorithm":
-        from docx.text.paragraph import Paragraph
         from docx.shared import Pt
         result = []
         for line in block.text.split("\n"):
@@ -1757,6 +1767,18 @@ def _clone_rendered_block(
                         for tag in ("spacing", "ind"):
                             for node in list(paragraph.findall(qn("w:pPr") + "/" + qn("w:" + tag))):
                                 node.getparent().remove(node)
+                    # Apply explicit Markdown alignment after the template
+                    # role, which deliberately removes competing direct jc.
+                    for column_index, cell in enumerate(row.findall(qn("w:tc"))):
+                        explicit = block.alignments[column_index] if column_index < len(block.alignments) else ""
+                        if explicit:
+                            alignment = {
+                                "left": WD_ALIGN_PARAGRAPH.LEFT,
+                                "center": WD_ALIGN_PARAGRAPH.CENTER,
+                                "right": WD_ALIGN_PARAGRAPH.RIGHT,
+                            }[explicit]
+                            for paragraph in cell.findall(qn("w:p")):
+                                Paragraph(paragraph, target._body).alignment = alignment
             result.append(clone)
         return result
     return []
@@ -2532,6 +2554,7 @@ def assemble_markdown_template(
     figure_index = 0
     equation_index = 1
     table_index = 1
+    reserved_table_labels = _reserved_table_labels((*body_blocks, *deferred))
     heading_counters = {2: 0, 3: 0}
     for text_blocks, image, caption in groups:
         selected_body = body_regions[min(body_index, len(body_regions) - 1)]
@@ -2541,6 +2564,8 @@ def assemble_markdown_template(
         # and the explicit fit below handles differing templates.
         previous_block: Block | None = None
         for block in text_blocks:
+            if block.kind == "table_caption" and not _explicit_table_label(block):
+                table_index = _next_table_number(table_index, numbering_prefix, reserved_table_labels)
             if block.kind == "heading" and block.level == 1:
                 heading_counters = {2: 0, 3: 0}
             nodes = _clone_rendered_block(
@@ -2575,9 +2600,13 @@ def assemble_markdown_template(
             if block.kind == "equation":
                 equation_index += 1
             if block.kind == "table_caption":
-                label = f"Table {numbering_prefix}{table_index}" if numbering_prefix else f"Table {table_index}"
-                tables.append({"number": table_index, "label": label, "caption": block.text})
-                table_index += 1
+                authored_label = _explicit_table_label(block)
+                label = authored_label or f"Table {numbering_prefix}{table_index}"
+                number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
+                tables.append({"number": number, "label": label, "caption": block.text})
+                if not authored_label:
+                    reserved_table_labels.add(_table_label_key(label))
+                    table_index += 1
             previous_block = block
         if image is None:
             break
@@ -2727,6 +2756,8 @@ def assemble_markdown_template(
         output_nodes.append(_page_break_node())
         for preceding, image, caption in _figure_groups(deferred):
             for block in preceding:
+                if block.kind == "table_caption" and not _explicit_table_label(block):
+                    table_index = _next_table_number(table_index, numbering_prefix, reserved_table_labels)
                 nodes = _clone_rendered_block(
                     block, template, styles, prototypes,
                     equation_number=equation_index, table_number=table_index,
@@ -2739,9 +2770,13 @@ def assemble_markdown_template(
                 if block.kind == "equation":
                     equation_index += 1
                 if block.kind == "table_caption":
-                    label = f"Table {numbering_prefix}{table_index}"
-                    tables.append({"number": table_index, "label": label, "caption": block.text})
-                    table_index += 1
+                    authored_label = _explicit_table_label(block)
+                    label = authored_label or f"Table {numbering_prefix}{table_index}"
+                    number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
+                    tables.append({"number": number, "label": label, "caption": block.text})
+                    if not authored_label:
+                        reserved_table_labels.add(_table_label_key(label))
+                        table_index += 1
             if image is None:
                 continue
             options = dict(image.options)

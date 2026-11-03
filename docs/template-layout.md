@@ -56,7 +56,9 @@ Table: Measurements.
 Table note: Another explicit table note.
 ```
 
-Keywords become a separate front-matter paragraph, including when no blank line precedes them. A `Table:` caption uses `table_caption`; the first row uses `table_head`, and other rows use `table_body`. Use `Table note:` or `Table foot:` for explicit notes, or `[a]`-style lines immediately following a table or another table note.
+Keywords become a separate front-matter paragraph, including when no blank line precedes them. A `Table:` caption uses `table_caption`; the first row uses `table_head`, and other rows use `table_body`. `Table 5. Caption text` immediately followed by a table is also a caption, with its authored number and spacing preserved. Automatic `Table:` numbering avoids labels already supplied anywhere in the document; repeated authored labels are rejected. A numbered table mention that is not followed by a table remains ordinary prose.
+
+Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` inherits the applicable template paragraph style. In a fresh document it defaults to left. Use `Table note:` or `Table foot:` for explicit notes, or `[a]`-style lines immediately following a table or another table note. Superscripts are authored explicitly, for example `Table note: <sup>a</sup>Note text.` and `| Value<sup>a</sup> |`. Bracketed text is not silently reformatted. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
 
 Only repeated labels under grouping headers (`level`, `group`, `category`, `class`, `type`, `family`, `site`, `site level`, `factor`, `block`, or a header ending in `level`) can merge vertically. Repeated measurements in other columns stay visible. Markdown and TeX share this policy.
 
@@ -83,6 +85,8 @@ Paired bare absolute-value bars in math containers become delimiter objects for 
 ## Pagination and contents
 
 Headings and table captions keep with the following paragraph; image paragraphs keep with their captions. Images fit both the active section width and text height, with caption space estimated from text length and font size. Aspect ratio is preserved, including template figure slots, column figures, and page-spanning figures. Caption estimates are conservative layout guidance; inspect unusually long captions in the target renderer.
+
+`--heading-before 6` sets 6 pt before every generated heading level. To set a value for one level only, leave this option unset and configure the corresponding heading style in the supplied template.
 
 `--end-matter-placement end` places level-one `Table of Contents`, `TOC`, and `Graphical Abstract` source sections after references, starting on a new page. The default `source` preserves source position. The option also places a requested native TOC at the end.
 

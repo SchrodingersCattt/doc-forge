@@ -131,6 +131,90 @@ def test_table_cells_use_table_prototypes_without_losing_emphasis(tmp_path: Path
     assert any(run.text == "Heading" and run.bold for run in table.cell(0, 0).paragraphs[0].runs)
 
 
+def test_table_template_respects_explicit_column_alignment_and_notes(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    document = Document(template)
+    document.styles["TA_Main_Text"].paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    document.save(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Table 5. A source-numbered caption.\n\n"
+        "| Left<sup>a</sup> | Center | Right | Inherit |\n"
+        "| :--- | :---: | ---: | --- |\n"
+        "| one | two | three | four |\n\n"
+        "Table note: <sup>a</sup>Note text.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template([source], template_path=template, output=output, title="A title")
+    document = Document(output)
+    table = document.tables[0]
+    for row in table.rows:
+        assert [cell.paragraphs[0].alignment for cell in row.cells] == [
+            WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER, WD_ALIGN_PARAGRAPH.RIGHT, None,
+        ]
+        assert row.cells[3].paragraphs[0].style.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+    note = next(p for p in document.paragraphs if p.text == "aNote text.")
+    assert note.runs[0].text == "a" and note.runs[0].font.superscript is True
+    header = table.cell(0, 0).paragraphs[0]
+    assert header.text == "Lefta"
+    assert header.runs[-1].text == "a" and header.runs[-1].font.superscript is True
+    assert any(p.text == "Table 5. A source-numbered caption." for p in document.paragraphs)
+    assert result.tables == ({"number": 5, "label": "Table 5", "caption": "A source-numbered caption."},)
+
+
+def test_template_avoids_authored_and_auto_number_collisions(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Table: First.\n\n| A |\n|---|\n| a |\n\n"
+        "Table S1. Authored.\n\n| A |\n|---|\n| b |\n\n"
+        "Table: Next.\n\n| A |\n|---|\n| c |\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, title="A title", numbering_prefix="S",
+    )
+    assert [table["label"] for table in result.tables] == ["Table S2", "Table S1", "Table S3"]
+    text = "\n".join(p.text for p in Document(output).paragraphs)
+    assert "Table S2. First." in text
+    assert "Table S1. Authored." in text
+    assert "Table S3. Next." in text
+    assert "Table S1. Table S1." not in text
+
+
+def test_table_caption_and_foot_can_inherit_zero_indentation_from_template(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    document = Document(template)
+    body = document.styles["TA_Main_Text"]
+    body.paragraph_format.first_line_indent = Pt(24)
+    for name in ("TableCaption", "TableFoot"):
+        style = document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = body
+        style.paragraph_format.first_line_indent = Pt(0)
+    document.add_paragraph("Table 1. Caption prototype.", style="TableCaption")
+    document.add_paragraph("Note prototype.", style="TableFoot")
+    document.save(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "Table 1. Example.\n\n| A |\n| :--- |\n| one |\n\n"
+        "Table note: <sup>a</sup>Note text.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, title="A title")
+    document = Document(output)
+    for text, expected_style in (("Table 1. Example.", "TableCaption"), ("aNote text.", "TableFoot")):
+        paragraph = next(p for p in document.paragraphs if p.text == text)
+        assert paragraph.style.style_id == expected_style
+        assert paragraph.style.paragraph_format.first_line_indent == Pt(0)
+        assert paragraph.paragraph_format.first_line_indent in (None, Pt(0))
+
+
 def test_named_body_style_wins_over_unrelated_italic_fragment(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _template(template)

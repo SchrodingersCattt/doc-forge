@@ -465,8 +465,9 @@ def _render_block(block: BlockNode, paths: dict[str, str]) -> str:
             rows.append("| " + " | ".join(cells) + " |")
         if not rows:
             return ""
-        width = rows[0].count("|") - 1
-        separator = "| " + " | ".join("---" for _ in range(max(width, 1))) + " |"
+        markers = {"left": ":---", "center": ":---:", "right": "---:"}
+        headers = block.children[0].children
+        separator = "| " + " | ".join(markers.get(cell.attr("alignment"), "---") for cell in headers) + " |"
         return "\n".join([rows[0], separator, *rows[1:]])
     if block.kind == "figure":
         resource = block.attr("resource")
@@ -507,7 +508,9 @@ def _render_latex_block(block: BlockNode, paths: dict[str, str]) -> str:
         for row in block.children:
             cells = [write_latex_inlines(cell.inlines) or cell.plain() for cell in row.children]
             body.append(" & ".join(cells) + r" \\")
-        cols = "l" * max((len(row.children) for row in block.children), default=1)
+        alignments = {"left": "l", "center": "c", "right": "r"}
+        headers = block.children[0].children if block.children else ()
+        cols = "".join(alignments.get(cell.attr("alignment"), "l") for cell in headers) or "l"
         return "\\begin{tabular}{" + cols + "}\n" + "\n".join(body) + "\n\\end{tabular}"
     if block.kind == "figure":
         caption = ""
@@ -573,15 +576,25 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
     if block.kind == "separator":
         return BlockNode(counter.block(), "thematic_break", provenance=provenance), []
     if block.kind == "table_caption":
-        return BlockNode(counter.block(), "caption", inlines=parse_markdown_inlines(block.text), attrs=(("kind", "table"),), provenance=provenance), []
+        options = dict(block.options)
+        label = options.get("caption_label", "")
+        text = (
+            label + options.get("caption_punctuation", ".")
+            + (options.get("caption_gap", " ") if block.text else "") + block.text
+        ) if label else block.text
+        return BlockNode(counter.block(), "caption", inlines=parse_markdown_inlines(text), attrs=(("kind", "table"),), provenance=provenance), []
     if block.kind == "reference":
         return BlockNode(counter.block(), "reference_entry", attrs=(("text", block.text),), provenance=provenance), []
     if block.kind == "table":
         rows = []
         for row in block.rows:
             cells = tuple(
-                BlockNode(counter.block(), "table_cell", inlines=parse_markdown_inlines(cell), provenance=provenance)
-                for cell in row
+                BlockNode(
+                    counter.block(), "table_cell", inlines=parse_markdown_inlines(cell),
+                    attrs=(("alignment", block.alignments[index]),) if index < len(block.alignments) and block.alignments[index] else (),
+                    provenance=provenance,
+                )
+                for index, cell in enumerate(row)
             )
             rows.append(BlockNode(counter.block(), "table_row", children=cells, provenance=provenance))
         return BlockNode(counter.block(), "table", children=tuple(rows), provenance=provenance), []

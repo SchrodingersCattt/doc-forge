@@ -19,6 +19,8 @@ class Block:
         language: fenced-code info string
         path: resolved image path for image blocks
         rows: table cell matrix (row-major) for table blocks
+        alignments: explicit column alignment names, or an empty string to
+            inherit the output style, for table blocks
     """
 
     kind: str
@@ -28,6 +30,7 @@ class Block:
     language: str = ""
     path: str = ""
     options: tuple[tuple[str, str], ...] = ()
+    alignments: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -38,6 +41,7 @@ class Block:
             "language": self.language,
             "path": self.path,
             "options": [list(item) for item in self.options],
+            "alignments": list(self.alignments),
         }
 
 

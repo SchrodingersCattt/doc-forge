@@ -53,6 +53,10 @@ BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 REFERENCE_RE = re.compile(r"^\[(\d+)\]\s+(.*)$")
 TABLE_CAPTION_RE = re.compile(r"^Table\s*:\s*(.+)$", re.IGNORECASE)
+NUMBERED_TABLE_CAPTION_RE = re.compile(
+    r"^(?P<label>Table\s+[A-Za-z]*\d+)(?P<punct>[.:])(?P<gap>\s*)(?P<body>.*)$",
+    re.IGNORECASE,
+)
 IMAGE_RE = re.compile(r"^!\[(?P<caption>[^\]]*)\]\((?P<path>[^)]+)\)$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BANG_COMMENT_RE = re.compile(r"^[!！](?:\s+|$)")
@@ -180,6 +184,44 @@ def is_table_start(lines: list[str], index: int) -> bool:
     if not (first.startswith("|") and first.endswith("|") and second.startswith("|") and second.endswith("|")):
         return False
     return all(TABLE_SEPARATOR_RE.match(cell) for cell in split_table_row(second))
+
+
+def _table_alignments(separator: tuple[str, ...]) -> tuple[str, ...]:
+    """Translate explicit pipe-table delimiters into column alignment names."""
+    result = []
+    for cell in separator:
+        cell = cell.strip()
+        if cell.startswith(":") and cell.endswith(":"):
+            result.append("center")
+        elif cell.startswith(":"):
+            result.append("left")
+        elif cell.endswith(":"):
+            result.append("right")
+        else:
+            result.append("")
+    return tuple(result)
+
+
+def _explicit_table_label(block: Block) -> str:
+    return dict(block.options).get("caption_label", "") if block.kind == "table_caption" else ""
+
+
+def _table_label_key(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+def _reserved_table_labels(blocks: Iterable[Block]) -> set[str]:
+    labels = [_table_label_key(_explicit_table_label(block)) for block in blocks if _explicit_table_label(block)]
+    if len(labels) != len(set(labels)):
+        raise ValueError("Duplicate authored table caption label")
+    return set(labels)
+
+
+def _next_table_number(number: int, prefix: str, reserved: set[str]) -> int:
+    """Skip labels already supplied by the author in this document."""
+    while _table_label_key(f"Table {prefix}{number}") in reserved:
+        number += 1
+    return number
 
 
 def _looks_like_table_row(line: str) -> bool:
@@ -327,7 +369,7 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                     )
                 rows.append(parsed)
                 i += 1
-            blocks.append(Block("table", rows=tuple(rows)))
+            blocks.append(Block("table", rows=tuple(rows), alignments=_table_alignments(separator)))
             continue
         if _looks_like_table_row(line) and i + 1 < len(lines) and _looks_like_table_row(lines[i + 1]):
             raise ValueError(f"Malformed Markdown table in {path}:{i + 1}; separator row must use at least three hyphens per cell")
@@ -375,6 +417,23 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             blocks.append(Block("table_foot", stripped))
             i += 1
             continue
+        # A numbered label is a caption only when it directly precedes a
+        # table, so prose beginning with "Table 2." stays ordinary prose.
+        numbered_caption = NUMBERED_TABLE_CAPTION_RE.match(stripped)
+        if numbered_caption:
+            following = i + 1
+            while following < len(lines) and not lines[following].strip():
+                following += 1
+            if is_table_start(lines, following):
+                flush_paragraph()
+                options = (
+                    ("caption_label", numbered_caption.group("label")),
+                    ("caption_punctuation", numbered_caption.group("punct")),
+                    ("caption_gap", numbered_caption.group("gap")),
+                )
+                blocks.append(Block("table_caption", numbered_caption.group("body").strip(), options=options))
+                i += 1
+                continue
         table_caption = TABLE_CAPTION_RE.match(stripped)
         if table_caption:
             flush_paragraph()
@@ -708,11 +767,17 @@ def add_table_caption(
     *,
     number: int | None = None,
     number_prefix: str = "",
+    authored_label: str = "",
+    punctuation: str = ".",
+    gap: str = " ",
 ) -> None:
     paragraph = doc.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_paragraph_spacing(paragraph, before=3, after=2, line=1.0)
-    label = f"Table {number_prefix}{number}. " if number is not None else "Table. "
+    if authored_label:
+        label = authored_label + punctuation + (gap if text else "")
+    else:
+        label = f"Table {number_prefix}{number}. " if number is not None else "Table. "
     _render_inline(paragraph, label + text, bold_default=False, size=10.0)
     for run in paragraph.runs:
         if run.font.name != "Consolas":
@@ -887,7 +952,12 @@ def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> Non
             start = end
 
 
-def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
+def add_table(
+    doc: DocumentType,
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    alignments: tuple[str, ...] = (),
+) -> None:
     if not rows:
         return
     width = max(len(row) for row in rows)
@@ -901,7 +971,13 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
             set_cell_text(row.cells[col_index], value, bold=row_index == 0)
             set_cell_margins(row.cells[col_index])
             for paragraph in row.cells[col_index].paragraphs:
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                explicit = alignments[col_index] if col_index < len(alignments) else ""
+                paragraph.alignment = {
+                    "": WD_ALIGN_PARAGRAPH.LEFT,
+                    "left": WD_ALIGN_PARAGRAPH.LEFT,
+                    "center": WD_ALIGN_PARAGRAPH.CENTER,
+                    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+                }[explicit]
                 set_paragraph_spacing(paragraph, after=0, line=1.05)
                 for run in paragraph.runs:
                     if run.font.name != "Consolas":
@@ -936,9 +1012,15 @@ def add_block(
     elif block.kind == "equation":
         add_equation(doc, block.text, number=equation_number, number_prefix=number_prefix)
     elif block.kind == "table_caption":
-        add_table_caption(doc, block.text, number=table_number, number_prefix=number_prefix)
+        options = dict(block.options)
+        add_table_caption(
+            doc, block.text, number=table_number, number_prefix=number_prefix,
+            authored_label=options.get("caption_label", ""),
+            punctuation=options.get("caption_punctuation", "."),
+            gap=options.get("caption_gap", " "),
+        )
     elif block.kind == "table":
-        add_table(doc, block.rows)
+        add_table(doc, block.rows, alignments=block.alignments)
     elif block.kind == "quote":
         add_quote(doc, block.text)
     elif block.kind == "image":
@@ -1185,12 +1267,16 @@ def render_blocks_to_doc(
     east_asia_font: str | None = None,
 ) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
+    blocks = tuple(blocks)
+    reserved = _reserved_table_labels(blocks)
     doc = make_empty_doc()
     if title:
         add_heading(doc, title, 1)
     equation_number = equation_start
     table_number = 1
     for block in blocks:
+        if block.kind == "table_caption" and not _explicit_table_label(block):
+            table_number = _next_table_number(table_number, number_prefix, reserved)
         add_block(
             doc,
             block,
@@ -1202,7 +1288,8 @@ def render_blocks_to_doc(
             doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
         if block.kind == "equation":
             equation_number += 1
-        if block.kind == "table_caption":
+        if block.kind == "table_caption" and not _explicit_table_label(block):
+            reserved.add(_table_label_key(f"Table {number_prefix}{table_number}"))
             table_number += 1
     latin = font_family or "Times New Roman"
     east_asia = east_asia_font or latin

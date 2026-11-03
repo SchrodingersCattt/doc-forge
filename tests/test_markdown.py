@@ -508,6 +508,89 @@ def test_explicit_table_caption_block_is_parsed() -> None:
         assert blocks[0].text == "Example values."
 
 
+def test_numbered_table_caption_is_scoped_to_the_following_table(tmp_path: Path) -> None:
+    path = tmp_path / "source.md"
+    path.write_text(
+        "Table 2. An ordinary paragraph.\n\n"
+        "Table 7.Caption without a separating space.\n\n"
+        "| A | B | C | D |\n| :--- | :---: | ---: | --- |\n| a | b | c | d |\n",
+        encoding="utf-8",
+    )
+    blocks = parse_markdown(path)
+    assert [block.kind for block in blocks] == ["paragraph", "table_caption", "table"]
+    assert dict(blocks[1].options) == {
+        "caption_label": "Table 7", "caption_punctuation": ".", "caption_gap": "",
+    }
+    assert blocks[2].alignments == ("left", "center", "right", "")
+    document = render_blocks_to_doc(blocks)
+    assert document.paragraphs[1].text == "Table 7.Caption without a separating space."
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    for row in document.tables[0].rows:
+        assert [cell.paragraphs[0].alignment for cell in row.cells] == [
+            WD_ALIGN_PARAGRAPH.LEFT, WD_ALIGN_PARAGRAPH.CENTER,
+            WD_ALIGN_PARAGRAPH.RIGHT, WD_ALIGN_PARAGRAPH.LEFT,
+        ]
+
+
+def test_authored_and_generated_table_numbers_cannot_collide(tmp_path: Path) -> None:
+    path = tmp_path / "source.md"
+    path.write_text(
+        "Table: First generated.\n\n| A |\n|---|\n| one |\n\n"
+        "Table 1. Authored.\n\n| A |\n|---|\n| two |\n\n"
+        "Table: Next generated.\n\n| A |\n|---|\n| three |\n",
+        encoding="utf-8",
+    )
+    document = render_blocks_to_doc(parse_markdown(path))
+    assert [paragraph.text for paragraph in document.paragraphs if paragraph.text] == [
+        "Table 2. First generated.", "Table 1. Authored.", "Table 3. Next generated.",
+    ]
+
+
+def test_table_and_note_keep_an_explicit_superscript(tmp_path: Path) -> None:
+    path = tmp_path / "source.md"
+    path.write_text(
+        "| Column<sup>a</sup> |\n|---|\n| item |\n\n"
+        "Table note: <sup>a</sup>Note text.\n",
+        encoding="utf-8",
+    )
+    document = render_blocks_to_doc(parse_markdown(path))
+    table = document.tables[0]
+    note = next(paragraph for paragraph in document.paragraphs if paragraph.text)
+    assert note.text == "aNote text."
+    assert note.runs[0].text == "a" and note.runs[0].font.superscript is True
+    header = table.cell(0, 0).paragraphs[0]
+    assert header.text == "Columna"
+    assert header.runs[-1].text == "a" and header.runs[-1].font.superscript is True
+
+
+def test_duplicate_authored_table_labels_are_reported(tmp_path: Path) -> None:
+    path = tmp_path / "source.md"
+    path.write_text(
+        "Table 4. One.\n\n| A |\n|---|\n| one |\n\n"
+        "table 4. Two.\n\n| A |\n|---|\n| two |\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate authored table caption label"):
+        render_blocks_to_doc(parse_markdown(path))
+
+
+def test_semantic_adapter_preserves_numbered_caption_and_column_alignments(tmp_path: Path) -> None:
+    from docforge.adapters.markdown import MarkdownReader, render_latex, render_markdown
+    from docforge.adapters.protocol import ReadOptions
+
+    path = tmp_path / "source.md"
+    path.write_text(
+        "Table 8. Measurements.\n\n"
+        "| First | Second | Third |\n| :--- | :---: | ---: |\n| a | b | c |\n",
+        encoding="utf-8",
+    )
+    document = MarkdownReader().read(path, options=ReadOptions()).document
+    markdown = render_markdown(document)
+    assert "Table 8. Measurements." in markdown
+    assert "| :--- | :---: | ---: |" in markdown
+    assert r"\begin{tabular}{lcr}" in render_latex(document)
+
+
 def test_malformed_pipe_table_fails_with_source_location(tmp_path: Path) -> None:
     path = tmp_path / "malformed.md"
     path.write_text("| A | B |\n|-|-|\n| 1 | 2 |\n", encoding="utf-8")
