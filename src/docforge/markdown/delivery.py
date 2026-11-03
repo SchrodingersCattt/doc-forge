@@ -66,7 +66,7 @@ _INPUT_ALIASES = ("inputs", "sources", "markdown")
 _REVIEW_ALIASES = ("reviewed_docx", "reviewed", "review")
 _OPTION_KEYS = (
     "title", "keep_comments", "skip_images", "columns", "figure_span", "font_family",
-    "east_asia_font", "style_profile", "preserve_metadata_prototypes", "line_numbers", "include_title",
+    "east_asia_font", "style_profile", "preserve_metadata_prototypes", "preserve_caption_prototypes", "line_numbers", "include_title",
     "strip_level_one_headings", "heading_before", "numbering_prefix", "bibliography_scope",
     "citation_numbering", "bibliography_profile", "include_metadata_back_matter", "native_toc", "inline_math", "end_matter_placement",
     "restart_heading_numbering", "body_first_line_chars", "page_break_before_h1",

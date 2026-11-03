@@ -123,6 +123,7 @@ class AssemblyResult:
     east_asia_font: str | None = None
     style_profile: str = "template"
     preserve_metadata_prototypes: bool = False
+    preserve_caption_prototypes: bool = False
     line_numbers: str = "template"
     contacts: tuple[str, ...] = ()
     include_title: bool = True
@@ -499,7 +500,7 @@ def _style(document: DocumentType, style_id: str):
     raise ValueError(f"Template style is unavailable: {style_id}")
 
 
-def _apply_style_to_paragraph(element, document: DocumentType, style_id: str) -> None:
+def _apply_style_to_paragraph(element, document: DocumentType, style_id: str, *, preserve_alignment: bool = False) -> None:
     """Attach a semantic style and remove competing direct alignment."""
     properties = element.find(qn("w:pPr"))
     if properties is None:
@@ -514,7 +515,7 @@ def _apply_style_to_paragraph(element, document: DocumentType, style_id: str) ->
     # w:jc values from the temporary renderer or a prototype would compete
     # with that semantic style, so discard them after grafting the paragraph.
     alignment = properties.find(qn("w:jc"))
-    if alignment is not None and style_id != "Normal":
+    if alignment is not None and style_id != "Normal" and not preserve_alignment:
         properties.remove(alignment)
 
 
@@ -699,12 +700,13 @@ def _remove_run_emphasis(element, *, preserve_math: bool = False) -> None:
                 properties.remove(node)
 
 
-def _format_caption_runs(element, points: float | None = None) -> None:
-    """Apply roman caption text and bold only the leading label run.
+def _format_caption_runs(element, points: float | None = None, *, preserve_prototype: bool = False) -> None:
+    """Format the caption and make the leading label bold.
 
     Font metrics inherit from the template unless the caller requests a size.
     """
-    _remove_run_emphasis(element, preserve_math=True)
+    if not preserve_prototype:
+        _remove_run_emphasis(element, preserve_math=True)
     if points is not None:
         _override_run_size(element, points)
     first = next(
@@ -752,6 +754,7 @@ def _new_paragraph(
     uppercase: bool = False,
     font_family: str | None = None,
     east_asia_font: str | None = None,
+    preserve_prototype: bool = False,
 ):
     """Render text with a template paragraph and run-format prototype."""
     temporary = Document()
@@ -772,7 +775,7 @@ def _new_paragraph(
         if properties is not None:
             element.remove(properties)
         if original_properties is not None:
-            element.insert(0, _clean_paragraph_prototype(prototype, keep_alignment=style_id == "Normal").find(qn("w:pPr")))
+            element.insert(0, _clean_paragraph_prototype(prototype, keep_alignment=preserve_prototype or style_id == "Normal").find(qn("w:pPr")))
     properties = element.find(qn("w:pPr"))
     if properties is None:
         properties = OxmlElement("w:pPr")
@@ -782,7 +785,7 @@ def _new_paragraph(
         style = OxmlElement("w:pStyle")
         properties.insert(0, style)
     style.set(qn("w:val"), style_id)
-    _apply_style_to_paragraph(element, document, style_id)
+    _apply_style_to_paragraph(element, document, style_id, preserve_alignment=preserve_prototype)
     # A generated heading must expose the same outline level as its prototype.
     heading_match = re.fullmatch(r"(?:Heading ?)?([1-9])", style_id)
     if heading_match is not None:
@@ -799,13 +802,17 @@ def _new_paragraph(
     base_run = (
         _run_prototype(prototype, prefer_long=True)
         if prototype is not None
-        and (style_id != "Normal" or has_clean_direct_bold_run(prototype))
+        and (preserve_prototype or style_id != "Normal" or has_clean_direct_bold_run(prototype))
         else None
     )
-    base_rpr = _sanitize_run_properties(
-        base_run.find(qn("w:rPr")) if base_run is not None else None,
-        keep_bold=None,
-    )
+    prototype_rpr = base_run.find(qn("w:rPr")) if base_run is not None else None
+    if preserve_prototype and prototype_rpr is not None:
+        base_rpr = copy.deepcopy(prototype_rpr)
+        for tag in ("highlight", "shd", "rStyle", "rPrChange"):
+            for child in list(base_rpr.findall(qn("w:" + tag))):
+                base_rpr.remove(child)
+    else:
+        base_rpr = _sanitize_run_properties(prototype_rpr, keep_bold=None)
     for run in element.findall(".//" + qn("w:r")):
         source_rpr = run.find(qn("w:rPr"))
         if source_rpr is None and base_rpr is None:
@@ -818,7 +825,7 @@ def _new_paragraph(
         merged_rpr = _copy_positive_markers(source_rpr, target_rpr)
         if target_rpr is None and merged_rpr is not None and len(merged_rpr):
             run.insert(0, merged_rpr)
-    if style_id == getattr(document.part, "_docforge_roles", {}).get("reference"):
+    if not preserve_prototype and style_id == getattr(document.part, "_docforge_roles", {}).get("reference"):
         for tag in ("ind", "spacing", "tabs"):
             for direct in list(properties.findall(qn("w:" + tag))):
                 properties.remove(direct)
@@ -1270,6 +1277,21 @@ def _template_inline_figure_slots(regions) -> tuple[_TemplateRegion, ...]:
     return tuple(slots)
 
 
+def _caption_sample_prototypes(document: DocumentType) -> dict[str, tuple[str, object]]:
+    """Identify explicit caption examples without treating prose as a sample."""
+    patterns = {
+        "caption": re.compile(r"^\s*(?:Supplementary\s+Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+\s*[.:]", re.IGNORECASE),
+        "table_caption": re.compile(r"^\s*(?:Supplementary\s+)?Table\s+[A-Za-z0-9]+\s*[.:]", re.IGNORECASE),
+    }
+    samples = {}
+    for paragraph in document.paragraphs:
+        text = inline_key(paragraph.text)
+        for role, pattern in patterns.items():
+            if role not in samples and pattern.match(text):
+                samples[role] = (paragraph.style.style_id, copy.deepcopy(paragraph._p))
+    return samples
+
+
 def _template_prototypes(document: DocumentType, styles: Mapping[str, str], regions):
     paragraphs = list(document.paragraphs)
     by_style: dict[str, list] = {}
@@ -1690,13 +1712,15 @@ def _clone_rendered_block(
         if supplementary:
             body = re.sub(r"(?i)^supplementary\s+table\s*\d*\s*[.:]?\s*", "", body).strip()
         gap = options.get("caption_gap", " ") if authored_label else " "
+        preserve = "table_caption" in getattr(target.part, "_docforge_preserve_caption_roles", ())
         paragraph = _new_paragraph(
             target,
             styles["table_caption"],
             f"**{label}**{gap if body else ''}{body}".strip(),
             prototype=p.get("table_caption"),
+            preserve_prototype=preserve,
         )
-        _format_caption_runs(paragraph, caption_font_size)
+        _format_caption_runs(paragraph, caption_font_size, preserve_prototype=preserve)
         _set_paragraph_flag(paragraph, "w:keepNext")
         return [paragraph]
     if block.kind in {"keywords", "table_foot", "back_matter_heading", "back_matter_body", "toc_text"}:
@@ -1915,9 +1939,11 @@ def _clone_figure(
         r"**\1**",
         caption_text,
     )
-    cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
+    preserve = "caption" in getattr(target.part, "_docforge_preserve_caption_roles", ())
+    cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype,
+                         preserve_prototype=preserve)
     _set_paragraph_flag(cap, "w:keepLines")
-    _format_caption_runs(cap, caption_font_size)
+    _format_caption_runs(cap, caption_font_size, preserve_prototype=preserve)
     return [paragraph, cap]
 
 
@@ -2257,6 +2283,7 @@ def assemble_markdown_template(
     east_asia_font: str | None = None,
     style_profile: str = "template",
     preserve_metadata_prototypes: bool = False,
+    preserve_caption_prototypes: bool = False,
     line_numbers: str = "template",
     include_title: bool = True,
     strip_level_one_headings: bool = False,
@@ -2440,6 +2467,18 @@ def assemble_markdown_template(
         for role_name, role_spec in authority.roles.items():
             if role_name in styles and role_spec.word_style:
                 styles[role_name] = _find_style(template, (role_spec.word_style,), role=role_name)
+    caption_samples = _caption_sample_prototypes(template) if preserve_caption_prototypes else {}
+    # An explicitly supplied semantic profile remains authoritative. With the
+    # template profile, an authored caption example is stronger evidence of
+    # the intended style than an unused built-in Word Caption style.
+    if preserve_caption_prototypes and requested_style_profile == "template" and style_authority is None:
+        for role, (sample_style, _) in caption_samples.items():
+            styles[role] = sample_style
+    preserved_caption_roles = {
+        role for role, (sample_style, _) in caption_samples.items()
+        if styles[role] == sample_style
+    }
+    template.part._docforge_preserve_caption_roles = preserved_caption_roles
     template.part._docforge_roles = styles
     custom_template = any(
         getattr(style, "builtin", False) is False
@@ -2483,6 +2522,11 @@ def assemble_markdown_template(
 
     regions = _template_regions(template)
     prototypes = _template_prototypes(template, styles, regions)
+    if preserved_caption_roles:
+        paragraph_prototypes = dict(prototypes.paragraphs)
+        for role in preserved_caption_roles:
+            paragraph_prototypes[role] = caption_samples[role][1]
+        prototypes = _TemplatePrototypes(paragraph_prototypes, prototypes.figure_regions)
     body_regions = [region for region in regions if not region.figure]
     if len(body_regions) > 1 and body_regions[0].index == 0:
         front_region = body_regions.pop(0)
@@ -2952,6 +2996,7 @@ def assemble_markdown_template(
         east_asia_font=east_asia_font,
         style_profile=requested_style_profile,
         preserve_metadata_prototypes=preserve_metadata_prototypes,
+        preserve_caption_prototypes=preserve_caption_prototypes,
         line_numbers=line_numbers,
         contacts=metadata.contacts,
         include_title=include_title,
@@ -3026,6 +3071,7 @@ def write_assembly_sidecars(
             "east_asia_font": result.east_asia_font,
             "style_profile": result.style_profile,
             "preserve_metadata_prototypes": result.preserve_metadata_prototypes,
+            "preserve_caption_prototypes": result.preserve_caption_prototypes,
             "line_numbers": result.line_numbers,
             "include_title": result.include_title,
             "strip_level_one_headings": result.strip_level_one_headings,

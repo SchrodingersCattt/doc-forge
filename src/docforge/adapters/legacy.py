@@ -57,6 +57,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             east_asia_font=args.east_asia_font,
             style_profile=args.style_profile,
             preserve_metadata_prototypes=getattr(args, "preserve_metadata_prototypes", False),
+            preserve_caption_prototypes=getattr(args, "preserve_caption_prototypes", False),
             line_numbers=args.line_numbers,
             include_title=True,
             strip_level_one_headings=args.no_title,
@@ -100,6 +101,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         or getattr(args, "inline_math", "runs") != "runs"
         or args.style_profile != "template"
         or getattr(args, "preserve_metadata_prototypes", False)
+        or getattr(args, "preserve_caption_prototypes", False)
         or args.line_numbers != "template"
         or args.figure_span != "column"
         or args.body_font_size is not None

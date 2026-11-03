@@ -1583,6 +1583,121 @@ def test_template_body_and_caption_typography(tmp_path: Path) -> None:
     assert result.figures[0]["orientation"] == "portrait"
 
 
+def test_opt_in_caption_samples_override_unused_builtin_caption_style(tmp_path: Path) -> None:
+    image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    doc = Document()
+    doc.add_paragraph("A neutral and deliberately long body sample for selecting body typography.")
+    doc.add_paragraph().add_run().add_picture(str(image), width=1000000)
+    doc.styles["Caption"].font.color.rgb = RGBColor(0x00, 0x44, 0xBB)
+    # The meaningful examples intentionally use ordinary body style with
+    # independent direct formatting; the built-in Caption style is unused.
+    for label, points in (("Figure S1.", 10), ("Table S1.", 10.5)):
+        sample = doc.add_paragraph(style="Normal")
+        sample.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        sample.paragraph_format.first_line_indent = Pt(0)
+        first = sample.add_run(label)
+        first.bold = True
+        body = sample.add_run(" A representative caption sample.")
+        body.font.size = Pt(points)
+        body.font.color.rgb = RGBColor(0, 0, 0)
+    doc.save(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Results\n\nBody.\n\nTable: New values.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+        "![Figure 1](source.png)\n\nFigure 1. A $v^{2}$ response.\n",
+        encoding="utf-8",
+    )
+    old_output = tmp_path / "default.docx"
+    new_output = tmp_path / "samples.docx"
+    assemble_markdown_template([source], template_path=template, output=old_output, title="Title")
+    result = assemble_markdown_template(
+        [source], template_path=template, output=new_output, title="Title",
+        preserve_caption_prototypes=True,
+    )
+    old = Document(old_output)
+    new = Document(new_output)
+    for prefix, points in (("Figure 1.", 10), ("Table 1.", 10.5)):
+        before = next(p for p in old.paragraphs if p.text.startswith(prefix))
+        after = next(p for p in new.paragraphs if p.text.startswith(prefix))
+        assert before.style.name == "Caption"
+        assert after.style.name == "Normal"
+        assert after.alignment == WD_ALIGN_PARAGRAPH.LEFT
+        assert after.paragraph_format.first_line_indent == Pt(0)
+        assert after.runs[0].bold is True
+        ordinary = next(r for r in after.runs if "response" in r.text or "New values" in r.text)
+        assert ordinary.font.color.rgb == RGBColor(0, 0, 0)
+        assert ordinary.font.size == Pt(points)
+    math_caption = next(p for p in new.paragraphs if p.text.startswith("Figure 1."))
+    assert next(r for r in math_caption.runs if r.text == "2").font.superscript is True
+    assert result.preserve_caption_prototypes is True
+    manifest, _ = write_assembly_sidecars(
+        result, inputs=[source], template_path=template, metadata_path=None,
+        bibliography_path=None, command=["docforge", "md2docx"],
+    )
+    assert json.loads(manifest.read_text(encoding="utf-8"))["rendering"]["preserve_caption_prototypes"] is True
+
+    override_output = tmp_path / "explicit-size.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=override_output, title="Title",
+        preserve_caption_prototypes=True, caption_font_size=9,
+    )
+    for paragraph in Document(override_output).paragraphs:
+        if paragraph.text.startswith(("Figure 1.", "Table 1.")):
+            assert all(run.font.size == Pt(9) for run in paragraph.runs if run.text)
+
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    cli_output = tmp_path / "cli.docx"
+    assert main([
+        "md2docx", str(source), "-o", str(cli_output), "--template", str(template),
+        "--metadata", str(metadata), "--preserve-caption-prototypes", "--caption-font-size", "10",
+    ]) == 0
+    cli_caption = next(p for p in Document(cli_output).paragraphs if p.text.startswith("Figure 1."))
+    assert cli_caption.style.name == "Normal"
+    assert all(run.font.size == Pt(10) for run in cli_caption.runs if run.text)
+    cli_manifest = json.loads(cli_output.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    assert cli_manifest["rendering"]["preserve_caption_prototypes"] is True
+
+
+def test_caption_sample_option_respects_explicit_style_profile_and_missing_samples(tmp_path: Path) -> None:
+    image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    doc = Document()
+    doc.add_paragraph("A neutral body sample.")
+    doc.add_paragraph().add_run().add_picture(str(image), width=1000000)
+    doc.add_paragraph("Figure 1. An example caption.", style="Normal")
+    doc.save(template)
+    source = tmp_path / "source.md"
+    source.write_text("![Figure 1](source.png)\n\nFigure 1. New caption.\n", encoding="utf-8")
+    profile = tmp_path / "style.json"
+    profile.write_text(json.dumps({"caption": "Caption"}), encoding="utf-8")
+    output = tmp_path / "explicit.docx"
+    assemble_markdown_template(
+        [source], template_path=template, output=output, title="Title",
+        style_profile=str(profile), preserve_caption_prototypes=True,
+    )
+    caption = next(p for p in Document(output).paragraphs if p.text.startswith("Figure 1."))
+    assert caption.style.name == "Caption"
+
+    # No recognizable caption example means that the existing style mapping
+    # remains unchanged, even when the opt-in is requested.
+    no_sample = tmp_path / "no-sample.docx"
+    doc = Document()
+    doc.add_paragraph("A neutral body sample.")
+    doc.add_paragraph().add_run().add_picture(str(image), width=1000000)
+    doc.add_paragraph("[FIGURE CAPTION]", style="Caption")
+    doc.save(no_sample)
+    fallback = tmp_path / "fallback.docx"
+    assemble_markdown_template(
+        [source], template_path=no_sample, output=fallback, title="Title",
+        preserve_caption_prototypes=True,
+    )
+    assert next(p for p in Document(fallback).paragraphs if p.text.startswith("Figure 1.")).style.name == "Caption"
+
+
 def test_template_typography_size_overrides(tmp_path: Path) -> None:
     source_image = tmp_path / "source.png"
     Image.new("RGB", (80, 40), "white").save(source_image)

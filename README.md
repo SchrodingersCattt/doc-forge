@@ -73,6 +73,11 @@ docforge pipeline pipeline.json --workspace . --output-dir dist
 
 Template assembly replaces sample content while retaining styles, section geometry, headers, footers, numbering, and reusable figure layouts. Generated text inherits template fonts, sizes, and colors. The explicit `--body-font-size`, `--abstract-font-size`, `--caption-font-size`, `--reference-font-size`, `--font-family`, and `--east-asia-font` options override those values. Inline code retains its monospace font.
 
+If the template's actual figure and table captions use direct formatting rather
+than its named `Caption` style, `--preserve-caption-prototypes` uses those
+examples as separate figure and table formatting prototypes. Omit the option
+to retain the default named-style discovery behavior.
+
 `--style profile.json` accepts either the legacy semantic-role-to-style map or a `docforge.style.v1` profile. See [template roles and layout](docs/template-layout.md) for roles, profiles, table notes, algorithms, and end placement.
 
 A line that begins with `! ` or `！ ` is omitted. `--keep-comments` keeps that line as a `[TODO: ...]` note.

@@ -18,6 +18,18 @@ The same choice is available to Python callers as
 recorded in the assembly manifest. Omit it when the template's named role
 styles, rather than its sample paragraphs, should remain authoritative.
 
+Some templates provide figure and table caption examples using direct
+formatting, even though an unused built-in `Caption` style also exists. Pass
+`--preserve-caption-prototypes` to use the paragraph style, alignment, spacing,
+and neutral text-run formatting of the first numbered figure and table caption
+examples independently. Sample text is never copied. Missing examples leave
+the corresponding discovered role unchanged. An explicit semantic style
+profile remains authoritative and an explicit `--caption-font-size`, `--font`,
+or `--east-asia-font` overrides the sampled metrics. The Python equivalent is
+`assemble_markdown_template(..., preserve_caption_prototypes=True)`; the choice
+is recorded in the manifest. Omitting the option preserves the existing style
+discovery behavior.
+
 For a document without a template, `--standalone-style manuscript` selects a
 neutral left-aligned 11 pt body and maps Markdown heading levels to their
 corresponding Word Heading levels. A supplied standalone title uses the Word
