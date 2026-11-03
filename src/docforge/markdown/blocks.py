@@ -19,6 +19,8 @@ class Block:
         language: fenced-code info string
         path: resolved image path for image blocks
         rows: table cell matrix (row-major) for table blocks
+        options: sparse key/value metadata (image markers, table-note
+            ``table_id`` / ``label`` / ``source`` / ``orphan``)
     """
 
     kind: str

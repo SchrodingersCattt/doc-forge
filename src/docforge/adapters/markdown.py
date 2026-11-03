@@ -574,6 +574,27 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
         return BlockNode(counter.block(), "thematic_break", provenance=provenance), []
     if block.kind == "table_caption":
         return BlockNode(counter.block(), "caption", inlines=parse_markdown_inlines(block.text), attrs=(("kind", "table"),), provenance=provenance), []
+    if block.kind == "table_foot":
+        attrs = [("kind", "table_note")]
+        for key, value in block.options:
+            if key in {"table_id", "label", "source"} and value:
+                attrs.append((key, value))
+        return BlockNode(
+            counter.block(),
+            "caption",
+            inlines=parse_markdown_inlines(block.text),
+            attrs=tuple(attrs),
+            provenance=provenance,
+        ), []
+    if block.kind == "keywords":
+        return BlockNode(counter.block(), "paragraph", inlines=parse_markdown_inlines(block.text), attrs=(("role", "keywords"),), provenance=provenance), []
+    if block.kind == "algorithm":
+        return BlockNode(
+            counter.block(),
+            "code",
+            attrs=(("language", block.language or "algorithm"), ("code", block.text), ("role", "algorithm")),
+            provenance=provenance,
+        ), []
     if block.kind == "reference":
         return BlockNode(counter.block(), "reference_entry", attrs=(("text", block.text),), provenance=provenance), []
     if block.kind == "table":

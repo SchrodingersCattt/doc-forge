@@ -25,6 +25,17 @@ import lxml.etree as etree
 
 from .blocks import Block, SectionSource
 from .inline import key as inline_key, render as render_inline
+from .table_notes import (
+    LEGACY_BRACKET_NOTE_RE,
+    TABLE_NOTE_DIAGNOSTIC_POLICIES,
+    TABLE_NOTE_DIRECTIVE_RE,
+    TABLE_NOTE_ESCAPE_RE,
+    TABLE_NOTE_MODES,
+    apply_table_note_diagnostics,
+    associate_table_notes,
+    diagnose_table_notes,
+    extract_note_label,
+)
 from ..tex.tokenize import tokenize_tex
 
 __all__ = [
@@ -42,6 +53,7 @@ __all__ = [
     "add_image",
     "add_separator",
     "add_table",
+    "add_table_foot",
     "setup_styles",
     "make_empty_doc",
     "override_document_fonts",
@@ -217,20 +229,51 @@ def _has_unescaped_display_delimiter(line: str) -> bool:
     return False
 
 
-def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
-    """Parse a Markdown file into the block model (see ``Block``)."""
+def parse_markdown(
+    path: Path,
+    strip_comments: bool = True,
+    *,
+    table_notes: str = "legacy",
+    table_note_diagnostics: str = "warn",
+) -> list[Block]:
+    """Parse a Markdown file into the block model (see ``Block``).
+
+    ``table_notes`` selects note recognition:
+
+    * ``legacy`` (default): ``Table note:`` / ``Table foot:`` and post-table
+      ``[a]`` lines become ``table_foot`` blocks (historical behavior).
+    * ``explicit``: only declared ``Table note:`` / ``Table foot:`` lines inside
+      an open table association window become notes.  Ordinary ``[a]`` prose
+      stays a paragraph.  Prefix a directive with ``\\`` to keep it literal.
+    """
+    if table_notes not in TABLE_NOTE_MODES:
+        raise ValueError("table_notes must be one of: legacy, explicit")
+    if table_note_diagnostics not in TABLE_NOTE_DIAGNOSTIC_POLICIES:
+        raise ValueError("table_note_diagnostics must be one of: warn, error, ignore")
     text = clean_markdown(path.read_text(encoding="utf-8-sig"), strip_comments)
     lines = text.splitlines()
     blocks: list[Block] = []
     paragraph_lines: list[str] = []
+    # Association window: a table opens it; consecutive notes keep it open;
+    # any other emitted block closes it.  Blank lines do not close it.
+    note_window_open = False
 
     def flush_paragraph() -> None:
-        nonlocal paragraph_lines
+        nonlocal paragraph_lines, note_window_open
         if paragraph_lines:
             joined = " ".join(line.strip() for line in paragraph_lines if line.strip()).strip()
             if joined:
                 blocks.append(Block("paragraph", joined))
+                note_window_open = False
             paragraph_lines = []
+
+    def emit(block: Block) -> None:
+        nonlocal note_window_open
+        blocks.append(block)
+        if block.kind in {"table", "table_foot"}:
+            note_window_open = True
+        else:
+            note_window_open = False
 
     i = 0
     while i < len(lines):
@@ -243,13 +286,13 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         if BANG_COMMENT_RE.match(stripped) and not stripped.startswith("!["):
             flush_paragraph()
             if not strip_comments:
-                blocks.append(Block("paragraph", f"[TODO: {stripped[1:].strip()}]"))
+                emit(Block("paragraph", f"[TODO: {stripped[1:].strip()}]"))
             i += 1
             continue
         heading = HEADING_RE.match(stripped)
         if heading:
             flush_paragraph()
-            blocks.append(Block("heading", heading.group(2).strip(), level=len(heading.group(1))))
+            emit(Block("heading", heading.group(2).strip(), level=len(heading.group(1))))
             i += 1
             continue
         image = IMAGE_RE.match(stripped)
@@ -268,7 +311,7 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                     key, value = (piece.strip() for piece in part.split("=", 1))
                     options.append((key.lower(), value.lower()))
                 raw_caption = " | ".join(kept)
-            blocks.append(
+            emit(
                 Block("image", text=raw_caption, path=str(image_path), options=tuple(options))
             )
             i += 1
@@ -283,11 +326,11 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                 i += 1
             i += 1 if i < len(lines) else 0
             if language.lower() in {"math", "tex", "latex"}:
-                blocks.append(Block("equation", " ".join(part.strip() for part in code)))
+                emit(Block("equation", " ".join(part.strip() for part in code)))
             elif language.lower() in {"algorithm", "pseudocode"}:
-                blocks.append(Block("algorithm", "\n".join(code), language=language))
+                emit(Block("algorithm", "\n".join(code), language=language))
             else:
-                blocks.append(Block("code", "\n".join(code), language=language))
+                emit(Block("code", "\n".join(code), language=language))
             continue
         if stripped == "$$":
             flush_paragraph()
@@ -302,7 +345,7 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
             if not any(line.strip() for line in equation):
                 raise ValueError(f"Empty display equation in {path}:{opening_line}")
             i += 1
-            blocks.append(Block("equation", "\n".join(equation).strip()))
+            emit(Block("equation", "\n".join(equation).strip()))
             continue
         if is_table_start(lines, i):
             flush_paragraph()
@@ -327,14 +370,14 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
                     )
                 rows.append(parsed)
                 i += 1
-            blocks.append(Block("table", rows=tuple(rows)))
+            emit(Block("table", rows=tuple(rows)))
             continue
         if _looks_like_table_row(line) and i + 1 < len(lines) and _looks_like_table_row(lines[i + 1]):
             raise ValueError(f"Malformed Markdown table in {path}:{i + 1}; separator row must use at least three hyphens per cell")
         ordered = ORDERED_RE.match(line)
         if ordered:
             flush_paragraph()
-            blocks.append(
+            emit(
                 Block("ordered", f"{ordered.group(2)}. {ordered.group(3)}", level=len(ordered.group(1)) // 2)
             )
             i += 1
@@ -342,43 +385,80 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         bullet = BULLET_RE.match(line)
         if bullet:
             flush_paragraph()
-            blocks.append(Block("bullet", bullet.group(2), level=len(bullet.group(1)) // 2))
+            emit(Block("bullet", bullet.group(2), level=len(bullet.group(1)) // 2))
             i += 1
             continue
         if stripped.startswith(">"):
             flush_paragraph()
-            blocks.append(Block("quote", stripped.lstrip("> ")))
+            emit(Block("quote", stripped.lstrip("> ")))
             i += 1
             continue
         if stripped in {"---", "***", "___"}:
             flush_paragraph()
-            blocks.append(Block("separator"))
+            emit(Block("separator"))
             i += 1
             continue
         if REFERENCE_RE.match(stripped):
             flush_paragraph()
-            blocks.append(Block("reference", stripped))
+            emit(Block("reference", stripped))
             i += 1
             continue
         if re.match(r"(?i)^keywords\s*:", stripped):
             flush_paragraph()
-            blocks.append(Block("keywords", stripped))
+            emit(Block("keywords", stripped))
             i += 1
             continue
-        if re.match(r"(?i)^table\s+(?:note|foot)\s*:", stripped):
+        escape = TABLE_NOTE_ESCAPE_RE.match(stripped)
+        if escape is not None:
             flush_paragraph()
-            blocks.append(Block("table_foot", re.sub(r"(?i)^table\s+(?:note|foot)\s*:\s*", "", stripped)))
+            # Keep the directive text without the escape backslash.
+            emit(Block("paragraph", stripped[1:]))
             i += 1
             continue
-        if re.match(r"^\[[a-z]\]\s+", stripped) and blocks and blocks[-1].kind in {"table", "table_foot"}:
+        directive = TABLE_NOTE_DIRECTIVE_RE.match(stripped)
+        if directive is not None:
             flush_paragraph()
-            blocks.append(Block("table_foot", stripped))
+            body = directive.group(1).strip()
+            label, _ = extract_note_label(body)
+            if table_notes == "explicit" and not note_window_open:
+                # Orphan declarations stay ordinary prose so they cannot attach
+                # to an unrelated earlier table.
+                emit(Block("paragraph", stripped, options=(("table_note_orphan", "true"), ("label", label))))
+            else:
+                emit(
+                    Block(
+                        "table_foot",
+                        body,
+                        options=(
+                            ("source", "directive"),
+                            ("label", label),
+                            ("orphan", "false" if note_window_open else "true"),
+                        ),
+                    )
+                )
+            i += 1
+            continue
+        legacy = LEGACY_BRACKET_NOTE_RE.match(stripped)
+        if (
+            table_notes == "legacy"
+            and legacy is not None
+            and note_window_open
+            and re.match(r"^\[[a-z]\]\s+", stripped)
+        ):
+            flush_paragraph()
+            emit(
+                Block(
+                    "table_foot",
+                    stripped,
+                    options=(("source", "legacy-bracket"), ("label", legacy.group(1))),
+                )
+            )
             i += 1
             continue
         table_caption = TABLE_CAPTION_RE.match(stripped)
         if table_caption:
             flush_paragraph()
-            blocks.append(Block("table_caption", table_caption.group(1).strip()))
+            emit(Block("table_caption", table_caption.group(1).strip()))
             i += 1
             continue
         if _has_unescaped_display_delimiter(line):
@@ -392,7 +472,17 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         paragraph_lines.append(line)
         i += 1
     flush_paragraph()
-    return blocks
+    associated = associate_table_notes(blocks)
+    findings = apply_table_note_diagnostics(
+        diagnose_table_notes(associated),
+        policy=table_note_diagnostics,
+    )
+    if findings:
+        import warnings
+
+        for item in findings:
+            warnings.warn(f"{item.code}: {item.message}", UserWarning, stacklevel=2)
+    return associated
 
 
 def make_empty_doc(*, configure_normal: bool = True) -> DocumentType:
@@ -887,7 +977,13 @@ def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> Non
             start = end
 
 
-def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
+def add_table(
+    doc: DocumentType,
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    trailing_blank: bool = True,
+    keep_with_next: bool = False,
+) -> None:
     if not rows:
         return
     width = max(len(row) for row in rows)
@@ -910,7 +1006,28 @@ def add_table(doc: DocumentType, rows: tuple[tuple[str, ...], ...]) -> None:
             set_repeat_table_header(row)
     _merge_repeated_table_cells(table, rows)
     set_table_three_line_borders(table)
-    doc.add_paragraph()
+    if keep_with_next and table.rows:
+        for paragraph in table.rows[-1].cells[0].paragraphs:
+            paragraph.paragraph_format.keep_with_next = True
+    if trailing_blank:
+        doc.add_paragraph()
+
+
+def add_table_foot(doc: DocumentType, text: str, *, keep_with_next: bool = False):
+    """Render one table note with the standalone TableFoot style."""
+    paragraph = doc.add_paragraph()
+    style_names = {style.name for style in doc.styles}
+    if "TableFoot" in style_names:
+        paragraph.style = doc.styles["TableFoot"]
+    _render_inline(paragraph, text, size=9.0)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(2)
+    paragraph.paragraph_format.left_indent = Cm(0.25)
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    if keep_with_next:
+        paragraph.paragraph_format.keep_with_next = True
+    return paragraph
 
 
 def add_block(
@@ -920,11 +1037,15 @@ def add_block(
     equation_number: int | None = None,
     table_number: int | None = None,
     number_prefix: str = "",
+    trailing_blank: bool = True,
+    keep_with_next: bool = False,
 ) -> None:
     if block.kind == "heading":
         add_heading(doc, block.text, block.level)
-    elif block.kind in {"paragraph", "keywords", "table_foot"}:
+    elif block.kind in {"paragraph", "keywords"}:
         add_body_paragraph(doc, block.text)
+    elif block.kind == "table_foot":
+        add_table_foot(doc, block.text, keep_with_next=keep_with_next)
     elif block.kind == "ordered":
         add_list_paragraph(doc, block.text, block.level, ordered=True)
     elif block.kind == "bullet":
@@ -938,7 +1059,12 @@ def add_block(
     elif block.kind == "table_caption":
         add_table_caption(doc, block.text, number=table_number, number_prefix=number_prefix)
     elif block.kind == "table":
-        add_table(doc, block.rows)
+        add_table(
+            doc,
+            block.rows,
+            trailing_blank=trailing_blank,
+            keep_with_next=keep_with_next,
+        )
     elif block.kind == "quote":
         add_quote(doc, block.text)
     elif block.kind == "image":
@@ -981,6 +1107,15 @@ def setup_styles(doc: DocumentType, *, configure_normal: bool = True) -> None:
         outline_level.set(qn("w:val"), str(level - 1))
     if "Table Grid" not in [style.name for style in doc.styles]:
         doc.styles.add_style("Table Grid", WD_STYLE_TYPE.TABLE)
+    if "TableFoot" not in [style.name for style in doc.styles]:
+        foot = doc.styles.add_style("TableFoot", WD_STYLE_TYPE.PARAGRAPH)
+        foot.base_style = normal
+        foot.font.name = "Times New Roman"
+        foot.font.size = Pt(9)
+        foot.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        foot.paragraph_format.space_before = Pt(0)
+        foot.paragraph_format.space_after = Pt(2)
+        foot.paragraph_format.left_indent = Cm(0.25)
 
 
 # ── verification helpers (shared by CLI and tests) ─────────────────────────
@@ -1190,13 +1325,21 @@ def render_blocks_to_doc(
         add_heading(doc, title, 1)
     equation_number = equation_start
     table_number = 1
-    for block in blocks:
+    block_list = list(blocks)
+    for index, block in enumerate(block_list):
+        following = block_list[index + 1] if index + 1 < len(block_list) else None
+        next_is_note = following is not None and following.kind == "table_foot"
         add_block(
             doc,
             block,
             equation_number=equation_number if block.kind == "equation" else None,
             table_number=table_number if block.kind == "table_caption" else None,
             number_prefix=number_prefix,
+            trailing_blank=not (block.kind == "table" and next_is_note),
+            keep_with_next=(
+                (block.kind == "table" and next_is_note)
+                or (block.kind == "table_foot" and next_is_note)
+            ),
         )
         if block.kind == "heading" and heading_before is not None and doc.paragraphs:
             doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
