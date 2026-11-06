@@ -475,6 +475,13 @@ def test_chemical_bond_hyphens_use_en_dash() -> None:
     assert value == "N–H, C–N, K–Cl6, A–X12, HClO4-forming, ABX4"
 
 
+def test_adjacent_parentheticals_merge_into_the_preceding_group() -> None:
+    value = normalize_typography(r"($\eta^2 = 0.12$) (Figure 2b). (a) text. (b) next.")
+    assert value == r"($\eta^2 = 0.12$, Figure 2b). (a) text. (b) next."
+    assert normalize_typography("(H$_2$dabco)(NH$_4$)(ClO$_4$)$_3$") == "(H$_2$dabco)(NH$_4$)(ClO$_4$)$_3$"
+    assert normalize_typography("(foo) (bar) (baz)") == "(foo, bar, baz)"
+
+
 def test_scientific_units_and_r_squared_use_true_scripts() -> None:
     document = render_blocks_to_doc(
         [Block("paragraph", r"$R^2$; $\mathrm{cm^3\,mol^{-1}\,s^{-1}}$; $C_2(10\,\mathrm{ps})$.")]

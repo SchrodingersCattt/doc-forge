@@ -88,11 +88,31 @@ def normalize_text(value: str) -> str:
     return inline_key(value).rstrip("：:")
 
 
+# A second parenthetical that follows a closing parenthesis is one aside,
+# not a new group: "($\\eta^2 = 0.12$) (Figure 2b)" -> one pair.
+_ADJACENT_PARENTHETICAL_RE = re.compile(r"\(([^()\n]+)\)[ \t]+\(([^()\n]+)\)")
+
+
+def _merge_adjacent_parentheticals(value: str) -> str:
+    """Fold a parenthetical into the one that immediately precedes it.
+
+    Formula groups such as ``(H2dabco)(NH4)`` have no space and stay separate.
+    Groups with anything between them, including a period, also stay separate.
+    """
+
+    previous = None
+    while previous != value:
+        previous = value
+        value = _ADJACENT_PARENTHETICAL_RE.sub(r"(\1, \2)", value)
+    return value
+
+
 def normalize_typography(value: str) -> str:
     """Normalize dash entities and convert em dashes to en dashes."""
     value = EN_DASH_ENTITY_RE.sub("\u2013", value)
     value = value.replace("\u2014", "\u2013")
-    return BOND_HYPHEN_RE.sub(r"\1–\2", value)
+    value = BOND_HYPHEN_RE.sub(r"\1–\2", value)
+    return _merge_adjacent_parentheticals(value)
 
 
 def clean_markdown(text: str, strip_comments: bool) -> str:
