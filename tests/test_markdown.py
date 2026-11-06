@@ -479,7 +479,10 @@ def test_adjacent_parentheticals_merge_into_the_preceding_group() -> None:
     value = normalize_typography(r"($\eta^2 = 0.12$) (Figure 2b). (a) text. (b) next.")
     assert value == r"($\eta^2 = 0.12$, Figure 2b). (a) text. (b) next."
     assert normalize_typography("(H$_2$dabco)(NH$_4$)(ClO$_4$)$_3$") == "(H$_2$dabco)(NH$_4$)(ClO$_4$)$_3$"
-    assert normalize_typography("(foo) (bar) (baz)") == "(foo, bar, baz)"
+    assert normalize_typography("(foo) (bar)") == "(foo) (bar)"
+    source = "(Figures S1–S29 and Tables S1–S17) (PDF)"
+    assert normalize_typography(source) == source
+    assert normalize_typography("(0.12) (Table S2)") == "(0.12, Table S2)"
 
 
 def test_scientific_units_and_r_squared_use_true_scripts() -> None:

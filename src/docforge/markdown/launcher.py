@@ -100,9 +100,12 @@ def normalize_text(value: str) -> str:
     return inline_key(value).rstrip("：:")
 
 
-# A second parenthetical that follows a closing parenthesis is one aside,
-# not a new group: "($\\eta^2 = 0.12$) (Figure 2b)" -> one pair.
-_ADJACENT_PARENTHETICAL_RE = re.compile(r"\(([^()\n]+)\)[ \t]+\(([^()\n]+)\)")
+# A figure or table reference that follows a closing parenthesis joins that
+# group: "($\\eta^2 = 0.12$) (Figure 2b)" -> one pair. Other following
+# groups, such as "(PDF)", stay separate.
+_ADJACENT_PARENTHETICAL_RE = re.compile(
+    r"\(([^()\n]+)\)[ \t]+\(((?:Figures?|Figs?\.|Tables?)[^()\n]*)\)"
+)
 
 
 def _merge_adjacent_parentheticals(value: str) -> str:
