@@ -65,6 +65,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             native_toc=args.native_toc,
             end_matter_placement=getattr(args, "end_matter_placement", "source"),
             inline_math=getattr(args, "inline_math", "runs"),
+            table_notes=getattr(args, "table_notes", "legacy"),
+            table_note_diagnostics=getattr(args, "table_note_diagnostics", "warn"),
             restart_heading_numbering=args.restart_heading_numbering,
             body_first_line_chars=args.body_first_line_chars,
             page_break_before_h1=args.page_break_before_h1,
@@ -113,7 +115,12 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
     blocks = [
         block
         for path in args.inputs
-        for block in parse_markdown(path, strip_comments=not args.keep_comments)
+        for block in parse_markdown(
+            path,
+            strip_comments=not args.keep_comments,
+            table_notes=getattr(args, "table_notes", "legacy"),
+            table_note_diagnostics=getattr(args, "table_note_diagnostics", "warn"),
+        )
     ]
     if args.skip_images:
         blocks = [block for block in blocks if block.kind != "image"]
@@ -200,6 +207,10 @@ def md2docx_namespace(source: Path, output: Path, *, force: bool = False, title:
         style_profile="template",
         line_numbers="template",
         heading_before=None,
+        end_matter_placement="source",
+        inline_math="runs",
+        table_notes="legacy",
+        table_note_diagnostics="warn",
         native_toc=False,
         restart_heading_numbering=False,
         body_first_line_chars=None,

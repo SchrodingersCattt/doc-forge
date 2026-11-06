@@ -81,19 +81,38 @@ Keywords: first · second
 # Results
 Table: Measurements.
 
-| Group | Sample | Value |
+| Item | Mean<sup>[a]</sup> | Error<sup>[b]</sup> |
 | --- | --- | --- |
-| A | one | 2.0 |
-| A | two | 2.0 |
+| Sample 1 | 2.4 | 0.3 |
 
-[a] A note directly after the table.
+Table note: [a] Mean value.
+Table note: [b] Estimated uncertainty.
 
-Table note: Another explicit table note.
+This is an ordinary paragraph with [a] and [b].
 ```
 
 Keywords become a separate front-matter paragraph, including when no blank line precedes them. A `Table:` caption uses `table_caption`; the first row uses `table_head`, and other rows use `table_body`. `Table 5. Caption text` immediately followed by a table is also a caption, with its authored number and spacing preserved. Automatic `Table:` numbering avoids labels already supplied anywhere in the document; repeated authored labels are rejected. A numbered table mention that is not followed by a table remains ordinary prose.
 
-Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` inherits the applicable template paragraph style. In a fresh document it defaults to left. Use `Table note:` or `Table foot:` for explicit notes, or `[a]`-style lines immediately following a table or another table note. Superscripts are authored explicitly, for example `Table note: <sup>a</sup>Note text.` and `| Value<sup>a</sup> |`. Bracketed text is not silently reformatted. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
+Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` inherits the applicable template paragraph style. In a fresh document it defaults to left. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
+
+### Table notes
+
+Table notes are body paragraphs associated with the immediately preceding Markdown table. They are **not** Word page footnotes and are never converted into `w:footnote` references.
+
+Use one declaration per note, immediately after the table or after another note for that table. Blank lines may separate declarations. An unrelated paragraph, heading, or other block ends the association window.
+
+```markdown
+Table note: [a] Mean value.
+Table foot: [b] Estimated uncertainty.
+```
+
+`--table-notes explicit` (Python `table_notes="explicit"`) recognizes only these declarations. An ordinary unmarked paragraph that contains `[a]` or `[b]`, including one immediately after a table, stays ordinary prose. Prefix a directive with a backslash to keep it literal: `\Table note: not a note`.
+
+`--table-notes legacy` (default) preserves historical recognition: `Table note:` / `Table foot:` always become notes, and a line that begins with `[a]` immediately after a table or another note is also treated as a note. Existing consumers keep that default so behavior does not change silently. Prefer explicit mode for new manuscripts; migrate by rewriting legacy `[a]` lines as `Table note: [a] ...` and passing `--table-notes explicit`.
+
+Within one table scope, matching `<sup>[a]</sup>` cell markers to `Table note: [a] ...` declarations is diagnostic only. A superscript without a matching declaration remains authored superscript text. Labels may repeat across separate tables. `--table-note-diagnostics {warn,error,ignore}` controls orphan declarations, missing cell labels, and duplicate labels in the same table (`warn` default).
+
+Standalone output uses a built-in `TableFoot` style (smaller left-aligned text). Template assembly maps the `table_foot` role to `TableFoot` / `Table Foot` / `Table Note`, falling back to body when absent. Notes keep with their table through Word `keepNext` chaining; long tables or notes may still paginate without an impossible keep-together constraint. Authored bold, italic, subscript, superscript, mathematics, and links are preserved.
 
 Only repeated labels under grouping headers (`level`, `group`, `category`, `class`, `type`, `family`, `site`, `site level`, `factor`, `block`, or a header ending in `level`) can merge vertically. Repeated measurements in other columns stay visible. Markdown and TeX share this policy.
 
@@ -127,5 +146,5 @@ Headings and table captions keep with the following paragraph; image paragraphs 
 
 `--native-toc` inserts a native Word TOC field. Its cached result contains the emitted heading text immediately, without invented page numbers; `w:updateFields` requests a refresh on open. Word computes page numbers when it updates the field. Automatic update behavior in other viewers varies. Without a native TOC request, the generator disables automatic field updates as before.
 
-The Python options are `inline_math="omml"`, `end_matter_placement="end"`, and `native_toc=True` on `assemble_markdown_template`. Delivery profiles accept the same options. Output manifests record the selected settings. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
+The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, and `native_toc=True` on `assemble_markdown_template`. Delivery profiles accept the same options. Output manifests record the selected settings. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
 `md2docx --template` writes the JSON assembly manifest beside the DOCX by default. Pass `--manifest-dir DIR` to store the manifest in a separate directory. The checksum file stays beside the DOCX.

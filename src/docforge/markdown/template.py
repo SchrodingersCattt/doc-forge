@@ -140,6 +140,8 @@ class AssemblyResult:
     native_toc: bool = False
     end_matter_placement: str = "source"
     inline_math: str = "runs"
+    table_notes: str = "legacy"
+    table_note_diagnostics: str = "warn"
     restart_heading_numbering: bool = False
     body_first_line_chars: float | None = None
     page_break_before_h1: bool = False
@@ -1693,6 +1695,7 @@ def _clone_rendered_block(
     number_prefix: str = "",
     body_font_size: float | None = None,
     caption_font_size: float | None = None,
+    keep_with_next: bool = False,
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
@@ -1728,6 +1731,8 @@ def _clone_rendered_block(
         if block.kind == "back_matter_heading":
             _set_paragraph_flag(paragraph, "w:keepNext")
             _set_heading_outline(paragraph, 1)
+        if block.kind == "table_foot" and keep_with_next:
+            _set_paragraph_flag(paragraph, "w:keepNext")
         return [paragraph]
     if block.kind == "algorithm":
         from docx.shared import Pt
@@ -1830,7 +1835,17 @@ def _clone_rendered_block(
                             }[explicit]
                             for paragraph in cell.findall(qn("w:p")):
                                 Paragraph(paragraph, target._body).alignment = alignment
+                if keep_with_next:
+                    rows = clone.findall(qn("w:tr"))
+                    if rows:
+                        for paragraph in rows[-1].iter(qn("w:p")):
+                            _set_paragraph_flag(paragraph, "w:keepNext")
             result.append(clone)
+        # Drop the standalone trailing blank that follows a table when notes
+        # keep with that table; notes should sit immediately underneath.
+        if block.kind == "table" and keep_with_next:
+            while result and result[-1].tag == qn("w:p") and not "".join(result[-1].itertext()).strip():
+                result.pop()
         return result
     return []
 
@@ -2296,6 +2311,8 @@ def assemble_markdown_template(
     native_toc: bool = False,
     end_matter_placement: str = "source",
     inline_math: str = "runs",
+    table_notes: str = "legacy",
+    table_note_diagnostics: str = "warn",
     restart_heading_numbering: bool = False,
     body_first_line_chars: float | None = None,
     page_break_before_h1: bool = False,
@@ -2359,6 +2376,10 @@ def assemble_markdown_template(
         raise ValueError("end_matter_placement must be source or end")
     if inline_math not in {"runs", "omml"}:
         raise ValueError("inline_math must be runs or omml")
+    if table_notes not in {"legacy", "explicit"}:
+        raise ValueError("table_notes must be one of: legacy, explicit")
+    if table_note_diagnostics not in {"warn", "error", "ignore"}:
+        raise ValueError("table_note_diagnostics must be one of: warn, error, ignore")
     template = _load_template_document(template_path)
     template.part._docforge_inline_math = inline_math
     if style_profile != "template":
@@ -2382,7 +2403,12 @@ def assemble_markdown_template(
     blocks = tuple(
         block
         for path in inputs
-        for block in parse_markdown(path, strip_comments=not keep_comments)
+        for block in parse_markdown(
+            path,
+            strip_comments=not keep_comments,
+            table_notes=table_notes,
+            table_note_diagnostics=table_note_diagnostics,
+        )
     )
     if skip_images:
         blocks = tuple(block for block in blocks if block.kind != "image")
@@ -2635,11 +2661,13 @@ def assemble_markdown_template(
         # active section; the selected section is normally the same geometry,
         # and the explicit fit below handles differing templates.
         previous_block: Block | None = None
-        for block in text_blocks:
+        for index, block in enumerate(text_blocks):
             if block.kind == "table_caption" and not _explicit_table_label(block):
                 table_index = _next_table_number(table_index, numbering_prefix, reserved_table_labels)
             if block.kind == "heading" and block.level == 1:
                 heading_counters = {2: 0, 3: 0}
+            following = text_blocks[index + 1] if index + 1 < len(text_blocks) else None
+            next_is_note = following is not None and following.kind == "table_foot"
             nodes = _clone_rendered_block(
                 block,
                 template,
@@ -2650,6 +2678,10 @@ def assemble_markdown_template(
                 number_prefix=numbering_prefix,
                 body_font_size=body_font_size,
                 caption_font_size=caption_font_size,
+                keep_with_next=(
+                    (block.kind == "table" and next_is_note)
+                    or (block.kind == "table_foot" and next_is_note)
+                ),
             )
             if block.kind == "heading":
                 for node in nodes:
@@ -3013,6 +3045,8 @@ def assemble_markdown_template(
         native_toc=native_toc,
         end_matter_placement=end_matter_placement,
         inline_math=inline_math,
+        table_notes=table_notes,
+        table_note_diagnostics=table_note_diagnostics,
         restart_heading_numbering=restart_heading_numbering,
         body_first_line_chars=body_first_line_chars,
         page_break_before_h1=page_break_before_h1,
@@ -3079,6 +3113,8 @@ def write_assembly_sidecars(
             "native_toc": result.native_toc,
             "end_matter_placement": result.end_matter_placement,
             "inline_math": result.inline_math,
+            "table_notes": result.table_notes,
+            "table_note_diagnostics": result.table_note_diagnostics,
             "restart_heading_numbering": result.restart_heading_numbering,
             "body_first_line_chars": result.body_first_line_chars,
             "page_break_before_h1": result.page_break_before_h1,

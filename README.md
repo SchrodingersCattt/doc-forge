@@ -78,7 +78,7 @@ than its named `Caption` style, `--preserve-caption-prototypes` uses those
 examples as separate figure and table formatting prototypes. Omit the option
 to retain the default named-style discovery behavior.
 
-`--style profile.json` accepts either the legacy semantic-role-to-style map or a `docforge.style.v1` profile. See [template roles and layout](docs/template-layout.md) for roles, profiles, table notes, algorithms, and end placement.
+`--style profile.json` accepts either the legacy semantic-role-to-style map or a `docforge.style.v1` profile. See [template roles and layout](docs/template-layout.md) for roles, profiles, table notes, algorithms, and end placement. Table notes default to `--table-notes legacy` for compatibility; use `--table-notes explicit` for declaration-only, table-scoped `Table note:` / `Table foot:` syntax.
 
 A line that begins with `! ` or `！ ` is omitted. `--keep-comments` keeps that line as a `[TODO: ...]` note.
 
@@ -144,6 +144,8 @@ Abbreviation lists stay in configuration:
 pip install -e ".[tests]"
 pytest
 ```
+
+Public API, CLI, contract, migration, and ADR changes update the stable docs in the same change. The review bar is in [AGENTS.md](AGENTS.md). The pull request checklist is [`.github/pull_request_template.md`](.github/pull_request_template.md).
 
 ## License
 
