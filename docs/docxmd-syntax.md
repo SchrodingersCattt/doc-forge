@@ -40,12 +40,19 @@ docforge contract 01.main.md -o main.docx --template template.docx \
 
 The command discovers every semantic paragraph role before creating output,
 builds and verifies in a sibling temporary directory, then publishes the DOCX,
-`.manifest.json`, and `.sha256` sidecars together. A missing role, malformed
+`.manifest.json`, and `.sha256` sidecars together beside the DOCX. `md2docx`
+can place those assembly sidecars elsewhere with `--sidecar-dir` or
+`--checksum-path`; `contract` does not. A missing role, malformed
 input, or failed verification leaves an existing output untouched and does not
 publish a misleading partial file. The manifest carries
 `contract.schema=docforge.docx-contract.v1`, the resolved role map, and one
 decision record for each parsed Markdown block (source, kind, role, and text
-hash).
+hash). A table caption record uses role `table_caption` and `numbering` of
+`authored` or `generated`. An authored caption also records its `label`,
+because the number lives beside the caption body rather than inside the hashed
+text. The embedded assembly manifest repeats that choice on `tables[]`
+(`role`, `numbering`, `number`, `label`, `caption`) and records each figure's
+authored alt text on `figures[].alt`.
 
 For source-package edits, `roundtrip` keeps `source-bundle/baseline.md`,
 `full.md`, and `block-map.json` after the first export. Edit `full.md` and run

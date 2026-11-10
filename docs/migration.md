@@ -37,9 +37,29 @@ Named styles stay authoritative unless the caller opts in. `--preserve-metadata-
 
 When a detected cover sample uses a different paragraph style, and the selected style is unused or the sample carries direct alignment, size, emphasis, or color, the conflict is recorded in `rendering.metadata_style_conflicts` (and copied under `verification`) and emitted as a `UserWarning`. The DOCX still uses the named style, so existing documents stay stable. Clear the conflict with `--preserve-metadata-prototypes` or by assigning that role a paragraph style in `--style`. `rendering.caption_prototype_roles` lists the caption roles that adopted a sample. See [template roles and layout](template-layout.md).
 
+## Table numbers (#66)
+
+`Table: Measurements.` is still numbered automatically. To keep an authored number, put `Table 5. Measurements.` on the line immediately before the table. That caption keeps its number and the `table_caption` role in the DOCX and in the assembly manifest (`tables[].numbering` is `authored` or `generated`). `--numbering-prefix` is concatenated with the generated number exactly as supplied.
+
+`Table: Table 5. Measurements.` no longer renders as `Table 1. Table 5. Measurements.`. It fails with `table.caption_ambiguous` before an output file is published. Use the bare numbered line, or remove the authored number. If an automatic number would reuse an authored label, the generator skips that label and warns `table.number_collision`. Duplicate authored labels still fail.
+
+The Markdown semantic adapter writes an automatic caption back as `Table: ...` and an authored caption back as `Table 5. ...`, so reading that Markdown again restores the caption role.
+
+## Image alt text (#68)
+
+Standalone `md2docx` used to print image alt text as a caption paragraph and also print a following caption. The following caption is now the only visible caption, as in template assembly. The alt text is stored on the drawing description (`wp:docPr/@descr` and `pic:cNvPr/@descr`).
+
+An image with no following caption still uses a descriptive alt as its visible caption. Standalone conversion prints that alt text. Template assembly uses it as the caption body and applies the next figure number, which is unchanged. An empty alt does not create a caption. An alt that is only a filename is not printed; add an explicit caption paragraph when that text should be visible. `add_image(doc, path, caption)` still prints `caption`. Pass `alt=` when the accessibility text differs from the visible caption. `figures[].alt` in the assembly manifest is the authored alt text.
+
 ## Table notes (#63)
 
 `--table-notes` defaults to `legacy` so existing manuscripts keep historical recognition: `Table note:` / `Table foot:` lines and post-table `[a]` heuristics. Opt into `--table-notes explicit` for declaration-only notes that stay scoped to the preceding table. Escape a literal directive with a leading backslash. Table notes remain body paragraphs; they are not Word page footnotes. See [template roles and layout](template-layout.md).
+
+## Assembly sidecars (#72)
+
+`md2docx --template` still writes `<stem>.manifest.json` and `<stem>.sha256` beside the DOCX when no destination flag is set. `--manifest-dir DIR` still moves only the manifest; the checksum stays beside the DOCX. `--sidecar-dir DIR` opts in to storing both sidecars in `DIR`. `--checksum-path FILE` opts in to a separate checksum file. The same three arguments are `manifest_dir`, `sidecar_dir`, and `checksum_path` on `write_assembly_sidecars`.
+
+The checksum is the SHA-256 of the finished DOCX bytes, not of an intermediate package. After any external program rewrites that DOCX, call `refresh_assembly_sidecars` so the manifest digest and the checksum are replaced together. `docforge contract` still publishes both sidecars beside its DOCX. See [template roles and layout](template-layout.md).
 
 ## Intentionally unchanged
 

@@ -9,17 +9,18 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
 import tempfile
+import uuid
 import warnings
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Iterable, Mapping, Sequence
 
 from docx import Document
@@ -33,7 +34,7 @@ from lxml import etree
 from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
-from .inline import is_caption, is_filename_alt, key as inline_key, render as render_inline
+from .inline import is_caption, key as inline_key, render as render_inline
 from .blocks import Block
 from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
@@ -46,9 +47,12 @@ from .citations import (
 from ..output import _detect_format, validate_output_path
 from .launcher import (
     accept_docx_revisions,
+    _drawing_description,
     _explicit_table_label,
+    _image_visible_caption,
     _next_table_number,
     _reserved_table_labels,
+    _set_drawing_description,
     _table_label_key,
     append_inline_math,
     convert_unicode_scripts_in_docx,
@@ -70,7 +74,11 @@ __all__ = [
     "_format_bibliography_record",
     "load_bibliography",
     "parse_metadata",
+    "checksum_recorded_name",
+    "refresh_assembly_sidecars",
+    "resolve_recorded_docx",
     "sha256_file",
+    "verify_assembly_checksum",
     "verify_template_output",
     "write_assembly_sidecars",
     "CitationResolver",
@@ -1509,9 +1517,10 @@ def _is_figure_caption_text(text: str) -> bool:
 def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Block | None, str], ...]:
     """Split Markdown into text runs and image/caption pairs.
 
-    A caption immediately following an image is consumed as the caption.  An
-    meaningful image alt text remains a usable fallback; an empty alt or a
-    media filename is not promoted to a generated caption.
+    A caption immediately following an image is the visible caption. A
+    descriptive image alt text remains a usable fallback; an empty alt or a
+    media filename is not promoted to a generated caption. The authored alt
+    stays on the image block for accessibility metadata.
     """
     groups: list[tuple[tuple[Block, ...], Block | None, str]] = []
     text: list[Block] = []
@@ -1522,17 +1531,24 @@ def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Bl
             text.append(block)
             index += 1
             continue
-        alt = block.text.strip()
-        if not alt or is_filename_alt(alt):
-            alt = ""
-        groups.append((tuple(text), block, alt))
+        following = blocks[index + 1] if index + 1 < len(blocks) else None
+        caption, consumed = _image_visible_caption(block, following)
+        groups.append((tuple(text), block, caption))
         text = []
-        index += 1
-        if index < len(blocks) and blocks[index].kind in {"paragraph", "toc_text"} and is_caption(blocks[index].text):
-            groups[-1] = (groups[-1][0], block, blocks[index].text.strip())
-            index += 1
+        index += 2 if consumed else 1
     groups.append((tuple(text), None, ""))
     return tuple(groups)
+
+
+def _table_audit(block: Block, *, label: str, number: int, numbering: str) -> dict[str, object]:
+    """Assembly-manifest record for one table caption."""
+    return {
+        "number": number,
+        "label": label,
+        "caption": block.text,
+        "role": "table_caption",
+        "numbering": numbering,
+    }
 
 
 def _section_break_node(section) -> object:
@@ -1915,7 +1931,6 @@ def _clone_figure(
         for doc_pr in drawing.iter(qn("wp:docPr")):
             doc_pr.set("id", str(1000 + figure_number))
             doc_pr.set("name", image_path.stem)
-            doc_pr.set("descr", caption[:255])
         run.append(drawing)
         paragraph.append(run)
         _set_paragraph_flag(paragraph, "w:keepNext")
@@ -1932,6 +1947,7 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
+    _set_drawing_description(paragraph, _drawing_description(image.text, caption))
     height_twips = section_height_twips or _section_text_height_twips(target.sections[-1]._sectPr)
     points = caption_font_size or _style_points(target, caption_style_id)
     width_twips = section_width_twips or _body_column_width_twips(target)
@@ -1952,6 +1968,8 @@ def _clone_figure(
     if not caption.strip():
         return [paragraph]
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
+    if not image.text.strip():
+        _set_drawing_description(paragraph, _drawing_description("", caption_text))
     caption_text = re.sub(
         r"^((?:Supplementary Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])",
         r"**\1**",
@@ -2861,7 +2879,12 @@ def assemble_markdown_template(
                 authored_label = _explicit_table_label(block)
                 label = authored_label or f"Table {numbering_prefix}{table_index}"
                 number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
-                tables.append({"number": number, "label": label, "caption": block.text})
+                tables.append(_table_audit(
+                    block,
+                    label=label,
+                    number=number,
+                    numbering="authored" if authored_label else "generated",
+                ))
                 if not authored_label:
                     reserved_table_labels.add(_table_label_key(label))
                     table_index += 1
@@ -2961,6 +2984,7 @@ def assemble_markdown_template(
                 "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()),
                 "sha256": sha256_file(Path(image.path)),
+                "alt": image.text.strip(),
                 "caption": caption,
                 "template_region": figure_region.index if figure_region is not None else None,
                 "placement_after_body_region": selected_body.index,
@@ -3031,7 +3055,12 @@ def assemble_markdown_template(
                     authored_label = _explicit_table_label(block)
                     label = authored_label or f"Table {numbering_prefix}{table_index}"
                     number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
-                    tables.append({"number": number, "label": label, "caption": block.text})
+                    tables.append(_table_audit(
+                        block,
+                        label=label,
+                        number=number,
+                        numbering="authored" if authored_label else "generated",
+                    ))
                     if not authored_label:
                         reserved_table_labels.add(_table_label_key(label))
                         table_index += 1
@@ -3078,6 +3107,7 @@ def assemble_markdown_template(
                 "number": figure_index + 1,
                 "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()), "sha256": sha256_file(Path(image.path)),
+                "alt": image.text.strip(),
                 "caption": caption, "template_region": None,
                 "placement_after_body_region": final_region.index, "span": span,
                 "columns": _section_column_count(figure_section), "orientation": orientation,
@@ -3219,6 +3249,310 @@ def _descriptor(path: Path) -> dict[str, object]:
     return {"path": str(path.resolve()), "sha256": sha256_file(path), "size_bytes": path.stat().st_size}
 
 
+def _finished_docx_digest(path: Path) -> tuple[str, int]:
+    """Hash the DOCX bytes on disk and return ``(digest, size)``.
+
+    The size is the number of bytes hashed. A file that changes during the
+    read is rejected so a sidecar cannot describe a mix of two versions.
+    """
+
+    if not path.is_file():
+        raise FileNotFoundError(f"DOCX does not exist: {path}")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    if path.stat().st_size != size:
+        raise RuntimeError(f"DOCX changed while hashing: {path}")
+    return digest.hexdigest(), size
+
+
+def _anchors_match(left: PurePath, right: PurePath) -> bool:
+    if isinstance(left, PureWindowsPath) or isinstance(right, PureWindowsPath):
+        return left.anchor.casefold() == right.anchor.casefold()
+    return left.anchor == right.anchor
+
+
+def _normalized_absolute(path: PurePath) -> None:
+    if not path.is_absolute() or "." in path.parts or ".." in path.parts:
+        raise ValueError(f"checksum path recording requires a normalized absolute path: {path}")
+
+
+def checksum_recorded_name(docx: PurePath, checksum: PurePath) -> str:
+    """Return the DOCX name stored in a checksum sidecar.
+
+    A sidecar beside the DOCX records the filename. Any other location records
+    a ``/``-separated path relative to the checksum file, or a ``/``-separated
+    absolute path when the files have different Windows drives or UNC shares.
+    Both arguments must be normalized absolute paths of the same flavor.
+    """
+
+    if type(docx) is not type(checksum):
+        raise TypeError("docx and checksum paths must use the same path flavor")
+    _normalized_absolute(docx)
+    _normalized_absolute(checksum)
+    if docx == checksum:
+        raise ValueError("checksum path must differ from the DOCX path")
+    if docx.parent == checksum.parent:
+        return docx.name
+    if not _anchors_match(docx, checksum):
+        return docx.as_posix()
+    common = 0
+    limit = min(len(checksum.parent.parts), len(docx.parts))
+    flavor = type(docx)
+    for index in range(limit):
+        origin = flavor(*checksum.parent.parts[: index + 1])
+        target = flavor(*docx.parts[: index + 1])
+        if origin != target:
+            break
+        common = index + 1
+    if common == 0:
+        return docx.as_posix()
+    upward = len(checksum.parent.parts) - common
+    relative = flavor(*((("..",) * upward) + docx.parts[common:]))
+    return relative.as_posix()
+
+
+def _recorded_checksum_name(docx: Path, checksum: Path) -> str:
+    """Record ``docx`` as located from ``checksum`` on this host."""
+
+    flavor = PureWindowsPath if os.name == "nt" else PurePosixPath
+    return checksum_recorded_name(flavor(docx.resolve()), flavor(checksum.resolve()))
+
+
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:(?:/|$)")
+
+
+def resolve_recorded_docx(checksum: Path, recorded: str) -> Path:
+    """Resolve the DOCX named by a checksum sidecar line.
+
+    Relative names are resolved from the checksum file's directory. Separators
+    in the sidecar are ``/``. A Windows drive path is accepted only on Windows.
+    """
+
+    if recorded == "" or recorded.startswith(" ") or "\\" in recorded or "\n" in recorded or "\r" in recorded:
+        raise ValueError(f"checksum recorded path is not usable: {recorded!r}")
+    if recorded.startswith("/"):
+        return Path(recorded)
+    if _WINDOWS_DRIVE.match(recorded):
+        if os.name != "nt":
+            raise ValueError(
+                "checksum records a Windows absolute path that cannot be resolved on this platform: "
+                + recorded
+            )
+        return Path(recorded)
+    return (checksum.resolve().parent / recorded).resolve()
+
+
+def _format_checksum_line(digest: str, recorded_name: str) -> str:
+    """Return one GNU ``sha256sum`` text-mode line."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("checksum digest must be a lowercase SHA-256 hex string")
+    if recorded_name == "" or recorded_name.startswith(" ") or "\n" in recorded_name or "\r" in recorded_name:
+        raise ValueError("checksum recorded path must be a single non-empty line")
+    return f"{digest}  {recorded_name}\n"
+
+
+def _parse_checksum_line(payload: str) -> tuple[str, str]:
+    """Return ``(digest, recorded_name)`` from one checksum sidecar."""
+
+    if payload.endswith("\r\n"):
+        payload = payload[:-2]
+    elif payload.endswith("\n") or payload.endswith("\r"):
+        payload = payload[:-1]
+    if "\n" in payload or "\r" in payload:
+        raise ValueError("checksum sidecar must be a single line")
+    digest, separator, recorded = payload.partition("  ")
+    if separator != "  " or not re.fullmatch(r"[0-9a-f]{64}", digest) or recorded == "":
+        raise ValueError("checksum sidecar must be one line of '<sha256><two spaces><path>'")
+    return digest, recorded
+
+
+def verify_assembly_checksum(checksum: Path, *, output: Path | None = None) -> str:
+    """Return the digest when the sidecar matches the finished DOCX.
+
+    With ``output``, the recorded path must resolve to that file and the digest
+    must match its bytes. Without it, the recorded path is hashed.
+    """
+
+    if not checksum.is_file():
+        raise FileNotFoundError(f"checksum sidecar does not exist: {checksum}")
+    digest, recorded = _parse_checksum_line(checksum.read_text(encoding="utf-8"))
+    resolved = resolve_recorded_docx(checksum, recorded)
+    target = output.resolve() if output is not None else resolved
+    if output is not None and target != resolved:
+        raise ValueError(f"checksum records {recorded}, which resolves to {resolved}, not {target}")
+    actual, _size = _finished_docx_digest(target)
+    if actual != digest:
+        raise ValueError(f"checksum does not match {target}")
+    return digest
+
+
+def _reject_sidecar_destination(path: Path, output: Path, *, label: str) -> None:
+    if not path.name or path.name in {".", ".."}:
+        raise ValueError(f"{label} destination must be a file path: {path}")
+    if path.resolve() == output.resolve():
+        raise ValueError(f"{label} destination must differ from the DOCX: {path}")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{label} destination is not a file: {path}")
+    parent = path.parent
+    if str(parent) not in {"", "."} and parent.exists() and not parent.is_dir():
+        raise ValueError(f"{label} destination parent is not a directory: {parent}")
+
+
+def _assembly_sidecar_destinations(
+    output: Path,
+    *,
+    manifest_dir: Path | None = None,
+    sidecar_dir: Path | None = None,
+    checksum_path: Path | None = None,
+) -> tuple[Path, Path]:
+    """Return ``(manifest, checksum)`` paths for one finished DOCX.
+
+    The default is beside ``output``. ``manifest_dir`` moves only the manifest.
+    ``sidecar_dir`` moves both. ``checksum_path`` is the checksum file itself
+    and wins over ``sidecar_dir`` for that file. ``manifest_dir`` wins over
+    ``sidecar_dir`` for the manifest. ``manifest_dir`` never moves the checksum.
+    """
+
+    manifest_name = output.with_suffix(".manifest.json").name
+    checksum_name = output.with_suffix(".sha256").name
+    if sidecar_dir is not None:
+        manifest = Path(sidecar_dir) / manifest_name
+        checksum = Path(sidecar_dir) / checksum_name
+    else:
+        manifest = output.with_suffix(".manifest.json")
+        checksum = output.with_suffix(".sha256")
+    if manifest_dir is not None:
+        manifest = Path(manifest_dir) / manifest_name
+    if checksum_path is not None:
+        checksum = Path(checksum_path)
+    _reject_sidecar_destination(manifest, output, label="manifest")
+    _reject_sidecar_destination(checksum, output, label="checksum")
+    if manifest.resolve() == checksum.resolve():
+        raise ValueError("manifest and checksum destinations must differ")
+    return manifest, checksum
+
+
+def _publish_bytes(files: Sequence[tuple[Path, bytes]]) -> None:
+    """Publish files as one set.
+
+    Existing destinations are replaced only after every payload is on disk.
+    A failure restores the previous files, or removes a destination that did
+    not exist. The two sidecars therefore stay a pair: both previous, or both
+    new.
+    """
+
+    if not files:
+        return
+    resolved = [path.resolve() for path, _payload in files]
+    if len(resolved) != len(set(resolved)):
+        raise ValueError("sidecar destinations must be distinct")
+    temps: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path, Path | None]] = []
+    installed: list[Path] = []
+    mutated = False
+    try:
+        for path, payload in files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and not path.is_file():
+                raise ValueError(f"sidecar destination is not a file: {path}")
+            temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+            temporary.write_bytes(payload)
+            temps.append((path, temporary))
+        for path, temporary in temps:
+            backup: Path | None = None
+            if path.exists():
+                backup = path.parent / f".{path.name}.{uuid.uuid4().hex}.bak"
+                os.replace(path, backup)
+                mutated = True
+            backups.append((path, backup))
+            os.replace(temporary, path)
+            mutated = True
+            installed.append(path)
+    except Exception as error:
+        if not mutated:
+            raise
+        rollback_errors: list[str] = []
+        for destination in reversed(installed):
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(f"remove {destination}: {rollback_error}")
+        for destination, backup in reversed(backups):
+            if backup is None:
+                continue
+            try:
+                os.replace(backup, destination)
+            except OSError as rollback_error:
+                rollback_errors.append(f"restore {destination}: {rollback_error}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Assembly sidecar publication failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from error
+        raise RuntimeError(
+            "Assembly sidecar publication failed; the previous sidecar pair was left unchanged"
+        ) from error
+    else:
+        for _path, backup in backups:
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+    finally:
+        for _path, temporary in temps:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _manifest_bytes(payload: Mapping[str, object]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def refresh_assembly_sidecars(
+    output: Path,
+    *,
+    manifest_path: Path | None = None,
+    checksum_path: Path | None = None,
+) -> tuple[Path, Path]:
+    """Rehash a finished DOCX and publish the manifest digest and checksum together.
+
+    Call this after any program other than the assembly build rewrites the
+    DOCX. ``generated_at_utc`` stays at the original assembly time. Only
+    ``output.path``, ``output.sha256``, and ``output.size_bytes`` change.
+    A failed publication leaves the previous sidecar pair in place.
+    """
+
+    if not output.is_file():
+        raise FileNotFoundError(f"DOCX does not exist: {output}")
+    manifest = Path(manifest_path) if manifest_path is not None else output.with_suffix(".manifest.json")
+    checksum = Path(checksum_path) if checksum_path is not None else output.with_suffix(".sha256")
+    _reject_sidecar_destination(manifest, output, label="manifest")
+    _reject_sidecar_destination(checksum, output, label="checksum")
+    if manifest.resolve() == checksum.resolve():
+        raise ValueError("manifest and checksum destinations must differ")
+    if not manifest.is_file():
+        raise FileNotFoundError(f"assembly manifest does not exist: {manifest}")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("output"), dict):
+        raise ValueError(f"assembly manifest is missing an output descriptor: {manifest}")
+    digest, size = _finished_docx_digest(output)
+    descriptor = payload["output"]
+    descriptor["path"] = str(output.resolve())
+    descriptor["sha256"] = digest
+    descriptor["size_bytes"] = size
+    recorded = _recorded_checksum_name(output, checksum)
+    _publish_bytes([
+        (manifest, _manifest_bytes(payload)),
+        (checksum, _format_checksum_line(digest, recorded).encode("utf-8")),
+    ])
+    return manifest, checksum
+
+
 def write_assembly_sidecars(
     result: AssemblyResult,
     *,
@@ -3229,7 +3563,19 @@ def write_assembly_sidecars(
     command: Sequence[str],
     citation_base_path: Path | None = None,
     manifest_dir: Path | None = None,
+    sidecar_dir: Path | None = None,
+    checksum_path: Path | None = None,
 ) -> tuple[Path, Path]:
+    """Write the assembly manifest and the SHA-256 sidecar for a finished DOCX.
+
+    Both files are published together. The checksum is the hash of
+    ``result.output`` as it exists on disk at publication time. ``manifest_dir``
+    stores only the manifest; the checksum stays beside the DOCX unless
+    ``sidecar_dir`` or ``checksum_path`` selects another file. After an external
+    tool rewrites the DOCX, call :func:`refresh_assembly_sidecars` so the
+    manifest digest and the checksum stay paired.
+    """
+
     import docx
     import lxml
     import PIL
@@ -3246,7 +3592,15 @@ def write_assembly_sidecars(
         descriptors["bibliography"] = _descriptor(bibliography_path)
     if citation_base_path is not None:
         descriptors["citation_base"] = _descriptor(citation_base_path)
-    output = _descriptor(result.output)
+    manifest_path, checksum_file = _assembly_sidecar_destinations(
+        result.output,
+        manifest_dir=manifest_dir,
+        sidecar_dir=sidecar_dir,
+        checksum_path=checksum_path,
+    )
+    digest, size = _finished_docx_digest(result.output)
+    output = {"path": str(result.output.resolve()), "sha256": digest, "size_bytes": size}
+    recorded = _recorded_checksum_name(result.output, checksum_file)
     manifest = {
         "schema": "docforge.md2docx.template-manifest.v1",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -3311,12 +3665,8 @@ def write_assembly_sidecars(
             "pillow": PIL.__version__,
         },
     }
-    manifest_path = result.output.with_suffix(".manifest.json")
-    checksum_path = result.output.with_suffix(".sha256")
-    if manifest_dir is not None:
-        manifest_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = manifest_dir / manifest_path.name
-        checksum_path = manifest_dir / checksum_path.name
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    checksum_path.write_text(f"{output['sha256']}  {result.output.name}\n", encoding="utf-8")
-    return manifest_path, checksum_path
+    _publish_bytes([
+        (manifest_path, _manifest_bytes(manifest)),
+        (checksum_file, _format_checksum_line(digest, recorded).encode("utf-8")),
+    ])
+    return manifest_path, checksum_file

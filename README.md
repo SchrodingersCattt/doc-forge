@@ -96,7 +96,7 @@ A line that begins with `! ` or `！ ` is omitted. `--keep-comments` keeps that 
 
 Inline math such as `$t_{\mathrm{chem}}$` becomes Word runs: variables are italic, `\mathrm{...}` text and numerals are upright, and `^` / `_` are superscript or subscript. With `--template`, add `--inline-math omml` to compile inline formulae to native Office Math, preserving nested scripts, limits, and math alphabets. This requires a supported Pandoc version. The default `--inline-math runs` preserves the historical text representation. A display block between `$$` lines is OMML and receives the next equation number, such as `(1)`. `--numbering-prefix S` applies that prefix to figure captions, `Table:` captions, and those equation numbers.
 
-A figure is an image paragraph plus the caption paragraph that follows:
+A figure is an image plus an optional caption paragraph that follows:
 
 ```markdown
 ![Figure 1](figures/structure.png)
@@ -104,11 +104,13 @@ A figure is an image paragraph plus the caption paragraph that follows:
 Figure 1. Caption text.
 ```
 
+The following caption is the only visible caption. Alt text is stored as the drawing description and is not printed a second time. With no following caption, a descriptive alt is the caption: standalone conversion prints it as written, and template assembly numbers it as the next figure. An empty alt or a filename used as alt does not create a visible caption. `Table: Measurements.` is numbered automatically. `Table 5. Measurements.` immediately before a table keeps that number. `Table: Table 5. Measurements.` is rejected instead of printing two numbers. See [template roles and layout](docs/template-layout.md).
+
 `--figure-span column|page` sets the default width. Figures also fit within the active section text height, reserving estimated caption space and preserving aspect ratio. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
 
 In LaTeX, `tex2docx` keeps literal text inside a `figure` in source order with each `\includegraphics`, at the body font size. Spacing between graphics is ignored. Any other figure markup is refused and no DOCX is written. The token list is in [TeX figures](docs/tex-figures.md).
 
-`--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.
+`--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it unless `--sidecar-dir` or `--checksum-path` selects another audit location. `--manifest-dir` moves only the manifest. After a word processor or any other tool rewrites the DOCX, rehash both sidecars together; see [template roles and layout](docs/template-layout.md).
 
 `--metadata` reads these level-one fields: `TITLE`, `AUTHOR`, `AFFILIATION`, `Acknowledgement`, and `Code Availability`.
 
