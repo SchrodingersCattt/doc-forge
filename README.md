@@ -94,6 +94,10 @@ Figure 1. Caption text.
 
 `--figure-span column|page` sets the default width. Figures also fit within the active section text height, reserving estimated caption space and preserving aspect ratio. `span=` on the image overrides it, as in `![Figure 1|span=page](figure.png)`. `span=column` stays in the current column. In a two-column body, `span=page` puts the figure and caption in a temporary one-column section. `orientation=portrait|landscape` is separate, and landscape requires `span=page`.
 
+`--table-span column|page` is the table equivalent and defaults to the current column. It is not inferred from how many columns the table has. `Table span: page` or `|span=page` on the caption overrides it. In a two-column body the caption, table, and its table notes share a temporary one-column section, and the previous column count is restored. A one-column body does not gain extra section breaks. `|widths=fixed` (the default) or `|widths=proportional` controls how that target width is divided. See [template roles and layout](docs/template-layout.md).
+
+Pipe-table separators set column alignment (`:---`, `:---:`, `---:`). An unmarked column keeps the template style. `--table-grouping auto` (the default) merges repeated labels only under grouping headers such as Group or Type. `--table-grouping off`, or `|grouping=off` on one table, keeps every Markdown cell as its own Word cell.
+
 In LaTeX, `tex2docx` keeps literal text inside a `figure` in source order with each `\includegraphics`, at the body font size. Spacing between graphics is ignored. Any other figure markup is refused and no DOCX is written. The token list is in [TeX figures](docs/tex-figures.md).
 
 `--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.

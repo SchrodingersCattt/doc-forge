@@ -370,6 +370,9 @@ class _Projector:
                 grid = cell.find(f"{{{W}}}tcPr/{{{W}}}gridSpan")
                 if grid is not None and str(grid.get(f"{{{W}}}val") or "").isdigit():
                     attrs.append(("colspan", str(grid.get(f"{{{W}}}val"))))
+                alignment = _cell_alignment(cell)
+                if alignment:
+                    attrs.append(("alignment", alignment))
                 cells.append(BlockNode(self._next_id(), "table_cell", children=tuple(children), attrs=tuple(attrs), provenance=self._here()))
             rows.append(BlockNode(self._next_id(), "table_row", children=tuple(cells), provenance=self._here()))
         return BlockNode(self._next_id(), "table", children=tuple(rows), provenance=self._here())
@@ -660,6 +663,28 @@ def _style_names(package: zipfile.ZipFile, names: set[str]) -> dict[str, str]:
         name = style.find(f"{{{W}}}name")
         mapping[style_id] = name.get(f"{{{W}}}val") if name is not None and name.get(f"{{{W}}}val") else style_id
     return mapping
+
+
+def _cell_alignment(cell: etree._Element) -> str:
+    """Read an explicit paragraph alignment from the cell's first paragraph.
+
+    Direct ``w:jc`` is the Markdown pipe-table marker. Alignment inherited
+    from a paragraph style is left unset so a later template can keep it.
+    """
+
+    paragraph = cell.find(f"{{{W}}}p")
+    if paragraph is None:
+        return ""
+    jc = paragraph.find(f"{{{W}}}pPr/{{{W}}}jc")
+    if jc is None:
+        return ""
+    return {
+        "left": "left",
+        "start": "left",
+        "center": "center",
+        "right": "right",
+        "end": "right",
+    }.get((jc.get(f"{{{W}}}val") or "").lower(), "")
 
 
 def _paragraph_style_id(paragraph: etree._Element) -> str | None:

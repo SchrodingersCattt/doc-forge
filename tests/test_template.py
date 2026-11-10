@@ -161,7 +161,7 @@ def test_table_template_respects_explicit_column_alignment_and_notes(tmp_path: P
     assert header.text == "Lefta"
     assert header.runs[-1].text == "a" and header.runs[-1].font.superscript is True
     assert any(p.text == "Table 5. A source-numbered caption." for p in document.paragraphs)
-    assert result.tables == ({"number": 5, "label": "Table 5", "caption": "A source-numbered caption."},)
+    assert result.tables == ({"number": 5, "label": "Table 5", "caption": "A source-numbered caption.", "span": "column"},)
 
 
 def test_template_avoids_authored_and_auto_number_collisions(tmp_path: Path) -> None:

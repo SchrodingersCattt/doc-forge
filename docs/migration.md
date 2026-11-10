@@ -31,6 +31,14 @@ Supported `SOURCE_PATCH` content edits are confined to simple body paragraphs an
 
 `assemble_markdown_template(..., style_authority=profile)` applies the profile after assembly; the CLI accepts the same v1 schema through `--style`. `convert(..., style=profile)` and `write(..., style=profile)` drop the same direct defaults from the freshly rebuilt DOCX before restyle. For existing documents, `preserve` retains direct formatting. `clear_all` removes run presentation and paragraph spacing, indents, tabs, and alignment while retaining bold, italic, scripts, character styles, and structural properties. `clear_conflicting` clears properties supplied by the target style, its base styles, document defaults, or explicit role overrides; emphasis remains unless the role explicitly overrides it. Nested hyperlink runs are included.
 
+## Table layout (#67, #70, #71)
+
+Pipe-table alignment markers (`:---`, `:---:`, `---:`) are written on header and body cells. An unmarked separator does not replace a template style's alignment. Standalone documents still default an unmarked column to left. The Markdown semantic adapter and a DOCX read both keep explicit left, center, and right alignment; a cell without direct `w:jc` stays unmarked.
+
+`--table-span` defaults to `column`. Tables keep fitting the active column, however many columns they contain. `page`, or a per-table `Table span: page` / `|span=page` marker, uses the printable page width. In a multi-column section the caption, table, and its associated notes share one continuous full-width section and the previous column count is restored. A one-column section does not gain extra breaks. `--table-span` requires `--template`. `widths=fixed` (default) and `widths=proportional` both fill that target width.
+
+`--table-grouping` defaults to `auto`. Repeated labels under the documented grouping headers still merge, and repeated values in other columns do not. `off`, or a per-table `grouping=off` marker, leaves every Markdown cell as its own DOCX cell. Existing callers that omit the option keep automatic grouping. TeX conversion stays on that automatic policy.
+
 ## Table notes (#63)
 
 `--table-notes` defaults to `legacy` so existing manuscripts keep historical recognition: `Table note:` / `Table foot:` lines and post-table `[a]` heuristics. Opt into `--table-notes explicit` for declaration-only notes that stay scoped to the preceding table. Escape a literal directive with a leading backslash. Table notes remain body paragraphs; they are not Word page footnotes. See [template roles and layout](template-layout.md).

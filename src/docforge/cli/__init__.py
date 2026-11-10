@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--citation-format", choices=("template", "bracketed", "superscript", "superscript-bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
     md.add_argument("--figure-span", choices=("column", "page"), default="column", help="Default figure span: current text column or printable page width; per-image span= overrides this value")
+    md.add_argument("--table-span", choices=("column", "page"), default="column", help="Default table span: current text column or printable page width. Per-table span= or 'Table span:' overrides this value. Span is not inferred from the column count.")
+    md.add_argument("--table-grouping", choices=("auto", "off"), default="auto", help="Vertical grouping of repeated labels under grouping headers. auto merges those cells; off keeps every Markdown cell separate. Per-table grouping= overrides this value.")
     md.add_argument("--font", dest="font_family", help="Explicit Latin font override for generated text")
     md.add_argument("--east-asia-font", dest="east_asia_font", help="Explicit East Asian font override for generated text")
     md.add_argument("--body-font-size", type=float, help="Generated body text size in points")
@@ -96,6 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     contract.add_argument("--style", dest="style_profile", default="template")
     contract.add_argument("--columns", choices=("template", "one", "two"), default="template")
     contract.add_argument("--figure-span", choices=("column", "page"), default="column")
+    contract.add_argument("--table-span", choices=("column", "page"), default="column")
+    contract.add_argument("--table-grouping", choices=("auto", "off"), default="auto")
     contract.add_argument("--line-numbers", choices=("template", "on", "off"), default="template")
     contract.add_argument("--font", dest="font_family")
     contract.add_argument("--east-asia-font", dest="east_asia_font")
@@ -486,6 +490,8 @@ def _cmd_contract(args: argparse.Namespace) -> int:
         style_profile=args.style_profile,
         columns=args.columns,
         figure_span=args.figure_span,
+        table_span=args.table_span,
+        table_grouping=args.table_grouping,
         line_numbers=args.line_numbers,
         font_family=args.font_family,
         east_asia_font=args.east_asia_font,

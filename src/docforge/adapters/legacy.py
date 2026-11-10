@@ -53,6 +53,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             skip_images=args.skip_images,
             columns=args.columns,
             figure_span=args.figure_span,
+            table_span=getattr(args, "table_span", "column"),
+            table_grouping=getattr(args, "table_grouping", "auto"),
             font_family=args.font_family,
             east_asia_font=args.east_asia_font,
             style_profile=args.style_profile,
@@ -106,12 +108,13 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         or getattr(args, "preserve_caption_prototypes", False)
         or args.line_numbers != "template"
         or args.figure_span != "column"
+        or getattr(args, "table_span", "column") != "column"
         or args.body_font_size is not None
         or args.abstract_font_size is not None
         or args.caption_font_size is not None
         or args.reference_font_size is not None
     ):
-        raise ValueError("Metadata, bibliography, style, line-number, figure-span, and typography options require --template")
+        raise ValueError("Metadata, bibliography, style, line-number, figure-span, table-span, and typography options require --template")
     blocks = [
         block
         for path in args.inputs
@@ -137,6 +140,7 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
         font_family=args.font_family,
         east_asia_font=args.east_asia_font,
         standalone_style=getattr(args, "standalone_style", "legacy"),
+        table_grouping=getattr(args, "table_grouping", "auto"),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(args.output))
@@ -198,6 +202,8 @@ def md2docx_namespace(source: Path, output: Path, *, force: bool = False, title:
         citation_format="template",
         columns="template",
         figure_span="column",
+        table_span="column",
+        table_grouping="auto",
         font_family=None,
         east_asia_font=None,
         body_font_size=None,
