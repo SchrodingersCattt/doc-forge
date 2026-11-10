@@ -75,8 +75,20 @@ Template assembly replaces sample content while retaining styles, section geomet
 
 If the template's actual figure and table captions use direct formatting rather
 than its named `Caption` style, `--preserve-caption-prototypes` uses those
-examples as separate figure and table formatting prototypes. Omit the option
-to retain the default named-style discovery behavior.
+examples as separate figure and table formatting prototypes. The manifest lists
+the roles that adopted a sample. Omit the option to retain the default
+named-style discovery behavior.
+
+A cover sample that uses different formatting from the selected named style,
+such as an unused built-in Title, is reported in
+`rendering.metadata_style_conflicts` and as a warning. The DOCX still follows
+the named style. Pass `--preserve-metadata-prototypes` to keep that cover
+sample's alignment and run formatting. Cover samples and caption samples are
+separate options.
+
+`--standalone-style manuscript` is the neutral preset without a template:
+Markdown heading 1 becomes Heading 1, text is black, and the body is
+left-aligned 11 pt. The default remains `--standalone-style legacy`.
 
 `--style profile.json` accepts either the legacy semantic-role-to-style map or a `docforge.style.v1` profile. See [template roles and layout](docs/template-layout.md) for roles, profiles, table notes, algorithms, and end placement. Table notes default to `--table-notes legacy` for compatibility; use `--table-notes explicit` for declaration-only, table-scoped `Table note:` / `Table foot:` syntax.
 

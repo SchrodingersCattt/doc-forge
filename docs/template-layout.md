@@ -1,6 +1,6 @@
 # Template roles and layout
 
-`docforge md2docx source.md -o output.docx --template template.docx --metadata metadata.md` discovers semantic paragraph styles from the supplied template. Font family, size, and color inherit from those styles; reference paragraphs also inherit hanging indents and spacing. Sample run typography does not become direct formatting on generated text. Explicit typography flags remain available.
+`docforge md2docx source.md -o output.docx --template template.docx --metadata metadata.md` discovers semantic paragraph styles from the supplied template. Font family, size, and color inherit from those styles; reference paragraphs also inherit hanging indents and spacing. Sample run typography does not become direct formatting on generated text. Explicit typography flags remain available. A cover sample that would be replaced by a different unused style, or that carries direct formatting the selected style would drop, is reported in the assembly manifest. It is not copied unless prototype preservation is requested.
 
 Some templates format their cover samples directly instead of defining named
 styles. Pass `--preserve-metadata-prototypes` to reuse the detected cover
@@ -18,6 +18,26 @@ The same choice is available to Python callers as
 recorded in the assembly manifest. Omit it when the template's named role
 styles, rather than its sample paragraphs, should remain authoritative.
 
+Named styles stay authoritative by default, including an unused built-in
+`Title` style. When a detected cover sample uses a different paragraph style,
+and the selected style is unused or the sample carries direct alignment, size,
+emphasis, or color, assembly keeps the named style and records one
+`rendering.metadata_style_conflicts` entry per affected role
+(`supporting_information` for the banner, plus `title`, `authors`,
+`affiliations`, and `contacts`). The same list is copied to `verification`.
+The command also emits a `UserWarning`. Two documented overrides clear that
+conflict: `--preserve-metadata-prototypes`, or an explicit `--style` mapping
+that assigns the role a paragraph style (a legacy role entry or a v1
+`word_style`). A sample that already uses the selected
+style is not a conflict; direct formatting on that paragraph stays subordinate
+to the style definition until prototype preservation is requested.
+
+The option covers both shapes. A Normal paragraph with direct formatting is
+reused only for its own cover line. A paragraph that already uses an explicit
+role style such as `Title1`, `Authors`, or `Address` keeps that style, and
+prototype preservation adds the sample's direct alignment and run formatting.
+Unrelated body samples are not imported onto generated prose.
+
 Some templates provide figure and table caption examples using direct
 formatting, even though an unused built-in `Caption` style also exists. Pass
 `--preserve-caption-prototypes` to use the paragraph style, alignment, spacing,
@@ -27,14 +47,25 @@ the corresponding discovered role unchanged. An explicit semantic style
 profile remains authoritative and an explicit `--caption-font-size`, `--font`,
 or `--east-asia-font` overrides the sampled metrics. The Python equivalent is
 `assemble_markdown_template(..., preserve_caption_prototypes=True)`; the choice
-is recorded in the manifest. Omitting the option preserves the existing style
-discovery behavior.
+is recorded in the manifest as `rendering.preserve_caption_prototypes` and
+`rendering.caption_prototype_roles`. The role list is independent for
+`caption` and `table_caption`: a missing sample omits that role and leaves
+its discovered style unchanged. Paragraph alignment, spacing, and indentation
+come from the sample paragraph. Size, color, and font come from its longest
+neutral text run. Authored bold, italic, subscript, and superscript in the
+caption text are kept. An explicit role mapping, `--caption-font-size`,
+`--font`, or `--east-asia-font` overrides the sample. Omitting the option
+preserves the existing style discovery behavior. Cover prototype preservation
+is a separate flag and does not change caption roles.
 
 For a document without a template, `--standalone-style manuscript` selects a
-neutral left-aligned 11 pt body and maps Markdown heading levels to their
-corresponding Word Heading levels. A supplied standalone title uses the Word
-Title style. The pre-existing standalone defaults remain available as
-`--standalone-style legacy`, which is the default for backward compatibility.
+neutral preset: black text, a left-aligned 11 pt body with 1.2 line spacing,
+0 pt before and 6 pt after, and Markdown heading level N mapped to Word
+Heading N. A level-one heading is Heading 1 at 14 pt, not Heading 2. A
+supplied standalone title uses the Word Title style at 16 pt black, without
+the built-in Title bottom border. The pre-existing standalone defaults remain
+available as `--standalone-style legacy`, which is the default for backward
+compatibility and still maps a Markdown level-one heading to Heading 2.
 Template conversions should use the template's own styles instead.
 
 ## Semantic roles
