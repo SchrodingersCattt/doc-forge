@@ -96,7 +96,7 @@ Figure 1. Caption text.
 
 In LaTeX, `tex2docx` keeps literal text inside a `figure` in source order with each `\includegraphics`, at the body font size. Spacing between graphics is ignored. Any other figure markup is refused and no DOCX is written. The token list is in [TeX figures](docs/tex-figures.md).
 
-`--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it.
+`--citation-base` reads numbers from an existing manifest. A key already in that manifest keeps its number; a key that appears only here is numbered `S1`, `S2`, and so on. The reference list then contains the new entries. `--bibliography-scope all` repeats the shared entries as well. `\cite{key}` and `\citep{key}` use the JSON bibliography. An unknown key fails the build. The DOCX is written with `.manifest.json` and `.sha256` beside it unless `--sidecar-dir` or `--checksum-path` selects another audit location. `--manifest-dir` moves only the manifest. After a word processor or any other tool rewrites the DOCX, rehash both sidecars together; see [template roles and layout](docs/template-layout.md).
 
 `--metadata` reads these level-one fields: `TITLE`, `AUTHOR`, `AFFILIATION`, `Acknowledgement`, and `Code Availability`.
 

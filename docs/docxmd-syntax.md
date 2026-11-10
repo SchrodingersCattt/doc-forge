@@ -40,7 +40,9 @@ docforge contract 01.main.md -o main.docx --template template.docx \
 
 The command discovers every semantic paragraph role before creating output,
 builds and verifies in a sibling temporary directory, then publishes the DOCX,
-`.manifest.json`, and `.sha256` sidecars together. A missing role, malformed
+`.manifest.json`, and `.sha256` sidecars together beside the DOCX. `md2docx`
+can place those assembly sidecars elsewhere with `--sidecar-dir` or
+`--checksum-path`; `contract` does not. A missing role, malformed
 input, or failed verification leaves an existing output untouched and does not
 publish a misleading partial file. The manifest carries
 `contract.schema=docforge.docx-contract.v1`, the resolved role map, and one
