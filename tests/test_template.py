@@ -167,6 +167,7 @@ def test_table_template_respects_explicit_column_alignment_and_notes(tmp_path: P
         "caption": "A source-numbered caption.",
         "role": "table_caption",
         "numbering": "authored",
+        "span": "column",
     },)
 
 

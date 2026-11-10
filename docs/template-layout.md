@@ -128,7 +128,9 @@ Keywords become a separate front-matter paragraph, including when no blank line 
 
 The same manifest records each figure's authored alt text in `figures[].alt` and the visible caption in `figures[].caption`. A paragraph that is a figure caption immediately after an image is the only visible caption. The image alt text is stored on the drawing (`wp:docPr/@descr` and, when present, `pic:cNvPr/@descr`) and is not printed again. With no following caption, a descriptive alt is the caption body; template assembly still applies the next figure number, and standalone conversion prints the alt text itself. An empty alt or an alt that is only a media filename does not become a visible caption. An empty alt falls back to the visible caption for the drawing description when a caption exists, and stays empty when it does not.
 
-Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` inherits the applicable template paragraph style. In a fresh document it defaults to left. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
+Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` does not write a direct alignment, so a template paragraph style keeps its own alignment. In a fresh standalone document an unmarked column defaults to left. Markers apply to every header and body cell in that column, including cells that contain emphasis, superscripts, or text of unequal length. The separator may use different dash runs (`:---`, `:-----`, `---:`); alignment follows the colons, not the dash count. A row whose cell count does not match the header is still rejected. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
+
+The semantic Markdown adapter stores an explicit alignment on each cell. Rendering that document back to Markdown writes the same `:---`, `:---:`, and `---:` markers. Reading a DOCX keeps a direct `w:jc` of left, center, or right and leaves a cell with no direct alignment unmarked, so a template's inherited alignment is not turned into a pipe marker.
 
 ### Table notes
 
@@ -149,7 +151,40 @@ Within one table scope, matching `<sup>[a]</sup>` cell markers to `Table note: [
 
 Standalone output uses a built-in `TableFoot` style (smaller left-aligned text). Template assembly maps the `table_foot` role to `TableFoot` / `Table Foot` / `Table Note`, falling back to body when absent. Notes keep with their table through Word `keepNext` chaining; long tables or notes may still paginate without an impossible keep-together constraint. Authored bold, italic, subscript, superscript, mathematics, and links are preserved.
 
-Only repeated labels under grouping headers (`level`, `group`, `category`, `class`, `type`, `family`, `site`, `site level`, `factor`, `block`, or a header ending in `level`) can merge vertically. Repeated measurements in other columns stay visible. Markdown and TeX share this policy.
+Only repeated labels under grouping headers (`level`, `group`, `category`, `class`, `type`, `family`, `site`, `site level`, `factor`, `block`, or a header ending in `level`) can merge vertically. Repeated measurements in other columns stay visible. Blank cells break a run, so two equal labels with an empty cell between them stay separate. Markdown and TeX share this column policy. The default mode is `auto`, which preserves that behavior for existing callers.
+
+`--table-grouping off` (Python `table_grouping="off"`) keeps every Markdown cell as its own DOCX cell: no inferred `w:vMerge`, and each row keeps the text the author wrote. `auto` remains available as an explicit mode. A caption marker or a directive overrides the default for one table:
+
+```markdown
+Table grouping: off
+Table: Measurements.|grouping=off
+
+| Group | Type | Value |
+| --- | --- | --- |
+| A | Alpha | 1 |
+| A | Alpha | 1 |
+```
+
+`grouping=auto` on one table opts back in when the default is `off`. TeX conversion stays in automatic grouping.
+
+### Page span
+
+Generated tables are fitted to the active text column. That remains the default, including for a table with many columns. `--table-span page` (Python `table_span="page"`, or the same key in a delivery profile) asks for the printable page width instead. A per-table marker overrides the default and is never inferred from the column count:
+
+```markdown
+Table span: page
+Table: Measurements.|widths=proportional
+
+| A | B | C | D |
+| --- | --- | --- | --- |
+| 1 | 2 | 3 | 4 |
+
+Table note: Units are arbitrary.
+```
+
+`span=column` keeps the current column when the default is `page`. `widths=fixed` (the default) scales the generated grid's existing proportions into a fixed-width table of the target width. `widths=proportional` weights columns by the longest rendered cell, then writes those shares as fixed twips of the same target width. Both fill either the column or the printable page.
+
+In a multi-column section, `span=page` places the caption, the table, and the notes explicitly associated with that table in one continuous full-width section, then restores the previous column count. A one-column section is already full width, so a page span does not add section breaks. The first row remains a repeating header. Tables taller than one page flow across pages. Headers, footers, line numbering, and the surrounding text stay with the section properties they had. `--table-span` requires template assembly, as `--figure-span` does. Standalone documents are already a single column; per-table span markers are accepted there and do not insert breaks.
 
 Acknowledgments/acknowledgements, conflict of interest, author contributions, data availability, code availability, data and software availability, and supporting information headings select back-matter roles. Metadata-generated acknowledgments and availability statements use these roles too.
 
@@ -181,7 +216,7 @@ Headings and table captions keep with the following paragraph; image paragraphs 
 
 `--native-toc` inserts a native Word TOC field. Its cached result contains the emitted heading text immediately, without invented page numbers; `w:updateFields` requests a refresh on open. Word computes page numbers when it updates the field. Automatic update behavior in other viewers varies. Without a native TOC request, the generator disables automatic field updates as before.
 
-The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, and `native_toc=True` on `assemble_markdown_template`. Delivery profiles accept the same options. Output manifests record the selected settings. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
+The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, `table_span="page"`, `table_grouping="off"`, and `native_toc=True` on `assemble_markdown_template`. `render_blocks_to_doc(..., table_grouping="off")` is the standalone equivalent for grouping. Delivery profiles accept `table_span` and `table_grouping` with the other rendering options. Output manifests record the selected settings, and each captioned table record includes its resolved `span` together with `role` and `numbering`. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
 
 ## Assembly sidecars
 

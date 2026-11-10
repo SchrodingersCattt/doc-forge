@@ -36,3 +36,10 @@ before staging or invoking Pandoc. Word-processing OOXML is supported;
 presentations, spreadsheets, OLE2 workbooks, and extension/content mismatches
 return typed `UNSUPPORTED_FORMAT` or `INVALID_FORMAT` results without creating
 work directories or outputs.
+
+Explicit pipe-table alignment is part of the semantic projection. A Markdown
+cell stores `alignment` of `left`, `center`, or `right` when the separator
+says so, and the Markdown writer emits `:---`, `:---:`, or `---:`. An unmarked
+column has no alignment attribute. A DOCX read copies a direct left, center,
+or right `w:jc` onto the cell and leaves every other cell unmarked, so a
+template style's alignment is not promoted to a pipe marker.

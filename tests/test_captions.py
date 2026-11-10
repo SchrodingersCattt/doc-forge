@@ -120,6 +120,7 @@ def test_authored_table_number_is_kept_and_recorded(tmp_path: Path) -> None:
             "caption": "Measurements.",
             "role": "table_caption",
             "numbering": "authored",
+            "span": "column",
         },
         {
             "number": 1,
@@ -127,6 +128,7 @@ def test_authored_table_number_is_kept_and_recorded(tmp_path: Path) -> None:
             "caption": "Next values.",
             "role": "table_caption",
             "numbering": "generated",
+            "span": "column",
         },
     )
     text = "\n".join(_visible(Document(output)))

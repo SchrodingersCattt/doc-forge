@@ -20,7 +20,8 @@ class Block:
         path: resolved image path for image blocks
         rows: table cell matrix (row-major) for table blocks
         options: sparse key/value metadata (image markers, table-note
-            ``table_id`` / ``label`` / ``source`` / ``orphan``)
+            ``table_id`` / ``label`` / ``source`` / ``orphan``, and table
+            layout markers ``span`` / ``grouping`` / ``widths``)
         alignments: explicit column alignment names, or an empty string to
             inherit the output style, for table blocks
     """

@@ -45,6 +45,7 @@ from .citations import (
     replace_block_citations as _replace_block_citations,
 )
 from ..output import _detect_format, validate_output_path
+from .table_layout import resolved_table_option
 from .launcher import (
     accept_docx_revisions,
     _drawing_description,
@@ -151,6 +152,8 @@ class AssemblyResult:
     inline_math: str = "runs"
     table_notes: str = "legacy"
     table_note_diagnostics: str = "warn"
+    table_span: str = "column"
+    table_grouping: str = "auto"
     restart_heading_numbering: bool = False
     body_first_line_chars: float | None = None
     page_break_before_h1: bool = False
@@ -1109,14 +1112,35 @@ def _body_column_width_twips(document: DocumentType) -> int:
     return max(1, (page - margins - gap * max(count - 1, 0)) // max(count, 1))
 
 
-def _fit_tables(element, width_twips: int) -> None:
-    """Scale generated table grids to the receiving section's column width."""
+def _fit_tables(element, width_twips: int, *, widths: str = "fixed") -> None:
+    """Scale generated table grids to the receiving section width.
+
+    ``fixed`` keeps the generated grid's relative column sizes and writes
+    them as fixed twips. ``proportional`` weights each column by its longest
+    rendered cell, then writes those shares as fixed twips of the same target
+    width. Both modes fill ``width_twips``; neither changes the section.
+    """
+
+    if widths not in {"fixed", "proportional"}:
+        raise ValueError("Table widths must be fixed or proportional")
     for table in element.iter(qn("w:tbl")):
         grid = table.find(qn("w:tblGrid"))
         if grid is None:
             continue
         columns = grid.findall(qn("w:gridCol"))
-        old = [max(1, int(column.get(qn("w:w"), "1"))) for column in columns]
+        if widths == "proportional":
+            old = []
+            for col_index, _column in enumerate(columns):
+                longest = 1
+                for row in table.findall(qn("w:tr")):
+                    cells = row.findall(qn("w:tc"))
+                    if col_index >= len(cells):
+                        continue
+                    text = "".join(cells[col_index].itertext()).strip()
+                    longest = max(longest, len(text))
+                old.append(max(1, longest))
+        else:
+            old = [max(1, int(column.get(qn("w:w"), "1"))) for column in columns]
         if not old:
             continue
         total = sum(old)
@@ -1540,7 +1564,14 @@ def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Bl
     return tuple(groups)
 
 
-def _table_audit(block: Block, *, label: str, number: int, numbering: str) -> dict[str, object]:
+def _table_audit(
+    block: Block,
+    *,
+    label: str,
+    number: int,
+    numbering: str,
+    span: str,
+) -> dict[str, object]:
     """Assembly-manifest record for one table caption."""
     return {
         "number": number,
@@ -1548,6 +1579,7 @@ def _table_audit(block: Block, *, label: str, number: int, numbering: str) -> di
         "caption": block.text,
         "role": "table_caption",
         "numbering": numbering,
+        "span": span,
     }
 
 
@@ -1574,6 +1606,44 @@ def _section_column_count(section) -> int:
     if columns is None:
         return 1
     return max(1, int(columns.get(qn("w:num"), "1")))
+
+
+def _page_span_last_index(blocks: Sequence[Block], index: int, section, table_span: str) -> int | None:
+    """Return the last block of a page-span table group, if one starts here.
+
+    The group is the caption (when present), the table, and the table notes
+    that follow it. A one-column section is already full width, so it does
+    not need extra section breaks. Span is never inferred from column count.
+    """
+
+    if _section_column_count(section) <= 1:
+        return None
+    block = blocks[index]
+    if block.kind == "table_caption":
+        if index + 1 >= len(blocks) or blocks[index + 1].kind != "table":
+            return None
+        caption, table = block, blocks[index + 1]
+        last = index + 1
+    elif block.kind == "table":
+        if index > 0 and blocks[index - 1].kind == "table_caption":
+            return None
+        caption, table = None, block
+        last = index
+    else:
+        return None
+    if resolved_table_option(table, caption, "span", table_span) != "page":
+        return None
+    while last + 1 < len(blocks) and blocks[last + 1].kind == "table_foot":
+        last += 1
+    return last
+
+
+def _table_widths_mode(blocks: Sequence[Block], index: int) -> str:
+    block = blocks[index]
+    if block.kind != "table":
+        return "fixed"
+    caption = blocks[index - 1] if index and blocks[index - 1].kind == "table_caption" else None
+    return resolved_table_option(block, caption, "widths", "fixed")
 
 
 def _section_orientation(section) -> str:
@@ -1715,6 +1785,7 @@ def _clone_rendered_block(
     body_font_size: float | None = None,
     caption_font_size: float | None = None,
     keep_with_next: bool = False,
+    table_grouping: str = "auto",
 ) -> list:
     """Render one block and graft the template's paragraph prototype."""
     p = prototypes.paragraphs
@@ -1787,7 +1858,12 @@ def _clone_rendered_block(
         _set_paragraph_flag(heading, "w:keepNext")
         return [heading]
     if block.kind in {"paragraph", "reference", "quote", "ordered", "bullet", "code", "equation", "table", "separator"}:
-        generated = render_blocks_to_doc([block], equation_start=equation_number or 1, number_prefix=number_prefix)
+        generated = render_blocks_to_doc(
+            [block],
+            equation_start=equation_number or 1,
+            number_prefix=number_prefix,
+            table_grouping=table_grouping,
+        )
         result: list = []
         width = _body_column_width_twips(target)
         for child in generated._element.body.iterchildren():
@@ -2457,6 +2533,8 @@ def assemble_markdown_template(
     inline_math: str = "runs",
     table_notes: str = "legacy",
     table_note_diagnostics: str = "warn",
+    table_span: str = "column",
+    table_grouping: str = "auto",
     restart_heading_numbering: bool = False,
     body_first_line_chars: float | None = None,
     page_break_before_h1: bool = False,
@@ -2488,6 +2566,10 @@ def assemble_markdown_template(
         raise ValueError("columns must be one of: template, one, two")
     if figure_span not in {"column", "page"}:
         raise ValueError("figure_span must be one of: column, page")
+    if table_span not in {"column", "page"}:
+        raise ValueError("table_span must be one of: column, page")
+    if table_grouping not in {"auto", "off"}:
+        raise ValueError("table_grouping must be one of: auto, off")
     if heading_before is not None and heading_before < 0:
         raise ValueError("heading_before must be nonnegative")
     if body_first_line_chars is not None and body_first_line_chars < 0:
@@ -2817,6 +2899,27 @@ def assemble_markdown_template(
     else:
         output_nodes.extend(front)
 
+    page_table_opened = False
+
+    def begin_page_table(host_section, region_index):
+        """End the current columns and open a continuous full-width section."""
+        nonlocal page_table_opened
+        page_table_opened = True
+        table_section = _with_column_layout(host_section, "one")
+        table_section = adjusted(table_section, apply_columns=False)
+        table_section = _with_continuous_section(table_section)
+        body_break = _with_continuous_section(host_section)
+        output_nodes.append(_section_break_node(body_break))
+        section_sources.append(region_index)
+        section_geometries.append(_section_geometry(body_break))
+        return table_section
+
+    def finish_page_table(table_section, region_index) -> None:
+        """End the full-width table section so the following text restores columns."""
+        output_nodes.append(_section_break_node(table_section))
+        section_sources.append(region_index)
+        section_geometries.append(_section_geometry(table_section))
+
     groups = _figure_groups(body_blocks)
     figures: list[dict[str, object]] = []
     tables: list[dict[str, object]] = []
@@ -2831,9 +2934,19 @@ def assemble_markdown_template(
         section = adjusted(selected_body.section)
         # _clone_rendered_block computes table widths from the document's
         # active section; the selected section is normally the same geometry,
-        # and the explicit fit below handles differing templates.
+        # and the explicit fit below handles differing templates. A page-span
+        # table temporarily switches the fit target to a one-column section.
         previous_block: Block | None = None
+        fit_section = section
+        span_restore_after: int | None = None
+        page_table_section = None
         for index, block in enumerate(text_blocks):
+            if span_restore_after is None:
+                group_last = _page_span_last_index(text_blocks, index, section, table_span)
+                if group_last is not None:
+                    page_table_section = begin_page_table(section, selected_body.index)
+                    fit_section = page_table_section
+                    span_restore_after = group_last
             if block.kind == "table_caption" and not _explicit_table_label(block):
                 table_index = _next_table_number(table_index, numbering_prefix, reserved_table_labels)
             if block.kind == "heading" and block.level == 1:
@@ -2854,6 +2967,7 @@ def assemble_markdown_template(
                     (block.kind == "table" and next_is_note)
                     or (block.kind == "table_foot" and next_is_note)
                 ),
+                table_grouping=table_grouping,
             )
             if block.kind == "heading":
                 for node in nodes:
@@ -2871,7 +2985,11 @@ def assemble_markdown_template(
                 for node in nodes:
                     _set_body_first_line_indent(node, indent)
             for node in nodes:
-                _fit_tables(node, _section_width_twips(section))
+                _fit_tables(
+                    node,
+                    _section_width_twips(fit_section),
+                    widths=_table_widths_mode(text_blocks, index),
+                )
             output_nodes.extend(nodes)
             if block.kind == "equation":
                 equation_index += 1
@@ -2879,16 +2997,28 @@ def assemble_markdown_template(
                 authored_label = _explicit_table_label(block)
                 label = authored_label or f"Table {numbering_prefix}{table_index}"
                 number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
+                caption_span = resolved_table_option(
+                    following if following is not None and following.kind == "table" else None,
+                    block,
+                    "span",
+                    table_span,
+                )
                 tables.append(_table_audit(
                     block,
                     label=label,
                     number=number,
                     numbering="authored" if authored_label else "generated",
+                    span=caption_span,
                 ))
                 if not authored_label:
                     reserved_table_labels.add(_table_label_key(label))
                     table_index += 1
             previous_block = block
+            if span_restore_after is not None and index == span_restore_after:
+                finish_page_table(page_table_section, selected_body.index)
+                fit_section = section
+                span_restore_after = None
+                page_table_section = None
         if image is None:
             break
         image_options = dict(image.options)
@@ -3037,17 +3167,33 @@ def assemble_markdown_template(
     if deferred:
         output_nodes.append(_page_break_node())
         for preceding, image, caption in _figure_groups(deferred):
-            for block in preceding:
+            fit_section = end_section
+            span_restore_after: int | None = None
+            page_table_section = None
+            preceding_blocks = tuple(preceding)
+            for index, block in enumerate(preceding_blocks):
+                if span_restore_after is None:
+                    group_last = _page_span_last_index(preceding_blocks, index, end_section, table_span)
+                    if group_last is not None:
+                        page_table_section = begin_page_table(end_section, final_region.index)
+                        fit_section = page_table_section
+                        span_restore_after = group_last
                 if block.kind == "table_caption" and not _explicit_table_label(block):
                     table_index = _next_table_number(table_index, numbering_prefix, reserved_table_labels)
+                following = preceding_blocks[index + 1] if index + 1 < len(preceding_blocks) else None
                 nodes = _clone_rendered_block(
                     block, template, styles, prototypes,
                     equation_number=equation_index, table_number=table_index,
                     number_prefix=numbering_prefix, body_font_size=body_font_size,
                     caption_font_size=caption_font_size,
+                    table_grouping=table_grouping,
                 )
                 for node in nodes:
-                    _fit_tables(node, _section_width_twips(end_section))
+                    _fit_tables(
+                        node,
+                        _section_width_twips(fit_section),
+                        widths=_table_widths_mode(preceding_blocks, index),
+                    )
                 output_nodes.extend(nodes)
                 if block.kind == "equation":
                     equation_index += 1
@@ -3055,15 +3201,27 @@ def assemble_markdown_template(
                     authored_label = _explicit_table_label(block)
                     label = authored_label or f"Table {numbering_prefix}{table_index}"
                     number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
+                    caption_span = resolved_table_option(
+                        following if following is not None and following.kind == "table" else None,
+                        block,
+                        "span",
+                        table_span,
+                    )
                     tables.append(_table_audit(
                         block,
                         label=label,
                         number=number,
                         numbering="authored" if authored_label else "generated",
+                        span=caption_span,
                     ))
                     if not authored_label:
                         reserved_table_labels.add(_table_label_key(label))
                         table_index += 1
+                if span_restore_after is not None and index == span_restore_after:
+                    finish_page_table(page_table_section, final_region.index)
+                    fit_section = end_section
+                    span_restore_after = None
+                    page_table_section = None
             if image is None:
                 continue
             options = dict(image.options)
@@ -3115,7 +3273,10 @@ def assemble_markdown_template(
             figure_index += 1
     # The final section belongs to the document body.  A body-level sectPr is
     # required for Word/LibreOffice to balance the last two-column region.
+    # After a page-span table the restored columns continue on the same page.
     final_section = adjusted(final_region.section)
+    if page_table_opened:
+        final_section = _with_continuous_section(final_section)
     output_nodes.append(final_section)
     section_sources.append(final_region.index)
     section_geometries.append(_section_geometry(final_section))
@@ -3233,6 +3394,8 @@ def assemble_markdown_template(
         inline_math=inline_math,
         table_notes=table_notes,
         table_note_diagnostics=table_note_diagnostics,
+        table_span=table_span,
+        table_grouping=table_grouping,
         restart_heading_numbering=restart_heading_numbering,
         body_first_line_chars=body_first_line_chars,
         page_break_before_h1=page_break_before_h1,
@@ -3629,6 +3792,8 @@ def write_assembly_sidecars(
             "inline_math": result.inline_math,
             "table_notes": result.table_notes,
             "table_note_diagnostics": result.table_note_diagnostics,
+            "table_span": result.table_span,
+            "table_grouping": result.table_grouping,
             "restart_heading_numbering": result.restart_heading_numbering,
             "body_first_line_chars": result.body_first_line_chars,
             "page_break_before_h1": result.page_break_before_h1,

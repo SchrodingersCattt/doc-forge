@@ -26,6 +26,7 @@ import lxml.etree as etree
 
 from .blocks import Block, SectionSource
 from .inline import is_caption, is_filename_alt, key as inline_key, render as render_inline
+from .table_layout import grouping_is_auto, layout_directive, split_caption_markers, with_layout_options
 from .table_notes import (
     LEGACY_BRACKET_NOTE_RE,
     TABLE_NOTE_DIAGNOSTIC_POLICIES,
@@ -75,6 +76,7 @@ LEADING_TABLE_NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 IMAGE_RE = re.compile(r"^!\[(?P<caption>[^\]]*)\]\((?P<path>[^)]+)\)$")
+TABLE_LAYOUT_ESCAPE_RE = re.compile(r"(?i)^\\table\s+(?:span|grouping|widths)\s*:")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BANG_COMMENT_RE = re.compile(r"^[!！](?:\s+|$)")
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
@@ -401,6 +403,10 @@ def parse_markdown(
     * ``explicit``: only declared ``Table note:`` / ``Table foot:`` lines inside
       an open table association window become notes.  Ordinary ``[a]`` prose
       stays a paragraph.  Prefix a directive with ``\\`` to keep it literal.
+
+    ``Table span:``, ``Table grouping:``, and ``Table widths:`` lines, and the
+    same ``key=value`` markers on a table caption, are stored on the caption
+    and the following table.  They must be followed by a table.
     """
     if table_notes not in TABLE_NOTE_MODES:
         raise ValueError("table_notes must be one of: legacy, explicit")
@@ -413,18 +419,44 @@ def parse_markdown(
     # Association window: a table opens it; consecutive notes keep it open;
     # any other emitted block closes it.  Blank lines do not close it.
     note_window_open = False
+    # Layout directives apply to the following caption and table.  Blank lines
+    # do not consume them; any other block does.
+    pending_layout: dict[str, str] = {}
+    pending_layout_line = 0
+
+    def remember_layout(key: str, value: str, line_number: int) -> None:
+        nonlocal pending_layout_line
+        current = pending_layout.get(key)
+        if current is not None and current != value:
+            raise ValueError(f"Conflicting table {key} markers in {path}:{line_number}")
+        pending_layout[key] = value
+        pending_layout_line = line_number
+
+    def ensure_layout_consumed() -> None:
+        if pending_layout:
+            raise ValueError(
+                f"Table layout directive is not followed by a table in {path}:{pending_layout_line}"
+            )
+
+    def caption_layout_options(extra: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        mapping = dict(extra)
+        mapping.update(pending_layout)
+        return tuple(sorted(mapping.items()))
 
     def flush_paragraph() -> None:
         nonlocal paragraph_lines, note_window_open
         if paragraph_lines:
             joined = " ".join(line.strip() for line in paragraph_lines if line.strip()).strip()
             if joined:
+                ensure_layout_consumed()
                 blocks.append(Block("paragraph", joined))
                 note_window_open = False
             paragraph_lines = []
 
     def emit(block: Block) -> None:
         nonlocal note_window_open
+        if block.kind not in {"table", "table_caption"}:
+            ensure_layout_consumed()
         blocks.append(block)
         if block.kind in {"table", "table_foot"}:
             note_window_open = True
@@ -526,7 +558,12 @@ def parse_markdown(
                     )
                 rows.append(parsed)
                 i += 1
-            emit(Block("table", rows=tuple(rows), alignments=_table_alignments(separator)))
+            table = with_layout_options(
+                Block("table", rows=tuple(rows), alignments=_table_alignments(separator)),
+                pending_layout,
+            )
+            pending_layout.clear()
+            emit(table)
             continue
         if _looks_like_table_row(line) and i + 1 < len(lines) and _looks_like_table_row(lines[i + 1]):
             raise ValueError(f"Malformed Markdown table in {path}:{i + 1}; separator row must use at least three hyphens per cell")
@@ -613,6 +650,20 @@ def parse_markdown(
             continue
         # A numbered label is a caption only when it directly precedes a
         # table, so prose beginning with "Table 2." stays ordinary prose.
+        if TABLE_LAYOUT_ESCAPE_RE.match(stripped):
+            flush_paragraph()
+            emit(Block("paragraph", stripped[1:]))
+            i += 1
+            continue
+        try:
+            layout = layout_directive(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{exc} in {path}:{i + 1}") from exc
+        if layout is not None:
+            flush_paragraph()
+            remember_layout(layout[0], layout[1], i + 1)
+            i += 1
+            continue
         numbered_caption = NUMBERED_TABLE_CAPTION_RE.match(stripped)
         if numbered_caption:
             following = i + 1
@@ -620,20 +671,31 @@ def parse_markdown(
                 following += 1
             if is_table_start(lines, following):
                 flush_paragraph()
-                options = (
+                try:
+                    body, markers = split_caption_markers(numbered_caption.group("body").strip())
+                except ValueError as exc:
+                    raise ValueError(f"{exc} in {path}:{i + 1}") from exc
+                for key, value in markers.items():
+                    remember_layout(key, value, i + 1)
+                options = caption_layout_options((
                     ("caption_label", numbered_caption.group("label")),
                     ("caption_punctuation", numbered_caption.group("punct")),
                     ("caption_gap", numbered_caption.group("gap")),
-                )
-                blocks.append(Block("table_caption", numbered_caption.group("body").strip(), options=options))
+                ))
+                blocks.append(Block("table_caption", body, options=options))
                 i += 1
                 continue
         table_caption = TABLE_CAPTION_RE.match(stripped)
         if table_caption:
             flush_paragraph()
-            body = table_caption.group(1).strip()
+            try:
+                body, markers = split_caption_markers(table_caption.group(1).strip())
+            except ValueError as exc:
+                raise ValueError(f"{exc} in {path}:{i + 1}") from exc
             _reject_ambiguous_table_directive(path, i + 1, body)
-            emit(Block("table_caption", body))
+            for key, value in markers.items():
+                remember_layout(key, value, i + 1)
+            emit(Block("table_caption", body, options=caption_layout_options(())))
             i += 1
             continue
         if _has_unescaped_display_delimiter(line):
@@ -647,6 +709,7 @@ def parse_markdown(
         paragraph_lines.append(line)
         i += 1
     flush_paragraph()
+    ensure_layout_consumed()
     associated = associate_table_notes(blocks)
     findings = apply_table_note_diagnostics(
         diagnose_table_notes(associated),
@@ -1174,6 +1237,7 @@ def add_table(
     alignments: tuple[str, ...] = (),
     trailing_blank: bool = True,
     keep_with_next: bool = False,
+    grouping: bool = True,
 ) -> None:
     if not rows:
         return
@@ -1201,7 +1265,8 @@ def add_table(
                         set_run_font(run, size=9.5)
         if row_index == 0:
             set_repeat_table_header(row)
-    _merge_repeated_table_cells(table, rows)
+    if grouping:
+        _merge_repeated_table_cells(table, rows)
     set_table_three_line_borders(table)
     if keep_with_next and table.rows:
         for paragraph in table.rows[-1].cells[0].paragraphs:
@@ -1236,6 +1301,7 @@ def add_block(
     number_prefix: str = "",
     trailing_blank: bool = True,
     keep_with_next: bool = False,
+    table_grouping: str = "auto",
     visible_caption: str | None = None,
 ) -> None:
     if block.kind == "heading":
@@ -1269,6 +1335,7 @@ def add_block(
             alignments=block.alignments,
             trailing_blank=trailing_blank,
             keep_with_next=keep_with_next,
+            grouping=grouping_is_auto(block.options, table_grouping),
         )
     elif block.kind == "quote":
         add_quote(doc, block.text)
@@ -1529,10 +1596,13 @@ def render_blocks_to_doc(
     font_family: str | None = None,
     east_asia_font: str | None = None,
     standalone_style: str = "legacy",
+    table_grouping: str = "auto",
 ) -> DocumentType:
     """Render parsed blocks into a fresh styled document (standalone usage)."""
     if standalone_style not in {"legacy", "manuscript"}:
         raise ValueError("standalone_style must be legacy or manuscript")
+    if table_grouping not in {"auto", "off"}:
+        raise ValueError("table_grouping must be one of: auto, off")
     blocks = tuple(blocks)
     reserved = _reserved_table_labels(blocks)
     doc = make_empty_doc()
@@ -1580,6 +1650,7 @@ def render_blocks_to_doc(
                 (block.kind == "table" and next_is_note)
                 or (block.kind == "table_foot" and next_is_note)
             ),
+            table_grouping=table_grouping,
             visible_caption=visible_caption,
         )
         if standalone_style == "manuscript" and block.kind == "heading" and doc.paragraphs:
