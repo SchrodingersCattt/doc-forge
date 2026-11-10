@@ -49,6 +49,12 @@ An image with no following caption still uses a descriptive alt as its visible c
 
 `--table-notes` defaults to `legacy` so existing manuscripts keep historical recognition: `Table note:` / `Table foot:` lines and post-table `[a]` heuristics. Opt into `--table-notes explicit` for declaration-only notes that stay scoped to the preceding table. Escape a literal directive with a leading backslash. Table notes remain body paragraphs; they are not Word page footnotes. See [template roles and layout](template-layout.md).
 
+## Assembly sidecars (#72)
+
+`md2docx --template` still writes `<stem>.manifest.json` and `<stem>.sha256` beside the DOCX when no destination flag is set. `--manifest-dir DIR` still moves only the manifest; the checksum stays beside the DOCX. `--sidecar-dir DIR` opts in to storing both sidecars in `DIR`. `--checksum-path FILE` opts in to a separate checksum file. The same three arguments are `manifest_dir`, `sidecar_dir`, and `checksum_path` on `write_assembly_sidecars`.
+
+The checksum is the SHA-256 of the finished DOCX bytes, not of an intermediate package. After any external program rewrites that DOCX, call `refresh_assembly_sidecars` so the manifest digest and the checksum are replaced together. `docforge contract` still publishes both sidecars beside its DOCX. See [template roles and layout](template-layout.md).
+
 ## Intentionally unchanged
 
 Legacy `md2docx` and `tex2docx` stay, including when no StyleProfile is passed.

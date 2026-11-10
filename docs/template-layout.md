@@ -151,4 +151,15 @@ Headings and table captions keep with the following paragraph; image paragraphs 
 `--native-toc` inserts a native Word TOC field. Its cached result contains the emitted heading text immediately, without invented page numbers; `w:updateFields` requests a refresh on open. Word computes page numbers when it updates the field. Automatic update behavior in other viewers varies. Without a native TOC request, the generator disables automatic field updates as before.
 
 The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, and `native_toc=True` on `assemble_markdown_template`. Delivery profiles accept the same options. Output manifests record the selected settings. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
-`md2docx --template` writes the JSON assembly manifest beside the DOCX by default. Pass `--manifest-dir DIR` to store the manifest in a separate directory. The checksum file stays beside the DOCX.
+
+## Assembly sidecars
+
+`md2docx --template` writes two audit files for the finished DOCX: a JSON manifest named `<stem>.manifest.json` and a SHA-256 sidecar named `<stem>.sha256`. By default both sit beside the DOCX. The manifest `output.path` is the absolute path of that DOCX, and `output.sha256` is the digest of the bytes on disk at publication time. The sidecar is one line, `<digest><two spaces><name>`. When the sidecar is beside the DOCX, `<name>` is the filename. Otherwise `<name>` is a `/`-separated path relative to the sidecar, or a `/`-separated absolute path when the files are on different Windows drives or UNC shares. `verify_assembly_checksum` resolves that name and rejects a digest that does not match the file.
+
+`--manifest-dir DIR` stores only the manifest in `DIR`. The checksum stays beside the DOCX. This flag does not collect every audit file.
+
+`--sidecar-dir DIR` stores both the manifest and the checksum in `DIR`, including when `DIR` is nested and does not yet exist. That is the switch for keeping the DOCX separate from every assembly audit file. `--manifest-dir` still overrides only the manifest location, and `--checksum-path FILE` still overrides only the checksum file, so the two files can be sent to different directories. All three flags require `--template`. Existing sidecar files are replaced as one pair. If publication fails, the previous pair is left in place: a new manifest is not written beside an old checksum.
+
+The Python entry point is `write_assembly_sidecars(..., manifest_dir=..., sidecar_dir=..., checksum_path=...)`. `docforge contract` still publishes its manifest and checksum beside the DOCX; it does not take these destination flags.
+
+Any tool that rewrites the DOCX after the build, including a word processor refreshing fields, makes both the manifest digest and the checksum stale. Rehash with `refresh_assembly_sidecars(output, manifest_path=..., checksum_path=...)`. It reads the finished file once, updates `output.path`, `output.sha256`, and `output.size_bytes`, and rewrites the checksum from that same digest. `generated_at_utc` stays at the assembly time. Do not edit one sidecar by hand. A failed refresh leaves the previous pair unchanged.
