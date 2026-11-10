@@ -31,6 +31,12 @@ Supported `SOURCE_PATCH` content edits are confined to simple body paragraphs an
 
 `assemble_markdown_template(..., style_authority=profile)` applies the profile after assembly; the CLI accepts the same v1 schema through `--style`. `convert(..., style=profile)` and `write(..., style=profile)` drop the same direct defaults from the freshly rebuilt DOCX before restyle. For existing documents, `preserve` retains direct formatting. `clear_all` removes run presentation and paragraph spacing, indents, tabs, and alignment while retaining bold, italic, scripts, character styles, and structural properties. `clear_conflicting` clears properties supplied by the target style, its base styles, document defaults, or explicit role overrides; emphasis remains unless the role explicitly overrides it. Nested hyperlink runs are included.
 
+## Cover and caption prototypes (#65, #69)
+
+Named styles stay authoritative unless the caller opts in. `--preserve-metadata-prototypes` keeps detected cover samples, including Normal paragraphs with direct formatting and paragraphs that already use a named role style. `--preserve-caption-prototypes` keeps discovered figure and table caption samples independently, including paragraph formatting and the longest neutral run. The two flags do not change each other. `--standalone-style manuscript` is the neutral preset for a conversion without a template. `legacy` remains the default, so a Markdown level-one heading still becomes Heading 2 unless that preset is selected.
+
+When a detected cover sample uses a different paragraph style, and the selected style is unused or the sample carries direct alignment, size, emphasis, or color, the conflict is recorded in `rendering.metadata_style_conflicts` (and copied under `verification`) and emitted as a `UserWarning`. The DOCX still uses the named style, so existing documents stay stable. Clear the conflict with `--preserve-metadata-prototypes` or by assigning that role a paragraph style in `--style`. `rendering.caption_prototype_roles` lists the caption roles that adopted a sample. See [template roles and layout](template-layout.md).
+
 ## Table numbers (#66)
 
 `Table: Measurements.` is still numbered automatically. To keep an authored number, put `Table 5. Measurements.` on the line immediately before the table. That caption keeps its number and the `table_caption` role in the DOCX and in the assembly manifest (`tables[].numbering` is `authored` or `generated`). `--numbering-prefix` is concatenated with the generated number exactly as supplied.

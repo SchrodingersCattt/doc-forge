@@ -15,6 +15,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+import warnings
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -157,6 +158,8 @@ class AssemblyResult:
     abstract_font_size: float | None = None
     caption_font_size: float | None = None
     reference_font_size: float | None = None
+    metadata_style_conflicts: tuple[Mapping[str, object], ...] = ()
+    caption_prototype_roles: tuple[str, ...] = ()
 
 
 def sha256_file(path: Path) -> str:
@@ -2298,6 +2301,129 @@ def verify_template_output(
     }
 
 
+def _explicit_style_roles(profile: str) -> set[str]:
+    """Return roles whose paragraph style the caller set explicitly.
+
+    A font-only overlay does not choose a paragraph style, so it does not
+    count. A legacy role-to-style map assigns every key.
+    """
+    if profile == "template":
+        return set()
+    path = Path(profile)
+    if not path.is_file():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    if any(key in payload for key in ("schema", "roles", "policy")):
+        roles = payload.get("roles", {})
+        if not isinstance(roles, dict):
+            return set()
+        return {
+            str(name)
+            for name, spec in roles.items()
+            if isinstance(spec, dict) and spec.get("word_style")
+        }
+    return {str(key) for key in payload}
+
+
+def _prototype_style_id(element) -> str:
+    properties = element.find(qn("w:pPr"))
+    style = properties.find(qn("w:pStyle")) if properties is not None else None
+    return style.get(qn("w:val")) if style is not None and style.get(qn("w:val")) else "Normal"
+
+
+def _style_used_by_text(document: DocumentType, style_id: str) -> bool:
+    return any(
+        paragraph.text.strip() and paragraph.style is not None and paragraph.style.style_id == style_id
+        for paragraph in document.paragraphs
+    )
+
+
+def _prototype_has_direct_cover_formatting(element) -> bool:
+    """Return whether a cover sample carries alignment or run formatting.
+
+    Named-style generation drops these when the sample's paragraph style is
+    not the style selected for that role.
+    """
+    properties = element.find(qn("w:pPr"))
+    if properties is not None and properties.find(qn("w:jc")) is not None:
+        return True
+    run = _run_prototype(element, prefer_long=True)
+    if run is None:
+        return False
+    run_properties = run.find(qn("w:rPr"))
+    if run_properties is None:
+        return False
+    for tag in ("sz", "b", "bCs", "i", "iCs", "color"):
+        node = run_properties.find(qn("w:" + tag))
+        if node is None:
+            continue
+        value = (node.get(qn("w:val")) or "").lower()
+        if value in {"0", "false", "off", "none", "auto"}:
+            continue
+        return True
+    return False
+
+
+def _cover_style_conflicts(
+    document: DocumentType,
+    styles: Mapping[str, str],
+    prototypes: _TemplatePrototypes,
+    *,
+    preserve: bool,
+    explicit_roles: set[str],
+    include_title: bool,
+    include_authors: bool,
+    include_affiliations: bool,
+    include_contacts: bool,
+) -> list[dict[str, object]]:
+    """Report cover samples that a different named style would replace.
+
+    Samples that already use the selected style stay under named-style
+    authority and are not conflicts. Prototype preservation and an explicit
+    role mapping are the two documented ways to choose otherwise.
+    """
+    if preserve:
+        return []
+    emitted: list[tuple[str, str]] = []
+    if prototypes.paragraphs.get("supporting_information") is not None:
+        emitted.append(("supporting_information", "body"))
+    if include_title:
+        emitted.append(("title", "title"))
+    if include_authors:
+        emitted.append(("authors", "authors"))
+    if include_affiliations:
+        emitted.append(("affiliations", "affiliations"))
+    if include_contacts:
+        emitted.append(("contacts", "affiliations"))
+    conflicts: list[dict[str, object]] = []
+    for prototype_role, style_role in emitted:
+        if style_role in explicit_roles:
+            continue
+        prototype = prototypes.paragraphs.get(prototype_role)
+        if prototype is None:
+            continue
+        selected = styles[style_role]
+        prototype_style = _prototype_style_id(prototype)
+        if prototype_style == selected:
+            continue
+        unused = not _style_used_by_text(document, selected)
+        if not unused and not _prototype_has_direct_cover_formatting(prototype):
+            continue
+        conflicts.append({
+            "role": prototype_role,
+            "selected_style": selected,
+            "prototype_style": prototype_style,
+            "selected_style_unused": unused,
+            "override": "--preserve-metadata-prototypes",
+        })
+    return conflicts
+
+
 def assemble_markdown_template(
     inputs: Sequence[Path],
     *,
@@ -2503,6 +2629,7 @@ def assemble_markdown_template(
     # their historical Normal fallback.  A template carrying custom semantic
     # styles must provide every role that the requested document uses; a JSON
     # profile may satisfy a missing role explicitly.
+    explicit_style_roles = _explicit_style_roles(requested_style_profile)
     discovered = discover_template_styles(template, strict=False)
     styles = _resolve_style_profile(template, discovered, style_profile)
     if style_authority is not None:
@@ -2511,6 +2638,7 @@ def assemble_markdown_template(
         for role_name, role_spec in authority.roles.items():
             if role_name in styles and role_spec.word_style:
                 styles[role_name] = _find_style(template, (role_spec.word_style,), role=role_name)
+                explicit_style_roles.add(role_name)
     caption_samples = _caption_sample_prototypes(template) if preserve_caption_prototypes else {}
     # An explicitly supplied semantic profile remains authoritative. With the
     # template profile, an authored caption example is stronger evidence of
@@ -2571,6 +2699,32 @@ def assemble_markdown_template(
         for role in preserved_caption_roles:
             paragraph_prototypes[role] = caption_samples[role][1]
         prototypes = _TemplatePrototypes(paragraph_prototypes, prototypes.figure_regions)
+    metadata_style_conflicts = tuple(
+        _cover_style_conflicts(
+            template,
+            styles,
+            prototypes,
+            preserve=preserve_metadata_prototypes,
+            explicit_roles=explicit_style_roles,
+            include_title=include_title,
+            include_authors=bool(metadata.authors),
+            include_affiliations=bool(metadata.affiliations),
+            include_contacts=bool(metadata.contacts),
+        )
+    )
+    if metadata_style_conflicts:
+        summary = ", ".join(
+            f"{item['role']} -> {item['selected_style']}" for item in metadata_style_conflicts
+        )
+        warnings.warn(
+            "Cover sample formatting conflicts with the selected named styles "
+            f"({summary}). Named styles stay authoritative. Pass "
+            "--preserve-metadata-prototypes to keep the visible cover samples, "
+            "or map those roles with --style.",
+            UserWarning,
+            stacklevel=2,
+        )
+    caption_prototype_roles = tuple(sorted(preserved_caption_roles))
     body_regions = [region for region in regions if not region.figure]
     if len(body_regions) > 1 and body_regions[0].index == 0:
         front_region = body_regions.pop(0)
@@ -3039,6 +3193,8 @@ def assemble_markdown_template(
     )
     verification["citation_format"] = citation_style.name
     verification["citation_count"] = citation_converted
+    verification["metadata_style_conflicts"] = [dict(item) for item in metadata_style_conflicts]
+    verification["caption_prototype_roles"] = list(caption_prototype_roles)
     return AssemblyResult(
         output=output,
         title=resolved_title,
@@ -3084,6 +3240,8 @@ def assemble_markdown_template(
         abstract_font_size=abstract_font_size,
         caption_font_size=caption_font_size,
         reference_font_size=reference_font_size,
+        metadata_style_conflicts=metadata_style_conflicts,
+        caption_prototype_roles=caption_prototype_roles,
     )
 
 
@@ -3459,7 +3617,9 @@ def write_assembly_sidecars(
             "east_asia_font": result.east_asia_font,
             "style_profile": result.style_profile,
             "preserve_metadata_prototypes": result.preserve_metadata_prototypes,
+            "metadata_style_conflicts": [dict(item) for item in result.metadata_style_conflicts],
             "preserve_caption_prototypes": result.preserve_caption_prototypes,
+            "caption_prototype_roles": list(result.caption_prototype_roles),
             "line_numbers": result.line_numbers,
             "include_title": result.include_title,
             "strip_level_one_headings": result.strip_level_one_headings,
