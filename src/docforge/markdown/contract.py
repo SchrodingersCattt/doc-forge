@@ -52,6 +52,8 @@ class ContractResult:
 def _role(block: Block) -> str:
     if block.kind == "heading":
         return f"heading_{max(1, min(block.level, 3))}"
+    if block.kind == "table_caption":
+        return "table_caption"
     return {
         "paragraph": "body",
         "quote": "body",
@@ -62,7 +64,6 @@ def _role(block: Block) -> str:
         "table": "body",
         "separator": "body",
         "image": "caption",
-        "table_caption": "caption",
         "table_foot": "table_foot",
         "keywords": "keywords",
         "algorithm": "algorithm",
@@ -75,17 +76,21 @@ def _block_audit(inputs: Sequence[Path], *, keep_comments: bool) -> tuple[dict[s
     for source_index, source in enumerate(inputs):
         blocks = parse_markdown(source, strip_comments=not keep_comments)
         for index, block in enumerate(blocks):
-            records.append(
-                {
-                    "source_index": source_index,
-                    "source": source.name,
-                    "index": index,
-                    "kind": block.kind,
-                    "role": _role(block),
-                    "decision": "render",
-                    "text_sha256": hashlib.sha256(block.text.encode("utf-8")).hexdigest(),
-                }
-            )
+            record = {
+                "source_index": source_index,
+                "source": source.name,
+                "index": index,
+                "kind": block.kind,
+                "role": _role(block),
+                "decision": "render",
+                "text_sha256": hashlib.sha256(block.text.encode("utf-8")).hexdigest(),
+            }
+            if block.kind == "table_caption":
+                label = dict(block.options).get("caption_label", "")
+                record["numbering"] = "authored" if label else "generated"
+                if label:
+                    record["label"] = label
+            records.append(record)
     return tuple(records)
 
 

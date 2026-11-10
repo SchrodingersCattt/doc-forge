@@ -588,7 +588,8 @@ def test_authored_and_generated_table_numbers_cannot_collide(tmp_path: Path) -> 
         "Table: Next generated.\n\n| A |\n|---|\n| three |\n",
         encoding="utf-8",
     )
-    document = render_blocks_to_doc(parse_markdown(path))
+    with pytest.warns(UserWarning, match="table.number_collision"):
+        document = render_blocks_to_doc(parse_markdown(path))
     assert [paragraph.text for paragraph in document.paragraphs if paragraph.text] == [
         "Table 2. First generated.", "Table 1. Authored.", "Table 3. Next generated.",
     ]

@@ -478,7 +478,10 @@ def _render_block(block: BlockNode, paths: dict[str, str]) -> str:
                 caption = write_markdown_inlines(child.inlines)
         return f"![{caption}]({path or resource})"
     if block.kind == "caption":
-        return write_markdown_inlines(block.inlines)
+        text = write_markdown_inlines(block.inlines)
+        if block.attr("kind") == "table" and block.attr("numbering") == "generated":
+            return f"Table: {text}".rstrip()
+        return text
     if block.kind == "reference_entry":
         return block.attr("text") or write_markdown_inlines(block.inlines)
     if block.kind == "opaque":
@@ -582,7 +585,17 @@ def _one_block(block, source: Path, counter: _Counter, diagnostics: list[Diagnos
             label + options.get("caption_punctuation", ".")
             + (options.get("caption_gap", " ") if block.text else "") + block.text
         ) if label else block.text
-        return BlockNode(counter.block(), "caption", inlines=parse_markdown_inlines(text), attrs=(("kind", "table"),), provenance=provenance), []
+        attrs = [
+            ("kind", "table"),
+            ("role", "table_caption"),
+            ("numbering", "authored" if label else "generated"),
+        ]
+        if label:
+            attrs.append(("label", label))
+        return BlockNode(
+            counter.block(), "caption", inlines=parse_markdown_inlines(text),
+            attrs=tuple(attrs), provenance=provenance,
+        ), []
     if block.kind == "table_foot":
         attrs = [("kind", "table_note")]
         for key, value in block.options:
