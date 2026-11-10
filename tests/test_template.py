@@ -161,7 +161,14 @@ def test_table_template_respects_explicit_column_alignment_and_notes(tmp_path: P
     assert header.text == "Lefta"
     assert header.runs[-1].text == "a" and header.runs[-1].font.superscript is True
     assert any(p.text == "Table 5. A source-numbered caption." for p in document.paragraphs)
-    assert result.tables == ({"number": 5, "label": "Table 5", "caption": "A source-numbered caption.", "span": "column"},)
+    assert result.tables == ({
+        "number": 5,
+        "label": "Table 5",
+        "caption": "A source-numbered caption.",
+        "role": "table_caption",
+        "numbering": "authored",
+        "span": "column",
+    },)
 
 
 def test_template_avoids_authored_and_auto_number_collisions(tmp_path: Path) -> None:
@@ -175,10 +182,13 @@ def test_template_avoids_authored_and_auto_number_collisions(tmp_path: Path) -> 
         encoding="utf-8",
     )
     output = tmp_path / "output.docx"
-    result = assemble_markdown_template(
-        [source], template_path=template, output=output, title="A title", numbering_prefix="S",
-    )
+    with pytest.warns(UserWarning, match="table.number_collision"):
+        result = assemble_markdown_template(
+            [source], template_path=template, output=output, title="A title", numbering_prefix="S",
+        )
     assert [table["label"] for table in result.tables] == ["Table S2", "Table S1", "Table S3"]
+    assert [table["numbering"] for table in result.tables] == ["generated", "authored", "generated"]
+    assert [table["role"] for table in result.tables] == ["table_caption"] * 3
     text = "\n".join(p.text for p in Document(output).paragraphs)
     assert "Table S2. First." in text
     assert "Table S1. Authored." in text

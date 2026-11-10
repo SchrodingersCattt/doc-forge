@@ -21,8 +21,16 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {args.output}")
     manifest_dir = getattr(args, "manifest_dir", None)
-    if manifest_dir is not None and args.template is None:
-        raise ValueError("--manifest-dir requires --template")
+    sidecar_dir = getattr(args, "sidecar_dir", None)
+    checksum_path = getattr(args, "checksum_path", None)
+    if args.template is None:
+        for flag, value in (
+            ("--manifest-dir", manifest_dir),
+            ("--sidecar-dir", sidecar_dir),
+            ("--checksum-path", checksum_path),
+        ):
+            if value is not None:
+                raise ValueError(f"{flag} requires --template")
     if args.roundtrip_manifest is not None:
         if reuse_unchanged_roundtrip_source(
             args.roundtrip_manifest, args.output, force=args.force, validate_format=True,
@@ -91,6 +99,8 @@ def run_md2docx(args: argparse.Namespace, *, echo: bool = True) -> int:
             bibliography_path=args.bibliography,
             citation_base_path=args.citation_base,
             manifest_dir=manifest_dir,
+            sidecar_dir=sidecar_dir,
+            checksum_path=checksum_path,
             command=getattr(args, "_command_argv", ["docforge", "md2docx"]),
         )
         _echo(echo, result.output)
@@ -230,6 +240,9 @@ def md2docx_namespace(source: Path, output: Path, *, force: bool = False, title:
         skip_images=False,
         force=force,
         roundtrip_manifest=None,
+        manifest_dir=None,
+        sidecar_dir=None,
+        checksum_path=None,
         _command_argv=["docforge", "convert", str(source), str(output)],
     )
 

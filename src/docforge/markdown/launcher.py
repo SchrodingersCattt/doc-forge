@@ -6,6 +6,7 @@ import copy
 import re
 import tempfile
 import time
+import warnings
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -24,7 +25,7 @@ from docx.shared import Cm, Inches, Pt, RGBColor
 import lxml.etree as etree
 
 from .blocks import Block, SectionSource
-from .inline import key as inline_key, render as render_inline
+from .inline import is_caption, is_filename_alt, key as inline_key, render as render_inline
 from .table_layout import grouping_is_auto, layout_directive, split_caption_markers, with_layout_options
 from .table_notes import (
     LEGACY_BRACKET_NOTE_RE,
@@ -68,6 +69,10 @@ REFERENCE_RE = re.compile(r"^\[(\d+)\]\s+(.*)$")
 TABLE_CAPTION_RE = re.compile(r"^Table\s*:\s*(.+)$", re.IGNORECASE)
 NUMBERED_TABLE_CAPTION_RE = re.compile(
     r"^(?P<label>Table\s+[A-Za-z]*\d+)(?P<punct>[.:])(?P<gap>\s*)(?P<body>.*)$",
+    re.IGNORECASE,
+)
+LEADING_TABLE_NUMBER_RE = re.compile(
+    r"^(?P<label>Table\s+[A-Za-z]*\d+)\b",
     re.IGNORECASE,
 )
 IMAGE_RE = re.compile(r"^!\[(?P<caption>[^\]]*)\]\((?P<path>[^)]+)\)$")
@@ -255,10 +260,96 @@ def _reserved_table_labels(blocks: Iterable[Block]) -> set[str]:
 
 
 def _next_table_number(number: int, prefix: str, reserved: set[str]) -> int:
-    """Skip labels already supplied by the author in this document."""
+    """Skip labels already supplied by the author in this document.
+
+    A skipped label is a collision between an authored caption and the next
+    automatic number. The generated caption moves forward and the collision
+    is reported; the caller-supplied prefix is used as written.
+    """
+    start = number
     while _table_label_key(f"Table {prefix}{number}") in reserved:
         number += 1
+    if number != start:
+        skipped = ", ".join(f"Table {prefix}{value}" for value in range(start, number))
+        warnings.warn(
+            "table.number_collision: automatic table caption skipped "
+            f"{skipped} because that label is authored",
+            UserWarning,
+            stacklevel=2,
+        )
     return number
+
+
+def _split_authored_table_caption(visible: str) -> tuple[str, str] | None:
+    """Return an authored table label and the remaining caption text."""
+    numbered = NUMBERED_TABLE_CAPTION_RE.match(visible)
+    if numbered is not None:
+        label = " ".join(numbered.group("label").split())
+        return label, numbered.group("body").strip()
+    leading = LEADING_TABLE_NUMBER_RE.match(visible)
+    if leading is None:
+        return None
+    label = " ".join(leading.group("label").split())
+    return label, visible[leading.end():].lstrip(" .:").strip()
+
+
+def _reject_ambiguous_table_directive(path: Path, line_number: int, body: str) -> None:
+    """Fail when ``Table:`` would print a second number in front of an authored one.
+
+    ``Table: Measurements.`` stays automatic. ``Table 5. Measurements.``
+    immediately before a table is the explicit authored form. Combining them
+    as ``Table: Table 5. ...`` is ambiguous and is rejected instead of
+    emitting both numbers.
+    """
+    split = _split_authored_table_caption(inline_key(body))
+    if split is None:
+        return
+    label, rest = split
+    authored = f"{label}. {rest}".rstrip()
+    if rest:
+        automatic = f"or write 'Table: {rest}' for automatic numbering."
+    else:
+        automatic = "or remove the authored number and write the caption text after 'Table:'."
+    raise ValueError(
+        "table.caption_ambiguous: "
+        f"{path}:{line_number}: 'Table:' would add an automatic number in front of {label!r}. "
+        f"Write {authored!r} immediately before the table to keep that authored number and caption role, "
+        f"{automatic}"
+    )
+
+
+def _image_visible_caption(image: Block, following: Block | None) -> tuple[str, bool]:
+    """Choose the visible image caption and whether ``following`` was consumed.
+
+    A following caption paragraph is the visible caption. Otherwise a
+    descriptive alt text is used. An empty alt, or an alt that is only a
+    media filename, is not promoted to a caption.
+    """
+    if image.kind != "image":
+        raise ValueError("image caption resolution requires an image block")
+    if following is not None and following.kind in {"paragraph", "toc_text"} and is_caption(following.text):
+        return following.text.strip(), True
+    alt = image.text.strip()
+    if alt and not is_filename_alt(alt):
+        return alt, False
+    return "", False
+
+
+def _drawing_description(alt: str, caption: str) -> str:
+    """Accessibility text stored on the drawing.
+
+    Authored alt text is preserved when present. An empty alt falls back to
+    the visible caption so an image that has a caption still has a description.
+    """
+    text = alt.strip() or caption.strip()
+    return text[:255]
+
+
+def _set_drawing_description(element, description: str) -> None:
+    """Record ``description`` on Word drawing properties when those nodes exist."""
+    for name in ("wp:docPr", "pic:cNvPr"):
+        for node in element.iter(qn(name)):
+            node.set("descr", description)
 
 
 def _looks_like_table_row(line: str) -> bool:
@@ -601,6 +692,7 @@ def parse_markdown(
                 body, markers = split_caption_markers(table_caption.group(1).strip())
             except ValueError as exc:
                 raise ValueError(f"{exc} in {path}:{i + 1}") from exc
+            _reject_ambiguous_table_directive(path, i + 1, body)
             for key, value in markers.items():
                 remember_layout(key, value, i + 1)
             emit(Block("table_caption", body, options=caption_layout_options(())))
@@ -971,7 +1063,14 @@ def add_quote(doc: DocumentType, text: str) -> None:
         run.italic = True
 
 
-def add_image(doc: DocumentType, path: str, caption: str) -> None:
+def add_image(doc: DocumentType, path: str, caption: str, *, alt: str | None = None) -> None:
+    """Insert an image and an optional visible caption.
+
+    ``alt`` is the authored accessibility text. When it is omitted, the
+    visible caption is also the description, which preserves callers that
+    passed only the historical caption argument. An explicit empty alt does
+    not invent a description unless ``caption`` is non-empty.
+    """
     image_path = Path(path)
     if not image_path.exists():
         raise FileNotFoundError(f"Markdown image does not exist: {image_path}")
@@ -980,6 +1079,8 @@ def add_image(doc: DocumentType, path: str, caption: str) -> None:
     figure.paragraph_format.keep_with_next = True
     set_paragraph_spacing(figure, before=5, after=2, line=1.0)
     figure.add_run().add_picture(str(image_path), width=Cm(14.5))
+    authored_alt = caption if alt is None else alt
+    _set_drawing_description(figure._p, _drawing_description(authored_alt, caption))
     if caption:
         paragraph = doc.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1201,6 +1302,7 @@ def add_block(
     trailing_blank: bool = True,
     keep_with_next: bool = False,
     table_grouping: str = "auto",
+    visible_caption: str | None = None,
 ) -> None:
     if block.kind == "heading":
         add_heading(doc, block.text, block.level)
@@ -1238,7 +1340,12 @@ def add_block(
     elif block.kind == "quote":
         add_quote(doc, block.text)
     elif block.kind == "image":
-        add_image(doc, block.path, block.text)
+        # ``visible_caption=None`` keeps the historical direct-call behavior:
+        # the image alt text is the visible caption. Renderers that resolved a
+        # following caption pass that string, including an empty string when
+        # the alt must not be printed.
+        caption = block.text if visible_caption is None else visible_caption
+        add_image(doc, block.path, caption, alt=block.text)
     elif block.kind == "separator":
         add_separator(doc)
     else:
@@ -1518,10 +1625,19 @@ def render_blocks_to_doc(
     equation_number = equation_start
     table_number = 1
     block_list = list(blocks)
-    for index, block in enumerate(block_list):
+    index = 0
+    while index < len(block_list):
+        block = block_list[index]
+        step = 1
+        visible_caption = None
+        if block.kind == "image":
+            nxt = block_list[index + 1] if index + 1 < len(block_list) else None
+            visible_caption, consumed = _image_visible_caption(block, nxt)
+            if consumed:
+                step = 2
         if block.kind == "table_caption" and not _explicit_table_label(block):
             table_number = _next_table_number(table_number, number_prefix, reserved)
-        following = block_list[index + 1] if index + 1 < len(block_list) else None
+        following = block_list[index + step] if index + step < len(block_list) else None
         next_is_note = following is not None and following.kind == "table_foot"
         add_block(
             doc,
@@ -1535,6 +1651,7 @@ def render_blocks_to_doc(
                 or (block.kind == "table_foot" and next_is_note)
             ),
             table_grouping=table_grouping,
+            visible_caption=visible_caption,
         )
         if standalone_style == "manuscript" and block.kind == "heading" and doc.paragraphs:
             paragraph = doc.paragraphs[-1]
@@ -1543,13 +1660,17 @@ def render_blocks_to_doc(
             paragraph._p.pPr.find(qn("w:outlineLvl")).set(qn("w:val"), str(level - 1))
             for run in paragraph.runs:
                 run.font.size = Pt(14 if level == 1 else 12 if level == 2 else 11)
+                run.font.color.rgb = RGBColor(0, 0, 0)
         elif standalone_style == "manuscript" and block.kind in {"paragraph", "keywords", "table_foot", "ordered", "bullet", "reference"} and doc.paragraphs:
             paragraph = doc.paragraphs[-1]
             paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(6)
             paragraph.paragraph_format.line_spacing = 1.2
             for run in paragraph.runs:
                 if run.font.name != "Consolas":
                     run.font.size = Pt(11)
+                    run.font.color.rgb = RGBColor(0, 0, 0)
         if block.kind == "heading" and heading_before is not None and doc.paragraphs:
             doc.paragraphs[-1].paragraph_format.space_before = Pt(max(0, heading_before))
         if block.kind == "equation":
@@ -1557,13 +1678,17 @@ def render_blocks_to_doc(
         if block.kind == "table_caption" and not _explicit_table_label(block):
             reserved.add(_table_label_key(f"Table {number_prefix}{table_number}"))
             table_number += 1
+        index += step
     latin = font_family or "Times New Roman"
     east_asia = east_asia_font or latin
     normal = doc.styles["Normal"]
     if standalone_style == "manuscript":
         normal.font.size = Pt(11)
+        normal.font.color.rgb = RGBColor(0, 0, 0)
         normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
         normal.paragraph_format.line_spacing = 1.2
+        normal.paragraph_format.space_before = Pt(0)
+        normal.paragraph_format.space_after = Pt(6)
     normal.font.name = latin
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), east_asia)
     normal._element.rPr.rFonts.set(qn("w:cs"), latin)

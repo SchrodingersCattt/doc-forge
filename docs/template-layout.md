@@ -1,6 +1,6 @@
 # Template roles and layout
 
-`docforge md2docx source.md -o output.docx --template template.docx --metadata metadata.md` discovers semantic paragraph styles from the supplied template. Font family, size, and color inherit from those styles; reference paragraphs also inherit hanging indents and spacing. Sample run typography does not become direct formatting on generated text. Explicit typography flags remain available.
+`docforge md2docx source.md -o output.docx --template template.docx --metadata metadata.md` discovers semantic paragraph styles from the supplied template. Font family, size, and color inherit from those styles; reference paragraphs also inherit hanging indents and spacing. Sample run typography does not become direct formatting on generated text. Explicit typography flags remain available. A cover sample that would be replaced by a different unused style, or that carries direct formatting the selected style would drop, is reported in the assembly manifest. It is not copied unless prototype preservation is requested.
 
 Some templates format their cover samples directly instead of defining named
 styles. Pass `--preserve-metadata-prototypes` to reuse the detected cover
@@ -18,6 +18,26 @@ The same choice is available to Python callers as
 recorded in the assembly manifest. Omit it when the template's named role
 styles, rather than its sample paragraphs, should remain authoritative.
 
+Named styles stay authoritative by default, including an unused built-in
+`Title` style. When a detected cover sample uses a different paragraph style,
+and the selected style is unused or the sample carries direct alignment, size,
+emphasis, or color, assembly keeps the named style and records one
+`rendering.metadata_style_conflicts` entry per affected role
+(`supporting_information` for the banner, plus `title`, `authors`,
+`affiliations`, and `contacts`). The same list is copied to `verification`.
+The command also emits a `UserWarning`. Two documented overrides clear that
+conflict: `--preserve-metadata-prototypes`, or an explicit `--style` mapping
+that assigns the role a paragraph style (a legacy role entry or a v1
+`word_style`). A sample that already uses the selected
+style is not a conflict; direct formatting on that paragraph stays subordinate
+to the style definition until prototype preservation is requested.
+
+The option covers both shapes. A Normal paragraph with direct formatting is
+reused only for its own cover line. A paragraph that already uses an explicit
+role style such as `Title1`, `Authors`, or `Address` keeps that style, and
+prototype preservation adds the sample's direct alignment and run formatting.
+Unrelated body samples are not imported onto generated prose.
+
 Some templates provide figure and table caption examples using direct
 formatting, even though an unused built-in `Caption` style also exists. Pass
 `--preserve-caption-prototypes` to use the paragraph style, alignment, spacing,
@@ -27,14 +47,25 @@ the corresponding discovered role unchanged. An explicit semantic style
 profile remains authoritative and an explicit `--caption-font-size`, `--font`,
 or `--east-asia-font` overrides the sampled metrics. The Python equivalent is
 `assemble_markdown_template(..., preserve_caption_prototypes=True)`; the choice
-is recorded in the manifest. Omitting the option preserves the existing style
-discovery behavior.
+is recorded in the manifest as `rendering.preserve_caption_prototypes` and
+`rendering.caption_prototype_roles`. The role list is independent for
+`caption` and `table_caption`: a missing sample omits that role and leaves
+its discovered style unchanged. Paragraph alignment, spacing, and indentation
+come from the sample paragraph. Size, color, and font come from its longest
+neutral text run. Authored bold, italic, subscript, and superscript in the
+caption text are kept. An explicit role mapping, `--caption-font-size`,
+`--font`, or `--east-asia-font` overrides the sample. Omitting the option
+preserves the existing style discovery behavior. Cover prototype preservation
+is a separate flag and does not change caption roles.
 
 For a document without a template, `--standalone-style manuscript` selects a
-neutral left-aligned 11 pt body and maps Markdown heading levels to their
-corresponding Word Heading levels. A supplied standalone title uses the Word
-Title style. The pre-existing standalone defaults remain available as
-`--standalone-style legacy`, which is the default for backward compatibility.
+neutral preset: black text, a left-aligned 11 pt body with 1.2 line spacing,
+0 pt before and 6 pt after, and Markdown heading level N mapped to Word
+Heading N. A level-one heading is Heading 1 at 14 pt, not Heading 2. A
+supplied standalone title uses the Word Title style at 16 pt black, without
+the built-in Title bottom border. The pre-existing standalone defaults remain
+available as `--standalone-style legacy`, which is the default for backward
+compatibility and still maps a Markdown level-one heading to Heading 2.
 Template conversions should use the template's own styles instead.
 
 ## Semantic roles
@@ -91,7 +122,11 @@ Table note: [b] Estimated uncertainty.
 This is an ordinary paragraph with [a] and [b].
 ```
 
-Keywords become a separate front-matter paragraph, including when no blank line precedes them. A `Table:` caption uses `table_caption`; the first row uses `table_head`, and other rows use `table_body`. `Table 5. Caption text` immediately followed by a table is also a caption, with its authored number and spacing preserved. Automatic `Table:` numbering avoids labels already supplied anywhere in the document; repeated authored labels are rejected. A numbered table mention that is not followed by a table remains ordinary prose.
+Keywords become a separate front-matter paragraph, including when no blank line precedes them. A `Table:` caption uses `table_caption`; the first row uses `table_head`, and other rows use `table_body`. `Table 5. Caption text` immediately before a table is the explicit authored caption: the number and caption role are kept, including in the assembly manifest (`tables[].number`, `tables[].label`, `tables[].caption`, `tables[].role` = `table_caption`, `tables[].numbering` = `authored`). `Table: Caption text` stays automatic (`numbering` = `generated`). The optional numbering prefix is the string supplied by the caller, such as `--numbering-prefix P`; it is not tied to a particular document type. Automatic numbering skips a label that an authored caption already uses and reports `table.number_collision`. Repeated authored labels are rejected. A numbered table mention that is not followed by a table remains ordinary prose.
+
+`Table: Table 5. Caption text` is ambiguous: `Table:` would assign a new number in front of an authored number. Parsing fails with `table.caption_ambiguous` and does not write a caption that contains both numbers. Keep the number by writing `Table 5. Caption text` on the line immediately before the table, or drop the authored number and write `Table: Caption text`.
+
+The same manifest records each figure's authored alt text in `figures[].alt` and the visible caption in `figures[].caption`. A paragraph that is a figure caption immediately after an image is the only visible caption. The image alt text is stored on the drawing (`wp:docPr/@descr` and, when present, `pic:cNvPr/@descr`) and is not printed again. With no following caption, a descriptive alt is the caption body; template assembly still applies the next figure number, and standalone conversion prints the alt text itself. An empty alt or an alt that is only a media filename does not become a visible caption. An empty alt falls back to the visible caption for the drawing description when a caption exists, and stays empty when it does not.
 
 Pipe-table separator cells specify alignment: `:---` is left, `:---:` is centered, and `---:` is right. An unmarked `---` does not write a direct alignment, so a template paragraph style keeps its own alignment. In a fresh standalone document an unmarked column defaults to left. Markers apply to every header and body cell in that column, including cells that contain emphasis, superscripts, or text of unequal length. The separator may use different dash runs (`:---`, `:-----`, `---:`); alignment follows the colons, not the dash count. A row whose cell count does not match the header is still rejected. Configure the `TableCaption` and `TableFoot` styles in the template to control first-line indentation and paragraph spacing.
 
@@ -181,5 +216,16 @@ Headings and table captions keep with the following paragraph; image paragraphs 
 
 `--native-toc` inserts a native Word TOC field. Its cached result contains the emitted heading text immediately, without invented page numbers; `w:updateFields` requests a refresh on open. Word computes page numbers when it updates the field. Automatic update behavior in other viewers varies. Without a native TOC request, the generator disables automatic field updates as before.
 
-The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, `table_span="page"`, `table_grouping="off"`, and `native_toc=True` on `assemble_markdown_template`. `render_blocks_to_doc(..., table_grouping="off")` is the standalone equivalent for grouping. Delivery profiles accept `table_span` and `table_grouping` with the other rendering options. Output manifests record the selected settings, and each captioned table record includes its resolved `span`. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
-`md2docx --template` writes the JSON assembly manifest beside the DOCX by default. Pass `--manifest-dir DIR` to store the manifest in a separate directory. The checksum file stays beside the DOCX.
+The Python options are `inline_math="omml"`, `end_matter_placement="end"`, `table_notes="explicit"`, `table_note_diagnostics="error"`, `table_span="page"`, `table_grouping="off"`, and `native_toc=True` on `assemble_markdown_template`. `render_blocks_to_doc(..., table_grouping="off")` is the standalone equivalent for grouping. Delivery profiles accept `table_span` and `table_grouping` with the other rendering options. Output manifests record the selected settings, and each captioned table record includes its resolved `span` together with `role` and `numbering`. The renderer uses UTF-8 text I/O and closes temporary file/package handles before replacement for Windows compatibility.
+
+## Assembly sidecars
+
+`md2docx --template` writes two audit files for the finished DOCX: a JSON manifest named `<stem>.manifest.json` and a SHA-256 sidecar named `<stem>.sha256`. By default both sit beside the DOCX. The manifest `output.path` is the absolute path of that DOCX, and `output.sha256` is the digest of the bytes on disk at publication time. The sidecar is one line, `<digest><two spaces><name>`. When the sidecar is beside the DOCX, `<name>` is the filename. Otherwise `<name>` is a `/`-separated path relative to the sidecar, or a `/`-separated absolute path when the files are on different Windows drives or UNC shares. `verify_assembly_checksum` resolves that name and rejects a digest that does not match the file.
+
+`--manifest-dir DIR` stores only the manifest in `DIR`. The checksum stays beside the DOCX. This flag does not collect every audit file.
+
+`--sidecar-dir DIR` stores both the manifest and the checksum in `DIR`, including when `DIR` is nested and does not yet exist. That is the switch for keeping the DOCX separate from every assembly audit file. `--manifest-dir` still overrides only the manifest location, and `--checksum-path FILE` still overrides only the checksum file, so the two files can be sent to different directories. All three flags require `--template`. Existing sidecar files are replaced as one pair. If publication fails, the previous pair is left in place: a new manifest is not written beside an old checksum.
+
+The Python entry point is `write_assembly_sidecars(..., manifest_dir=..., sidecar_dir=..., checksum_path=...)`. `docforge contract` still publishes its manifest and checksum beside the DOCX; it does not take these destination flags.
+
+Any tool that rewrites the DOCX after the build, including a word processor refreshing fields, makes both the manifest digest and the checksum stale. Rehash with `refresh_assembly_sidecars(output, manifest_path=..., checksum_path=...)`. It reads the finished file once, updates `output.path`, `output.sha256`, and `output.size_bytes`, and rewrites the checksum from that same digest. `generated_at_utc` stays at the assembly time. Do not edit one sidecar by hand. A failed refresh leaves the previous pair unchanged.

@@ -32,7 +32,21 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--template", type=Path, help="DOCX template to preserve while assembling Markdown")
     md.add_argument("--metadata", type=Path, help="Markdown metadata/front-matter file for template assembly")
     md.add_argument("--bibliography", type=Path, help="Ordered JSON bibliography for citation expansion")
-    md.add_argument("--manifest-dir", type=Path, help="Directory for the template assembly JSON manifest (default: next to the DOCX)")
+    md.add_argument(
+        "--manifest-dir",
+        type=Path,
+        help="Directory for the template assembly JSON manifest only (default: next to the DOCX). The checksum stays beside the DOCX unless --sidecar-dir or --checksum-path is set. Requires --template.",
+    )
+    md.add_argument(
+        "--sidecar-dir",
+        type=Path,
+        help="Directory for both assembly sidecars, the JSON manifest and the SHA-256 file. Requires --template. --manifest-dir still selects only the manifest, and --checksum-path still selects the checksum file.",
+    )
+    md.add_argument(
+        "--checksum-path",
+        type=Path,
+        help="Write the SHA-256 sidecar to this file instead of beside the DOCX. Requires --template. Does not move the manifest.",
+    )
     md.add_argument("--citation-base", type=Path, help="Existing manifest whose citation numbers a supplement should reuse")
     md.add_argument("--citation-format", choices=("template", "bracketed", "superscript", "superscript-bracketed"), default="template", help="Citation rendering policy")
     md.add_argument("--columns", choices=("template", "one", "two"), default="template", help="Body column layout for template assembly")
@@ -46,9 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--caption-font-size", type=float, help="Generated figure and table caption size in points")
     md.add_argument("--reference-font-size", type=float, help="Generated bibliography entry size in points")
     md.add_argument("--style", dest="style_profile", default="template", help="Template style profile or JSON semantic-style map")
-    md.add_argument("--preserve-metadata-prototypes", action="store_true", help="Preserve template cover samples' paragraph styles and direct formatting (requires --template)")
-    md.add_argument("--preserve-caption-prototypes", action="store_true", help="Use actual figure and table caption examples in the template as formatting prototypes (requires --template)")
-    md.add_argument("--standalone-style", choices=("legacy", "manuscript"), default="legacy", help="Standalone styling preset; manuscript uses left-aligned 11 pt text and matching heading levels")
+    md.add_argument("--preserve-metadata-prototypes", action="store_true", help="Keep detected cover samples' alignment and run formatting instead of an unused named style (requires --template)")
+    md.add_argument("--preserve-caption-prototypes", action="store_true", help="Use discovered figure and table caption samples as formatting prototypes (requires --template)")
+    md.add_argument("--standalone-style", choices=("legacy", "manuscript"), default="legacy", help="Standalone preset; manuscript maps Markdown headings to the same Word levels, with black left-aligned 11 pt text")
     md.add_argument("--line-numbers", choices=("template", "on", "off"), default="template", help="Line-number policy for generated sections")
     md.add_argument("--heading-before", type=float, default=None, help="Explicit heading spacing before in points")
     md.add_argument("--end-matter-placement", choices=("source", "end"), default="source", help="Place source TOC/graphical abstract sections after references on a new page (requires --template)")

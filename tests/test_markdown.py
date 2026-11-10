@@ -293,7 +293,16 @@ class OmmlTests(unittest.TestCase):
         self.assertEqual(first._p.pPr.find(qn("w:outlineLvl")).get(qn("w:val")), "0")
         self.assertEqual(second._p.pPr.find(qn("w:outlineLvl")).get(qn("w:val")), "1")
         self.assertEqual(body.alignment, WD_ALIGN_PARAGRAPH.LEFT)
+        self.assertEqual(body.paragraph_format.space_before.pt, 0)
+        self.assertEqual(body.paragraph_format.space_after.pt, 6)
+        self.assertEqual(body.paragraph_format.line_spacing, 1.2)
         self.assertEqual(document.styles["Normal"].font.size.pt, 11)
+        self.assertEqual(str(document.styles["Normal"].font.color.rgb), "000000")
+        self.assertEqual(document.styles["Normal"].paragraph_format.space_before.pt, 0)
+        self.assertEqual(document.styles["Normal"].paragraph_format.space_after.pt, 6)
+        self.assertEqual(first.runs[0].font.size.pt, 14)
+        self.assertEqual(str(first.runs[0].font.color.rgb), "000000")
+        self.assertEqual(str(body.runs[0].font.color.rgb), "000000")
         self.assertTrue(all(run.font.size.pt == 11 for run in body.runs if run.text))
         self.assertTrue(any(run.italic and run.text == "emphasis" for run in body.runs))
         self.assertTrue(any(run.font.subscript and run.text == "2" for run in body.runs))
@@ -588,7 +597,8 @@ def test_authored_and_generated_table_numbers_cannot_collide(tmp_path: Path) -> 
         "Table: Next generated.\n\n| A |\n|---|\n| three |\n",
         encoding="utf-8",
     )
-    document = render_blocks_to_doc(parse_markdown(path))
+    with pytest.warns(UserWarning, match="table.number_collision"):
+        document = render_blocks_to_doc(parse_markdown(path))
     assert [paragraph.text for paragraph in document.paragraphs if paragraph.text] == [
         "Table 2. First generated.", "Table 1. Authored.", "Table 3. Next generated.",
     ]
