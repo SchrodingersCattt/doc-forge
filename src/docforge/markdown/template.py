@@ -32,7 +32,7 @@ from lxml import etree
 from PIL import Image
 
 from ..bibliography import BibliographyEntry, CitationResolver, format_entry, load_json
-from .inline import is_caption, is_filename_alt, key as inline_key, render as render_inline
+from .inline import is_caption, key as inline_key, render as render_inline
 from .blocks import Block
 from .prototypes import has_clean_direct_bold_run, numbered_bold_prototypes
 from .citations import (
@@ -45,9 +45,12 @@ from .citations import (
 from ..output import _detect_format, validate_output_path
 from .launcher import (
     accept_docx_revisions,
+    _drawing_description,
     _explicit_table_label,
+    _image_visible_caption,
     _next_table_number,
     _reserved_table_labels,
+    _set_drawing_description,
     _table_label_key,
     append_inline_math,
     convert_unicode_scripts_in_docx,
@@ -1506,9 +1509,10 @@ def _is_figure_caption_text(text: str) -> bool:
 def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Block | None, str], ...]:
     """Split Markdown into text runs and image/caption pairs.
 
-    A caption immediately following an image is consumed as the caption.  An
-    meaningful image alt text remains a usable fallback; an empty alt or a
-    media filename is not promoted to a generated caption.
+    A caption immediately following an image is the visible caption. A
+    descriptive image alt text remains a usable fallback; an empty alt or a
+    media filename is not promoted to a generated caption. The authored alt
+    stays on the image block for accessibility metadata.
     """
     groups: list[tuple[tuple[Block, ...], Block | None, str]] = []
     text: list[Block] = []
@@ -1519,17 +1523,24 @@ def _figure_groups(blocks: Sequence[Block]) -> tuple[tuple[tuple[Block, ...], Bl
             text.append(block)
             index += 1
             continue
-        alt = block.text.strip()
-        if not alt or is_filename_alt(alt):
-            alt = ""
-        groups.append((tuple(text), block, alt))
+        following = blocks[index + 1] if index + 1 < len(blocks) else None
+        caption, consumed = _image_visible_caption(block, following)
+        groups.append((tuple(text), block, caption))
         text = []
-        index += 1
-        if index < len(blocks) and blocks[index].kind in {"paragraph", "toc_text"} and is_caption(blocks[index].text):
-            groups[-1] = (groups[-1][0], block, blocks[index].text.strip())
-            index += 1
+        index += 2 if consumed else 1
     groups.append((tuple(text), None, ""))
     return tuple(groups)
+
+
+def _table_audit(block: Block, *, label: str, number: int, numbering: str) -> dict[str, object]:
+    """Assembly-manifest record for one table caption."""
+    return {
+        "number": number,
+        "label": label,
+        "caption": block.text,
+        "role": "table_caption",
+        "numbering": numbering,
+    }
 
 
 def _section_break_node(section) -> object:
@@ -1912,7 +1923,6 @@ def _clone_figure(
         for doc_pr in drawing.iter(qn("wp:docPr")):
             doc_pr.set("id", str(1000 + figure_number))
             doc_pr.set("name", image_path.stem)
-            doc_pr.set("descr", caption[:255])
         run.append(drawing)
         paragraph.append(run)
         _set_paragraph_flag(paragraph, "w:keepNext")
@@ -1929,6 +1939,7 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
+    _set_drawing_description(paragraph, _drawing_description(image.text, caption))
     height_twips = section_height_twips or _section_text_height_twips(target.sections[-1]._sectPr)
     points = caption_font_size or _style_points(target, caption_style_id)
     width_twips = section_width_twips or _body_column_width_twips(target)
@@ -1949,6 +1960,8 @@ def _clone_figure(
     if not caption.strip():
         return [paragraph]
     _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
+    if not image.text.strip():
+        _set_drawing_description(paragraph, _drawing_description("", caption_text))
     caption_text = re.sub(
         r"^((?:Supplementary Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])",
         r"**\1**",
@@ -2707,7 +2720,12 @@ def assemble_markdown_template(
                 authored_label = _explicit_table_label(block)
                 label = authored_label or f"Table {numbering_prefix}{table_index}"
                 number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
-                tables.append({"number": number, "label": label, "caption": block.text})
+                tables.append(_table_audit(
+                    block,
+                    label=label,
+                    number=number,
+                    numbering="authored" if authored_label else "generated",
+                ))
                 if not authored_label:
                     reserved_table_labels.add(_table_label_key(label))
                     table_index += 1
@@ -2807,6 +2825,7 @@ def assemble_markdown_template(
                 "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()),
                 "sha256": sha256_file(Path(image.path)),
+                "alt": image.text.strip(),
                 "caption": caption,
                 "template_region": figure_region.index if figure_region is not None else None,
                 "placement_after_body_region": selected_body.index,
@@ -2877,7 +2896,12 @@ def assemble_markdown_template(
                     authored_label = _explicit_table_label(block)
                     label = authored_label or f"Table {numbering_prefix}{table_index}"
                     number = int(re.search(r"\d+$", authored_label).group()) if authored_label else table_index
-                    tables.append({"number": number, "label": label, "caption": block.text})
+                    tables.append(_table_audit(
+                        block,
+                        label=label,
+                        number=number,
+                        numbering="authored" if authored_label else "generated",
+                    ))
                     if not authored_label:
                         reserved_table_labels.add(_table_label_key(label))
                         table_index += 1
@@ -2924,6 +2948,7 @@ def assemble_markdown_template(
                 "number": figure_index + 1,
                 "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()), "sha256": sha256_file(Path(image.path)),
+                "alt": image.text.strip(),
                 "caption": caption, "template_region": None,
                 "placement_after_body_region": final_region.index, "span": span,
                 "columns": _section_column_count(figure_section), "orientation": orientation,
