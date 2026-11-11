@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import zipfile
@@ -75,7 +76,8 @@ def test_write_pptx_builds_two_visible_slides(tmp_path) -> None:
                 assert member in names
     assert path.is_file()
     assert not path.is_symlink()
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert not (tmp_path / "outside.xml").exists()
     assert not list(tmp_path.rglob("*.partial"))
 
@@ -355,14 +357,19 @@ def test_cli_illegal_xml_exits_2_without_a_file(tmp_path, capsys) -> None:
     assert not list(tmp_path.rglob("*.partial"))
 
 
-def test_publish_keeps_output_created_after_preflight(tmp_path, monkeypatch) -> None:
+def test_publish_keeps_file_created_after_preflight(tmp_path, monkeypatch) -> None:
     output = tmp_path / "deck.pptx"
     competitor = b"competitor"
-    real_link = os.link
+    collisions = []
 
-    def link_after_competitor(source, destination, *args, **kwargs):
+    def link_after_competitor(source, destination, *args, _link=os.link, **kwargs):
         Path(destination).write_bytes(competitor)
-        return real_link(source, destination, *args, **kwargs)
+        assert Path(destination).is_file()
+        try:
+            return _link(source, destination, *args, **kwargs)
+        except FileExistsError as exc:
+            collisions.append(exc.errno)
+            raise
 
     def replace_is_a_bug(*args, **kwargs):
         raise AssertionError("no-clobber used replace")
@@ -372,22 +379,39 @@ def test_publish_keeps_output_created_after_preflight(tmp_path, monkeypatch) -> 
     with pytest.raises(FileExistsError, match="--force") as caught:
         write_pptx(output, [{"title": "T", "bullets": ["b"]}])
     message = str(caught.value)
+    assert collisions == [errno.EEXIST]
     assert str(output) in message
     assert ".partial" not in message
     assert output.read_bytes() == competitor
     assert not list(tmp_path.rglob("*.partial"))
 
-    directory = tmp_path / "late-dir"
-    real_link = os.link
 
-    def link_after_directory(source, destination, *args, **kwargs):
-        Path(destination).mkdir()
-        return real_link(source, destination, *args, **kwargs)
+def test_publish_keeps_directory_created_after_preflight(tmp_path, monkeypatch) -> None:
+    directory = tmp_path / "late-dir"
+    collisions = []
+
+    def link_after_directory(source, destination, *args, _link=os.link, **kwargs):
+        path = Path(destination)
+        path.mkdir()
+        assert path.is_dir()
+        try:
+            return _link(source, destination, *args, **kwargs)
+        except FileExistsError as exc:
+            collisions.append(exc.errno)
+            raise
+
+    def replace_is_a_bug(*args, **kwargs):
+        raise AssertionError("no-clobber used replace")
 
     monkeypatch.setattr("docforge.slides.os.link", link_after_directory)
-    with pytest.raises(ValueError, match="Is a directory"):
+    monkeypatch.setattr("docforge.slides.os.replace", replace_is_a_bug)
+    with pytest.raises(ValueError, match="Is a directory") as caught:
         write_pptx(directory, [{"title": "T", "bullets": ["b"]}])
+    assert collisions == [errno.EEXIST]
+    assert str(directory) in str(caught.value)
+    assert ".partial" not in str(caught.value)
     assert directory.is_dir()
+    assert not any(directory.iterdir())
     assert not list(tmp_path.rglob("*.partial"))
 
 
@@ -421,6 +445,7 @@ def test_export_does_not_use_fchmod_or_umask(tmp_path, monkeypatch) -> None:
     """Removes os.fchmod to resemble a module without that Unix API.
 
     This process is not Windows, and the test does not execute Windows.
+    The owner-read mode check runs only when ``os.name`` is ``posix``.
     """
 
     def umask_is_a_bug(*args, **kwargs):
@@ -431,7 +456,8 @@ def test_export_does_not_use_fchmod_or_umask(tmp_path, monkeypatch) -> None:
     output = tmp_path / "deck.pptx"
     write_pptx(output, [{"title": "T", "bullets": ["b"]}])
     assert output.is_file() and not output.is_symlink()
-    assert output.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert output.stat().st_mode & 0o777 == 0o600
     with zipfile.ZipFile(output) as archive:
         assert b"T" in archive.read("ppt/slides/slide1.xml")
 
