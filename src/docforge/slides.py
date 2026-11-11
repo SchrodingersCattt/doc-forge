@@ -1,16 +1,20 @@
 """Write an editable PowerPoint package from title and bullet records.
 
-The deck is an Office Open XML zip. Titles and bullets are stored in shapes
-with explicit positions and black text, so a reader can show them without a
-theme or a consumer template. Slide text is escaped and never becomes a
+The deck is an Office Open XML zip. Each slide stores its title in one
+text box and its bullets as paragraphs in a second text box. Both boxes
+have explicit positions and black text, so a reader can show them without
+a theme or a consumer template. Slide text is escaped and never becomes a
 package part name.
 """
 
 from __future__ import annotations
 
+import errno
+import io
 import json
 import os
 import re
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -27,7 +31,8 @@ _SLIDE_CY = 6_858_000
 _TITLE_BOX = (457_200, 365_760, 11_277_600, 1_143_000)
 _BODY_BOX = (457_200, 1_600_200, 11_277_600, 4_800_600)
 
-_ILLEGAL_XML = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+# XML 1.0 Char: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].
+_XML_DISALLOWED = re.compile(r"[^\t\n\r\u0020-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]")
 
 _CONTENT_TYPE = {
     "ppt/presentation.xml": "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
@@ -52,12 +57,15 @@ def write_pptx(
     """Write *slides* to a ``.pptx`` at *path*.
 
     Each slide mapping needs ``title`` (a non-empty string) and ``bullets``
-    (a list of strings). An existing file is left unchanged unless *force*
-    is true.
+    (a list of strings). Characters XML 1.0 cannot store are refused before
+    the destination is opened. An existing file is left unchanged unless
+    *force* is true. A directory is never replaced. The parent directory
+    must already exist.
     """
 
     records = _normalize(slides)
     destination = Path(path)
+    _require_output_destination(destination)
     if destination.exists() and not force:
         raise FileExistsError(f"Output exists; pass --force to overwrite: {destination}")
     _publish(destination, _package(records))
@@ -92,6 +100,7 @@ def _normalize(slides: Sequence[Mapping[str, Any]]) -> list[tuple[str, tuple[str
         title = slide["title"]
         if not isinstance(title, str):
             raise ValueError(f"slide {index} title must be a string")
+        _xml_text(title)
         if title.strip() == "":
             raise ValueError(f"slide {index} title must not be empty")
         if "bullets" not in slide:
@@ -101,7 +110,6 @@ def _normalize(slides: Sequence[Mapping[str, Any]]) -> list[tuple[str, tuple[str
             raise ValueError(f"slide {index} bullets must be a list of strings")
         if not all(isinstance(item, str) for item in bullets):
             raise ValueError(f"slide {index} bullets must be a list of strings")
-        _xml_text(title)
         for bullet in bullets:
             _xml_text(bullet)
         records.append((title, tuple(bullets)))
@@ -109,9 +117,32 @@ def _normalize(slides: Sequence[Mapping[str, Any]]) -> list[tuple[str, tuple[str
 
 
 def _xml_text(value: str) -> str:
-    if _ILLEGAL_XML.search(value):
+    if _XML_DISALLOWED.search(value):
         raise ValueError("slide text contains a character XML cannot store")
     return escape(value, {'"': "&quot;", "'": "&apos;"})
+
+
+def _output_error(path: Path, reason: str) -> ValueError:
+    """Filesystem failure for *path* that does not name a temporary file."""
+
+    return ValueError(f"Cannot write {path}: {reason}")
+
+
+def _require_output_destination(path: Path) -> None:
+    """Refuse a missing parent or a directory at the requested path."""
+
+    parent = path.parent
+    try:
+        parent_is_dir = parent.is_dir()
+        parent_exists = parent.exists()
+        destination_is_dir = path.is_dir()
+    except OSError as exc:
+        raise _output_error(path, exc.strerror or "unable to write output") from exc
+    if not parent_is_dir:
+        reason = "Not a directory" if parent_exists else "No such file or directory"
+        raise _output_error(path, reason)
+    if destination_is_dir:
+        raise _output_error(path, "Is a directory")
 
 
 def _part_name(name: str) -> str:
@@ -137,15 +168,75 @@ def _relationship_target(target: str) -> str:
 
 
 def _publish(path: Path, parts: Mapping[str, str]) -> None:
-    temporary = path.with_name(f".{path.name}.partial")
+    """Publish a complete package without reusing a predictable temp name.
+
+    The zip is built in memory first, so an encoding failure does not create
+    a file. ``mkstemp`` creates a new inode in the destination directory.
+    Bytes are written to that file descriptor, not reopened by name, and
+    ``os.replace`` publishes the same inode. An existing ``.{name}.partial``
+    sibling, including a symlink, is not opened.
+    """
+
+    payload = _zip_bytes(parts)
+    temporary: Path | None = None
+    descriptor: int | None = None
     try:
-        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for name, payload in parts.items():
-                archive.writestr(_part_name(name), payload.encode("utf-8"))
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".partial",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_name)
+        _write_fd(descriptor, payload)
+        os.fchmod(descriptor, _creation_mode())
+        expected = os.fstat(descriptor)
+        current = os.lstat(temporary)
+        if (current.st_ino, current.st_dev) != (expected.st_ino, expected.st_dev):
+            raise OSError(errno.EIO, "temporary output changed before publish")
+        os.close(descriptor)
+        descriptor = None
         os.replace(temporary, path)
+    except OSError as exc:
+        raise _output_error(path, exc.strerror or "unable to write output") from exc
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _creation_mode() -> int:
+    """Match a normal ``open`` so ``mkstemp`` does not leave the deck owner-only."""
+
+    current = os.umask(0)
+    try:
+        return 0o666 & ~current
+    finally:
+        os.umask(current)
+
+
+def _write_fd(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "unable to write output")
+        view = view[written:]
+    os.fsync(descriptor)
+
+
+def _zip_bytes(parts: Mapping[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in parts.items():
+            archive.writestr(_part_name(name), payload.encode("utf-8"))
+    return buffer.getvalue()
 
 
 def _package(slides: Sequence[tuple[str, tuple[str, ...]]]) -> dict[str, str]:
