@@ -58,17 +58,18 @@ def write_pptx(
 
     Each slide mapping needs ``title`` (a non-empty string) and ``bullets``
     (a list of strings). Characters XML 1.0 cannot store are refused before
-    the destination is opened. An existing file is left unchanged unless
-    *force* is true. A directory is never replaced. The parent directory
-    must already exist.
+    the destination is opened. An existing name, including a dangling
+    symlink, is left unchanged unless *force* is true. A directory,
+    including a symlink to a directory, is never replaced. The parent
+    directory must already exist. On POSIX the deck keeps the owner
+    read/write mode of its temporary file. This function does not change
+    the process file-creation mask.
     """
 
     records = _normalize(slides)
     destination = Path(path)
-    _require_output_destination(destination)
-    if destination.exists() and not force:
-        raise FileExistsError(f"Output exists; pass --force to overwrite: {destination}")
-    _publish(destination, _package(records))
+    _require_output_destination(destination, force=force)
+    _publish(destination, _package(records), force=force)
 
 
 def load_slides(path: str | Path) -> list[Any]:
@@ -128,14 +129,29 @@ def _output_error(path: Path, reason: str) -> ValueError:
     return ValueError(f"Cannot write {path}: {reason}")
 
 
-def _require_output_destination(path: Path) -> None:
-    """Refuse a missing parent or a directory at the requested path."""
+def _name_state(path: Path) -> tuple[bool, bool]:
+    """Return whether *path* names an entry, and whether that entry is a directory.
+
+    ``Path.exists`` is false for a dangling symlink. ``lstat`` treats that
+    name as present. ``is_dir`` follows a symlink, so a link to a directory
+    counts as a directory.
+    """
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False, False
+    return True, path.is_dir()
+
+
+def _require_output_destination(path: Path, *, force: bool) -> None:
+    """Refuse a missing parent, a directory, or an occupied name without *force*."""
 
     parent = path.parent
     try:
         parent_is_dir = parent.is_dir()
         parent_exists = parent.exists()
-        destination_is_dir = path.is_dir()
+        occupied, destination_is_dir = _name_state(path)
     except OSError as exc:
         raise _output_error(path, exc.strerror or "unable to write output") from exc
     if not parent_is_dir:
@@ -143,6 +159,8 @@ def _require_output_destination(path: Path) -> None:
         raise _output_error(path, reason)
     if destination_is_dir:
         raise _output_error(path, "Is a directory")
+    if occupied and not force:
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {path}")
 
 
 def _part_name(name: str) -> str:
@@ -167,14 +185,20 @@ def _relationship_target(target: str) -> str:
     return "/" + "/".join(part for part in path.parts if part != "/")
 
 
-def _publish(path: Path, parts: Mapping[str, str]) -> None:
+def _publish(path: Path, parts: Mapping[str, str], *, force: bool) -> None:
     """Publish a complete package without reusing a predictable temp name.
 
-    The zip is built in memory first, so an encoding failure does not create
-    a file. ``mkstemp`` creates a new inode in the destination directory.
-    Bytes are written to that file descriptor, not reopened by name, and
-    ``os.replace`` publishes the same inode. An existing ``.{name}.partial``
-    sibling, including a symlink, is not opened.
+    The zip is built before the destination name is created. ``mkstemp``
+    creates a new file and the bytes are written to that descriptor. Without
+    ``force``, ``os.link`` creates the destination and fails if the name
+    already exists, including a dangling symlink. With ``force``,
+    ``os.replace`` overwrites a file or symlink. A directory is not replaced.
+    A pre-existing ``.{name}.partial`` sibling is not opened.
+
+    A writer that can rename entries in the destination directory can still
+    change the temporary name before it is linked or replaced. This function
+    does not claim to publish the same inode in that case, and it does not
+    fall back to ``os.replace`` when exclusive creation is unavailable.
     """
 
     payload = _zip_bytes(parts)
@@ -188,14 +212,20 @@ def _publish(path: Path, parts: Mapping[str, str]) -> None:
         )
         temporary = Path(temporary_name)
         _write_fd(descriptor, payload)
-        os.fchmod(descriptor, _creation_mode())
-        expected = os.fstat(descriptor)
-        current = os.lstat(temporary)
-        if (current.st_ino, current.st_dev) != (expected.st_ino, expected.st_dev):
-            raise OSError(errno.EIO, "temporary output changed before publish")
         os.close(descriptor)
         descriptor = None
-        os.replace(temporary, path)
+        if force:
+            os.replace(temporary, path)
+        else:
+            _link_exclusive(temporary, path)
+    except FileExistsError:
+        try:
+            destination_is_dir = path.is_dir()
+        except OSError as exc:
+            raise _output_error(path, exc.strerror or "unable to write output") from exc
+        if destination_is_dir:
+            raise _output_error(path, "Is a directory") from None
+        raise FileExistsError(f"Output exists; pass --force to overwrite: {path}") from None
     except OSError as exc:
         raise _output_error(path, exc.strerror or "unable to write output") from exc
     finally:
@@ -211,14 +241,21 @@ def _publish(path: Path, parts: Mapping[str, str]) -> None:
                 pass
 
 
-def _creation_mode() -> int:
-    """Match a normal ``open`` so ``mkstemp`` does not leave the deck owner-only."""
+def _link_exclusive(source: Path, destination: Path) -> None:
+    """Create *destination* only when that name is absent.
 
-    current = os.umask(0)
+    ``os.link`` fails with ``FileExistsError`` when the name is taken. If
+    this platform cannot create that exclusive link, publication stops
+    instead of replacing the name.
+    """
+
+    link = getattr(os, "link", None)
+    if link is None:
+        raise OSError(errno.ENOTSUP, "atomic publish is unavailable")
     try:
-        return 0o666 & ~current
-    finally:
-        os.umask(current)
+        link(source, destination)
+    except NotImplementedError as exc:
+        raise OSError(errno.ENOTSUP, "atomic publish is unavailable") from exc
 
 
 def _write_fd(descriptor: int, payload: bytes) -> None:

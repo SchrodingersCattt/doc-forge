@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import zipfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -75,9 +75,7 @@ def test_write_pptx_builds_two_visible_slides(tmp_path) -> None:
                 assert member in names
     assert path.is_file()
     assert not path.is_symlink()
-    mask = os.umask(0)
-    os.umask(mask)
-    assert path.stat().st_mode & 0o777 == 0o666 & ~mask
+    assert path.stat().st_mode & 0o777 == 0o600
     assert not (tmp_path / "outside.xml").exists()
     assert not list(tmp_path.rglob("*.partial"))
 
@@ -201,10 +199,20 @@ def test_failed_replace_keeps_destination_and_removes_temp(tmp_path, monkeypatch
     assert planted.read_text() == "keep-file"
     assert {path.name for path in tmp_path.iterdir()} == {output.name, planted.name}
 
+    def fail_link(source, destination, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", "/tmp/.deck.pptx.hidden.partial")
+
+    def replace_is_a_bug(*args, **kwargs):
+        raise AssertionError("no-clobber used replace")
+
+    monkeypatch.setattr("docforge.slides.os.link", fail_link)
+    monkeypatch.setattr("docforge.slides.os.replace", replace_is_a_bug)
     fresh = tmp_path / "fresh.pptx"
     with pytest.raises(ValueError, match="Permission denied") as caught:
         write_pptx(fresh, [{"title": "Next", "bullets": ["no"]}])
     assert str(fresh) in str(caught.value)
+    assert ".partial" not in str(caught.value)
+    assert ".hidden" not in str(caught.value)
     assert not fresh.exists()
     assert {path.name for path in tmp_path.iterdir()} == {output.name, planted.name}
 
@@ -236,10 +244,19 @@ def test_symlink_destination_replaces_the_link_not_the_target(tmp_path) -> None:
     assert (real_dir / "keep.txt").read_text() == "keep"
 
     broken = tmp_path / "broken.pptx"
-    broken.symlink_to(tmp_path / "missing-target.pptx")
-    write_pptx(broken, [{"title": "Broken", "bullets": ["b"]}])
+    missing = tmp_path / "missing-target.pptx"
+    broken.symlink_to(missing)
+    with pytest.raises(FileExistsError, match="--force") as caught:
+        write_pptx(broken, [{"title": "Broken", "bullets": ["b"]}])
+    assert str(broken) in str(caught.value)
+    assert ".partial" not in str(caught.value)
+    assert broken.is_symlink()
+    assert os.readlink(broken) == str(missing)
+    assert not missing.exists()
+    write_pptx(broken, [{"title": "Broken", "bullets": ["b"]}], force=True)
     assert broken.is_file() and not broken.is_symlink()
-    assert not (tmp_path / "missing-target.pptx").exists()
+    assert not missing.exists()
+    assert zipfile.is_zipfile(broken)
 
 
 @pytest.mark.parametrize("title,bullet", [
@@ -336,6 +353,87 @@ def test_cli_illegal_xml_exits_2_without_a_file(tmp_path, capsys) -> None:
     assert "Traceback" not in captured.err
     assert not output.exists()
     assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_publish_keeps_output_created_after_preflight(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "deck.pptx"
+    competitor = b"competitor"
+    real_link = os.link
+
+    def link_after_competitor(source, destination, *args, **kwargs):
+        Path(destination).write_bytes(competitor)
+        return real_link(source, destination, *args, **kwargs)
+
+    def replace_is_a_bug(*args, **kwargs):
+        raise AssertionError("no-clobber used replace")
+
+    monkeypatch.setattr("docforge.slides.os.link", link_after_competitor)
+    monkeypatch.setattr("docforge.slides.os.replace", replace_is_a_bug)
+    with pytest.raises(FileExistsError, match="--force") as caught:
+        write_pptx(output, [{"title": "T", "bullets": ["b"]}])
+    message = str(caught.value)
+    assert str(output) in message
+    assert ".partial" not in message
+    assert output.read_bytes() == competitor
+    assert not list(tmp_path.rglob("*.partial"))
+
+    directory = tmp_path / "late-dir"
+    real_link = os.link
+
+    def link_after_directory(source, destination, *args, **kwargs):
+        Path(destination).mkdir()
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr("docforge.slides.os.link", link_after_directory)
+    with pytest.raises(ValueError, match="Is a directory"):
+        write_pptx(directory, [{"title": "T", "bullets": ["b"]}])
+    assert directory.is_dir()
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_exclusive_link_failure_does_not_replace(tmp_path, monkeypatch) -> None:
+    """Simulated platforms. These checks do not run on Windows."""
+
+    output = tmp_path / "deck.pptx"
+
+    def unavailable(*args, **kwargs):
+        raise NotImplementedError("link")
+
+    def replace_is_a_bug(*args, **kwargs):
+        raise AssertionError("unsupported link used replace")
+
+    monkeypatch.setattr("docforge.slides.os.link", unavailable)
+    monkeypatch.setattr("docforge.slides.os.replace", replace_is_a_bug)
+    with pytest.raises(ValueError, match="atomic publish is unavailable") as caught:
+        write_pptx(output, [{"title": "T", "bullets": ["b"]}])
+    assert str(output) in str(caught.value)
+    assert ".partial" not in str(caught.value)
+    assert not output.exists()
+
+    monkeypatch.delattr("docforge.slides.os", "link", raising=False)
+    with pytest.raises(ValueError, match="atomic publish is unavailable"):
+        write_pptx(output, [{"title": "T", "bullets": ["b"]}])
+    assert not output.exists()
+    assert not list(tmp_path.rglob("*.partial"))
+
+
+def test_export_does_not_use_fchmod_or_umask(tmp_path, monkeypatch) -> None:
+    """Removes os.fchmod to resemble a module without that Unix API.
+
+    This process is not Windows, and the test does not execute Windows.
+    """
+
+    def umask_is_a_bug(*args, **kwargs):
+        raise AssertionError("umask called")
+
+    monkeypatch.setattr("docforge.slides.os.umask", umask_is_a_bug)
+    monkeypatch.delattr("docforge.slides.os", "fchmod", raising=False)
+    output = tmp_path / "deck.pptx"
+    write_pptx(output, [{"title": "T", "bullets": ["b"]}])
+    assert output.is_file() and not output.is_symlink()
+    assert output.stat().st_mode & 0o777 == 0o600
+    with zipfile.ZipFile(output) as archive:
+        assert b"T" in archive.read("ppt/slides/slide1.xml")
 
 
 def test_programming_errors_are_not_rewritten(tmp_path, monkeypatch) -> None:
