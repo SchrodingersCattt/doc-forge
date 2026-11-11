@@ -335,6 +335,11 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--id", dest="doc_id", default="main")
     build.add_argument("--force", action="store_true")
 
+    slides_cmd = sub.add_parser("slides", help="Write an editable PPTX from a JSON list of slides")
+    slides_cmd.add_argument("slides", type=Path, help="JSON list of objects with title and bullets")
+    slides_cmd.add_argument("-o", "--output", type=Path, required=True, help="Output PPTX path")
+    slides_cmd.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+
     return parser
 
 
@@ -409,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_gate(args)
         if args.command == "pipeline":
             return _cmd_pipeline(args)
+        if args.command == "slides":
+            return _cmd_slides(args)
     except FormatError as exc:
         # Format failures are intentionally stable and do not expose ZIP or
         # Pandoc parser text.  They still use the CLI's conventional exit 2.
@@ -944,6 +951,14 @@ def _cmd_gate(args: argparse.Namespace) -> int:
             print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.message}", file=sys.stderr)
         return 1 if findings else 0
     raise ValueError(f"Unknown gate: {args.gate_kind}")
+
+
+def _cmd_slides(args: argparse.Namespace) -> int:
+    from ..slides import load_slides, write_pptx
+
+    write_pptx(args.output, load_slides(args.slides), force=args.force)
+    print(args.output)
+    return 0
 
 
 if __name__ == "__main__":
