@@ -33,6 +33,7 @@ Details are in `docforge <command> --help`.
 - `deliver` — build the DOCX files listed in a `docforge.delivery.v1` profile; see `docforge deliver --help`
 - `aigc` — images from Markdown prompt files
 - `sourcepack` — a TeX source ZIP from an allowlist
+- `slides` — write an editable PPTX from a JSON list of titles and bullets; see [docs/slides.md](docs/slides.md)
 - `check` — check a DOCX
 - `gate abbr`, `gate references`, `gate style` — source checks from a JSON config
 - `pipeline` — run a `docforge.pipeline.v1` spec; see [docs/pipeline.md](docs/pipeline.md)
