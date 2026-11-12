@@ -1523,13 +1523,25 @@ CAPTION_LABEL_RE = re.compile(
 )
 
 
-def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
+def _caption_kind(caption: str) -> str:
     match = CAPTION_LABEL_RE.match(caption)
     raw_kind = match.group(1) if match else "Figure"
-    kind = "Supplementary Fig." if raw_kind.lower().startswith("supplementary") else raw_kind.capitalize()
+    return "Supplementary Fig." if raw_kind.lower().startswith("supplementary") else raw_kind.capitalize()
+
+
+def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
+    match = CAPTION_LABEL_RE.match(caption)
+    kind = _caption_kind(caption)
     body = caption[match.end():].strip() if match else caption.strip()
     label = f"{kind} {prefix}{number}"
     return label, f"{label}. {body}".rstrip()
+
+
+def _next_caption_number(caption: str, counters: dict[str, int]) -> int:
+    """Keep Figure, Scheme, Chart and Supplementary Fig. series independent."""
+    kind = _caption_kind(caption)
+    counters[kind] = counters.get(kind, 0) + 1
+    return counters[kind]
 
 
 def _is_figure_caption_text(text: str) -> bool:
@@ -2925,6 +2937,7 @@ def assemble_markdown_template(
     tables: list[dict[str, object]] = []
     body_index = 0
     figure_index = 0
+    figure_counters: dict[str, int] = {}
     equation_index = 1
     table_index = 1
     reserved_table_labels = _reserved_table_labels((*body_blocks, *deferred))
@@ -3085,6 +3098,7 @@ def assemble_markdown_template(
         else:
             render_section = section
 
+        figure_number = _next_caption_number(caption, figure_counters)
         output_nodes.extend(
             _clone_figure(
                 template,
@@ -3093,7 +3107,7 @@ def assemble_markdown_template(
                 figure_region,
                 prototypes.paragraphs.get("caption"),
                 styles["caption"],
-                figure_index + 1,
+                figure_number,
                 section_width_twips=_section_width_twips(render_section),
                 section_height_twips=_section_text_height_twips(render_section),
                 number_prefix=numbering_prefix,
@@ -3110,8 +3124,8 @@ def assemble_markdown_template(
             section_geometries.append(_section_geometry(figure_section))
         figures.append(
             {
-                "number": figure_index + 1,
-                "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
+                "number": figure_number,
+                "label": _numbered_caption(caption, figure_number, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()),
                 "sha256": sha256_file(Path(image.path)),
                 "alt": image.text.strip(),
@@ -3250,9 +3264,10 @@ def assemble_markdown_template(
                 output_nodes.append(_section_break_node(_with_continuous_section(end_section)))
                 section_sources.append(final_region.index)
                 section_geometries.append(_section_geometry(end_section))
+            figure_number = _next_caption_number(caption, figure_counters)
             output_nodes.extend(_clone_figure(
                 template, image, caption, None, prototypes.paragraphs.get("caption"),
-                styles["caption"], figure_index + 1,
+                styles["caption"], figure_number,
                 section_width_twips=_section_width_twips(figure_section),
                 section_height_twips=_section_text_height_twips(figure_section),
                 number_prefix=numbering_prefix, caption_font_size=caption_font_size,
@@ -3262,8 +3277,8 @@ def assemble_markdown_template(
                 section_sources.append(final_region.index)
                 section_geometries.append(_section_geometry(figure_section))
             figures.append({
-                "number": figure_index + 1,
-                "label": _numbered_caption(caption, figure_index + 1, numbering_prefix)[0] if caption else "",
+                "number": figure_number,
+                "label": _numbered_caption(caption, figure_number, numbering_prefix)[0] if caption else "",
                 "path": str(Path(image.path).resolve()), "sha256": sha256_file(Path(image.path)),
                 "alt": image.text.strip(),
                 "caption": caption, "template_region": None,
