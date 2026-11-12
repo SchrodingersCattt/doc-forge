@@ -1,5 +1,11 @@
 # Migration notes for the semantic hub
 
+Template-backed Markdown now assigns separate counters to Figure, Scheme, Chart,
+and Supplementary Fig. captions. Mixed caption types that previously shared one
+image counter can therefore receive different generated numbers; their manifest
+`figures[].number` and `figures[].label` reflect the relevant caption sequence.
+Images without a recognized caption kind still consume the Figure sequence.
+
 Issue 50 is the acceptance ledger. This slice adds the hub and keeps the historical Markdown and TeX DOCX renderers.
 
 ## API

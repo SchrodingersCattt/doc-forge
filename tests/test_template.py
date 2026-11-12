@@ -258,6 +258,76 @@ def _figure_template(path: Path, image: Path) -> None:
     document.save(path)
 
 
+@pytest.mark.parametrize("prefix", ["", "S"])
+def test_scheme_figure_and_chart_have_independent_caption_numbers(tmp_path: Path, prefix: str) -> None:
+    image = tmp_path / "image.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    _one_section_template(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "![image.png](image.png)\n\nScheme 1. First scheme.\n\n"
+        "![image.png](image.png)\n\nFigure 1. First figure.\n\n"
+        "![image.png](image.png)\n\nChart 1. First chart.\n\n"
+        "![image.png](image.png)\n\nScheme 2. Second scheme.\n\n"
+        "![image.png](image.png)\n\nFigure 2. Second figure.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, title="Example", numbering_prefix=prefix,
+    )
+    expected = [f"Scheme {prefix}1", f"Figure {prefix}1", f"Chart {prefix}1",
+                f"Scheme {prefix}2", f"Figure {prefix}2"]
+    assert [figure["label"] for figure in result.figures] == expected
+    assert [figure["number"] for figure in result.figures] == [1, 1, 1, 2, 2]
+    paragraphs = [p.text for p in Document(output).paragraphs]
+    for label in expected:
+        assert sum(text.startswith(label + ".") for text in paragraphs) == 1
+
+
+def test_deferred_figures_continue_their_own_caption_series(tmp_path: Path) -> None:
+    image = tmp_path / "image.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    _one_section_template(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "![image.png](image.png)\n\nScheme 1. A scheme.\n\n"
+        "![image.png](image.png)\n\nFigure 1. First figure.\n\n"
+        "# Table of Contents\n\n"
+        "![image.png](image.png)\n\nFigure 2. Second figure.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, title="Example", end_matter_placement="end",
+    )
+    assert [figure["label"] for figure in result.figures] == ["Scheme 1", "Figure 1", "Figure 2"]
+    assert [figure["number"] for figure in result.figures] == [1, 1, 2]
+
+
+def test_captionless_images_still_consume_only_the_figure_series(tmp_path: Path) -> None:
+    image = tmp_path / "image.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    _one_section_template(template)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "![image.png](image.png)\n\nScheme 1. A scheme.\n\n"
+        "![image.png](image.png)\n\n"
+        "![image.png](image.png)\n\nFigure 1. A figure.\n\n"
+        "![image.png](image.png)\n\nSupplementary Fig. 1. A supplementary figure.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template([source], template_path=template, output=output, title="Example")
+    assert [figure["label"] for figure in result.figures] == [
+        "Scheme 1", "", "Figure 2", "Supplementary Fig. 1",
+    ]
+    assert [figure["number"] for figure in result.figures] == [1, 1, 2, 1]
+
+
 def test_semantic_caption_style_ignores_numbering_style_with_candidate_id(tmp_path: Path) -> None:
     image = tmp_path / "figure.png"
     Image.new("RGB", (80, 40), "white").save(image)
