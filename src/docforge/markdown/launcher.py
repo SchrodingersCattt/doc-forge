@@ -121,6 +121,40 @@ def _looks_like_table_row(line: str) -> bool:
     return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
 
 
+def _list_item_text(
+    lines: list[str], index: int, first: str, content_column: int
+) -> tuple[str, int]:
+    """The text of one list item, including its wrapped continuation lines.
+
+    A wrapped item used to end at its first line: every continuation line fell out of
+    the list and became a separate flush paragraph, so a two-line bullet rendered as a
+    bullet followed by orphaned prose. A continuation line belongs to the item when it
+    is indented to the item's content column, and it is not itself a new block.
+    """
+
+    parts = [first.strip()]
+    cursor = index + 1
+    while cursor < len(lines):
+        line = lines[cursor]
+        if not line.strip():
+            break
+        indent = len(line) - len(line.lstrip())
+        if indent < content_column:
+            break
+        stripped = line.strip()
+        if (
+            BULLET_RE.match(line)
+            or ORDERED_RE.match(line)
+            or HEADING_RE.match(stripped)
+            or IMAGE_RE.match(stripped)
+            or stripped.startswith((">", "|", "```", "$$"))
+        ):
+            break
+        parts.append(stripped)
+        cursor += 1
+    return " ".join(parts).strip(), cursor
+
+
 def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
     """Parse a Markdown file into the block model (see ``Block``)."""
     text = clean_markdown(path.read_text(encoding="utf-8-sig"), strip_comments)
@@ -223,16 +257,16 @@ def parse_markdown(path: Path, strip_comments: bool = True) -> list[Block]:
         ordered = ORDERED_RE.match(line)
         if ordered:
             flush_paragraph()
-            blocks.append(
-                Block("ordered", f"{ordered.group(2)}. {ordered.group(3)}", level=len(ordered.group(1)) // 2)
-            )
-            i += 1
+            content_column = len(ordered.group(1)) + len(ordered.group(2)) + 2
+            text, i = _list_item_text(lines, i, ordered.group(3), content_column)
+            blocks.append(Block("ordered", f"{ordered.group(2)}. {text}", level=len(ordered.group(1)) // 2))
             continue
         bullet = BULLET_RE.match(line)
         if bullet:
             flush_paragraph()
-            blocks.append(Block("bullet", bullet.group(2), level=len(bullet.group(1)) // 2))
-            i += 1
+            content_column = len(bullet.group(1)) + 2
+            text, i = _list_item_text(lines, i, bullet.group(2), content_column)
+            blocks.append(Block("bullet", text, level=len(bullet.group(1)) // 2))
             continue
         if stripped.startswith(">"):
             flush_paragraph()
@@ -552,6 +586,10 @@ def add_list_paragraph(doc: DocumentType, text: str, level: int, ordered: bool):
     prefix = "" if ordered else "• "
     add_inline(paragraph, prefix + text)
     apply_base_format(paragraph, first_indent=False)
+    # Left-align rather than justify: a list item often carries a file path or a
+    # constant as one unbreakable token, and justification answers that by stretching
+    # every other space on the line.
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     paragraph.paragraph_format.left_indent = Cm(0.74 + 0.6 * level)
     paragraph.paragraph_format.first_line_indent = Cm(-0.37 if not ordered else 0)
     return paragraph
@@ -760,11 +798,18 @@ def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> Non
     consecutive identical labels keeps generated tables visually compatible
     with the reviewed template and gives the redline engine stable row
     signatures for row-level insertions.
+
+    Only grouping columns are merged, never the final column. A table's last column
+    is where its payload lives, so a value repeated there is a repeated datum rather
+    than a rowspan artifact: Table S1 lost four of its values because they matched the
+    row above them, and the values were Markdown code spans, so no text pattern
+    distinguishes them from a label. Position does.
     """
+
     if len(rows) < 3:
         return
     width = max(len(row) for row in rows)
-    for col in range(width):
+    for col in range(width - 1):
         start = 1  # header row is never merged
         while start < len(rows):
             value = rows[start][col] if col < len(rows[start]) else ""
