@@ -1035,3 +1035,53 @@ def test_main_numbering_prefix_remains_numeric_by_default(tmp_path: Path) -> Non
     document = render_blocks_to_doc(parse_markdown(source))
     assert document.tables[0].cell(0, 2).text == "(1)"
     assert "(S1)" not in document._element.xml
+
+
+
+def test_template_keeps_explicit_inline_color_and_black_default(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text('<span style="color:#C0504D">**Colored** $x_2$.</span> Plain.\n', encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    paragraph = next(p for p in Document(output).paragraphs if "Colored" in p.text)
+    assert paragraph.text == "Colored x2. Plain."
+    marked = [r for r in paragraph.runs if str(r.font.color.rgb) == "C0504D"]
+    assert "".join(r.text for r in marked) == "Colored x2."
+    assert any(r.bold and "Colored" in r.text for r in marked)
+    assert any(r.font.subscript and r.text == "2" for r in marked)
+    assert all(str(r.font.color.rgb) == "000000" for r in paragraph.runs if "Plain" in r.text)
+    assert "urn:docforge:internal" not in paragraph._p.xml
+
+
+
+def test_unnumbered_image_does_not_consume_figure_number(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    image = tmp_path / "graphic.png"
+    Image.new("RGB", (30, 20), "white").save(image)
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Abstract\n\nAbstract text.\n\n# Front matter\n\n## Front graphic\n\n"
+        "![Front graphic|role=unnumbered](graphic.png)\n\n"
+        "# Introduction\n\nBody text.\n\n![Figure 1](graphic.png)\n\nFigure 1. Numbered caption.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template([source], template_path=template, output=output, metadata_path=metadata)
+    assert [f["label"] for f in result.figures] == ["Front graphic", "Figure 1"]
+    assert [f["number"] for f in result.figures] == [None, 1]
+    document = Document(output)
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "Figure 1. Numbered caption." in text
+    assert "Figure 2." not in text
+    assert len(document.inline_shapes) == 2
+    picture_paragraphs = [p for p in document.paragraphs if p._p.findall(".//" + qn("w:drawing"))]
+    assert picture_paragraphs[0]._p.find(".//" + qn("w:keepNext")) is None
+    assert picture_paragraphs[1]._p.find(".//" + qn("w:keepNext")) is not None
+    assert text.index("Abstract text") < text.index("Front graphic") < text.index("Body text")

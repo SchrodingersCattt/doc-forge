@@ -59,7 +59,7 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 
 INLINE_TOKEN_RE = re.compile(
-    r"(<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)"
+    r'(<span\s+style="color:\s*#[0-9A-Fa-f]{6};?">[^<\n]*</span>|<u>\*\*.*?\*\*</u>|<sup>[^<\n]*?</sup>|<sub>[^<\n]*?</sub>|<br\s*/?>|<!--.*?-->|\*\*\*.*?\*\*\*|\*\*.*?\*\*|(?<!\*)\*[^*\n]+?\*(?!\*)|`[^`\n]+`|\$[^$\n]+?\$)'
 )
 
 # Unicode script ⇄ plain-text maps used when transferring Word runs.
@@ -331,7 +331,8 @@ def set_run_vertical_align(run, mode: str) -> None:
 def set_run_font(run, *, chinese: str = "仿宋", latin: str = "Times New Roman", size: float = 12.0) -> None:
     run.font.name = latin
     run.font.size = Pt(size)
-    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    if run.font.color.rgb is None:
+        run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
     run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), chinese)
 
 
@@ -475,7 +476,17 @@ def add_inline(
             run.bold = bold_default
             set_run_font(run, size=size)
         token = match.group(0)
-        if token.startswith("<u>**"):
+        if token.startswith("<span"):
+            color_match = re.fullmatch(
+                r'<span\s+style="color:\s*#([0-9A-Fa-f]{6});?">([^<\n]*)</span>', token
+            )
+            if color_match is None:
+                raise ValueError("Invalid inline color span")
+            start = len(paragraph.runs)
+            add_inline(paragraph, color_match.group(2), bold_default=bold_default, size=size)
+            for run in paragraph.runs[start:]:
+                run.font.color.rgb = RGBColor.from_string(color_match.group(1).upper())
+        elif token.startswith("<u>**"):
             start = len(paragraph.runs)
             add_inline(paragraph, token[5:-6], bold_default=True, size=size)
             for run in paragraph.runs[start:]:

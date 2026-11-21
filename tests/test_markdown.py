@@ -400,3 +400,24 @@ def test_malformed_pipe_table_fails_with_source_location(tmp_path: Path) -> None
         parse_markdown(path)
     assert "Malformed Markdown table" in str(excinfo.value)
 
+
+
+class InlineColorSpanTests(unittest.TestCase):
+    def test_inline_color_span_preserves_nested_math_and_emphasis(self) -> None:
+        document = render_blocks_to_doc([
+            Block("paragraph", '<span style="color:#C0504D">**Response:** See $x_2$.</span> Plain.')
+        ])
+        paragraph = document.paragraphs[0]
+        self.assertEqual(paragraph.text, "Response: See x2. Plain.")
+        runs = [run for run in paragraph.runs if run.text]
+        colored = [run for run in runs if str(run.font.color.rgb) == "C0504D"]
+        self.assertEqual("".join(run.text for run in colored), "Response: See x2.")
+        self.assertTrue(any(run.bold and "Response" in run.text for run in colored))
+        self.assertTrue(any(run.font.subscript and run.text == "2" for run in colored))
+        self.assertTrue(any("Plain." in run.text and str(run.font.color.rgb) == "000000" for run in runs))
+
+    def test_invalid_color_span_is_not_silently_interpreted(self) -> None:
+        document = render_blocks_to_doc([
+            Block("paragraph", '<span style="color:#XYZ">Text</span>')
+        ])
+        self.assertIn('<span style=', document.paragraphs[0].text)

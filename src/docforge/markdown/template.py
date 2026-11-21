@@ -480,6 +480,16 @@ def _copy_positive_markers(source_rpr, target_rpr):
         if existing is not None:
             target_rpr.remove(existing)
         target_rpr.insert(0, copy.deepcopy(code_fonts))
+    source_color = source_rpr.find(qn("w:color"))
+    if source_color is not None:
+        value = source_color.get(qn("w:val"), "").upper()
+        if re.fullmatch(r"[0-9A-F]{6}", value) and value != "000000":
+            existing = target_rpr.find(qn("w:color"))
+            if existing is not None:
+                target_rpr.remove(existing)
+            explicit = copy.deepcopy(source_color)
+            explicit.set("{urn:docforge:internal}explicit-color", "1")
+            target_rpr.append(explicit)
     for tag in ("b", "bCs", "i", "iCs", "u", "strike", "vertAlign"):
         for marker in source_rpr.findall(qn("w:" + tag)):
             value = marker.get(qn("w:val"))
@@ -531,7 +541,14 @@ def _force_run_black(element) -> None:
         if color is None:
             color = OxmlElement("w:color")
             properties.append(color)
-        color.set(qn("w:val"), "000000")
+        explicit = color.attrib.pop("{urn:docforge:internal}explicit-color", None)
+        if explicit == "1":
+            preserved = OxmlElement("w:color")
+            preserved.set(qn("w:val"), color.get(qn("w:val")))
+            properties.replace(color, preserved)
+            color = preserved
+        else:
+            color.set(qn("w:val"), "000000")
         for attribute in ("themeColor", "themeShade", "themeTint"):
             color.attrib.pop(qn(f"w:{attribute}"), None)
 
@@ -2034,6 +2051,9 @@ def assemble_markdown_template(
         if image is None:
             break
         image_options = dict(image.options)
+        role = image_options.get("role", "figure")
+        if role not in {"figure", "unnumbered"}:
+            raise ValueError("Image role must be figure or unnumbered")
         requested_orientation = image_options.get("orientation", "portrait")
         if requested_orientation not in {"portrait", "landscape"}:
             raise ValueError("Image orientation marker must be portrait or landscape")
@@ -2088,20 +2108,31 @@ def assemble_markdown_template(
         else:
             render_section = section
 
-        output_nodes.extend(
-            _clone_figure(
-                template,
-                image,
-                caption or image.text or f"Figure {figure_index + 1}.",
-                figure_region,
-                prototypes.paragraphs.get("caption"),
-                styles["caption"],
-                figure_index + 1,
-                section_width_twips=_section_width_twips(render_section),
-                number_prefix=numbering_prefix,
-                caption_font_size=caption_font_size,
-            )
+        figure_nodes = _clone_figure(
+            template,
+            image,
+            caption or image.text or f"Figure {figure_index + 1}.",
+            figure_region,
+            prototypes.paragraphs.get("caption"),
+            styles["caption"],
+            figure_index + 1,
+            section_width_twips=_section_width_twips(render_section),
+            number_prefix=numbering_prefix,
+            caption_font_size=caption_font_size,
         )
+        if role == "unnumbered":
+            for doc_pr in figure_nodes[0].iter(qn("wp:docPr")):
+                doc_pr.set("id", str(5000 + len(figures)))
+            output_nodes.append(figure_nodes[0])
+        else:
+            image_paragraph = figure_nodes[0]
+            properties = image_paragraph.find(qn("w:pPr"))
+            if properties is None:
+                properties = OxmlElement("w:pPr")
+                image_paragraph.insert(0, properties)
+            if properties.find(qn("w:keepNext")) is None:
+                properties.append(OxmlElement("w:keepNext"))
+            output_nodes.extend(figure_nodes)
         if resolved_span == "page":
             output_nodes.append(_section_break_node(figure_section))
             section_sources.append(
@@ -2111,8 +2142,9 @@ def assemble_markdown_template(
             )
         figures.append(
             {
-                "number": figure_index + 1,
-                "label": _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
+                "number": None if role == "unnumbered" else figure_index + 1,
+                "label": image.text if role == "unnumbered" else _numbered_caption(caption or image.text, figure_index + 1, numbering_prefix)[0],
+                "role": role,
                 "path": str(Path(image.path).resolve()),
                 "sha256": sha256_file(Path(image.path)),
                 "caption": caption or image.text,
@@ -2123,7 +2155,8 @@ def assemble_markdown_template(
                 "orientation": requested_orientation,
             }
         )
-        figure_index += 1
+        if role != "unnumbered":
+            figure_index += 1
         body_index += 1
 
     reference_keys = tuple(
