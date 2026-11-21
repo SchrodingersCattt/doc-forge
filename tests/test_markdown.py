@@ -443,3 +443,14 @@ def test_identical_decimal_measurements_do_not_merge_across_rows() -> None:
     assert first[1].tcPr.find(qn("w:vMerge")) is None
     assert second[1].tcPr.find(qn("w:vMerge")) is None
     assert "0.0 / 0.0" in "".join(node.text or "" for node in second[1].iter(qn("w:t")))
+
+
+def test_inline_natural_log_survives_word_rendering() -> None:
+    from docforge.tex.tokenize import tokenize_tex
+
+    spans = tokenize_tex(r"$\ln k$")
+    assert "".join(span.text for span in spans) == "ln\u2009k"
+    assert next(span for span in spans if "ln" in span.text).italic is False
+    assert next(span for span in spans if "k" in span.text).italic is True
+    document = render_blocks_to_doc([Block("paragraph", r"Observed $\ln k$ residual.")])
+    assert document.paragraphs[0].text == "Observed ln\u2009k residual."

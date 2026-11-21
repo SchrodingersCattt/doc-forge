@@ -758,6 +758,9 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = re.sub(r"\\mathbb\{R\}", "ℝ", s)
     for cmd, uni in sorted(GREEK.items(), key=lambda item: len(item[0]), reverse=True):
         s = s.replace(cmd, uni)
+    # An inline natural-log operator is upright text. Leaving it as an
+    # unknown control sequence silently discarded it from Word runs.
+    s = re.sub(r"\\ln\b", lambda _: r"\mathrm{ln}" + "\u2009", s)
     s = re.sub(r"\\binom\{([^}]*)\}\{([^}]*)\}", r"C(\1,\2)", s)
     return s
 
