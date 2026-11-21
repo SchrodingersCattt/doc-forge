@@ -800,6 +800,8 @@ def test_template_body_and_caption_typography(tmp_path: Path) -> None:
         assert all(run._r.rPr.sz.get(qn("w:val")) == "20" for run in caption.runs if run.text)
         assert caption.runs[0].bold is True
         assert all(run.bold is not True and run.italic is not True for run in caption.runs[1:] if run.text.strip())
+        if prefix == "Table S1.":
+            assert caption._p.find(".//" + qn("w:keepNext")) is not None
     assert result.figures[0]["orientation"] == "portrait"
 
 

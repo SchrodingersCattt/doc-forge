@@ -421,3 +421,25 @@ class InlineColorSpanTests(unittest.TestCase):
             Block("paragraph", '<span style="color:#XYZ">Text</span>')
         ])
         self.assertIn('<span style=', document.paragraphs[0].text)
+
+
+def test_identical_decimal_measurements_do_not_merge_across_rows() -> None:
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docforge.markdown.launcher import add_table
+
+    document = Document()
+    rows = (
+        ("Material", "Measurement", "Other"),
+        ("A", "0.0 / 0.0", "1"),
+        ("A", "0.0 / 0.0", "2"),
+    )
+    add_table(document, rows)
+    raw_rows = document.tables[0]._tbl.findall(qn("w:tr"))
+    first = raw_rows[1].findall(qn("w:tc"))
+    second = raw_rows[2].findall(qn("w:tc"))
+    assert first[0].tcPr.find(qn("w:vMerge")) is not None
+    assert second[0].tcPr.find(qn("w:vMerge")) is not None
+    assert first[1].tcPr.find(qn("w:vMerge")) is None
+    assert second[1].tcPr.find(qn("w:vMerge")) is None
+    assert "0.0 / 0.0" in "".join(node.text or "" for node in second[1].iter(qn("w:t")))

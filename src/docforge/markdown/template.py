@@ -2034,6 +2034,16 @@ def assemble_markdown_template(
                     heading_counters[3] = 0
                     for node in nodes:
                         _number_heading(node, heading_counters[block.level])
+            elif block.kind == "table_caption":
+                # A caption belongs with its table header, including when it
+                # follows a heading near the bottom of a page.
+                for node in nodes:
+                    properties = node.find(qn("w:pPr"))
+                    if properties is None:
+                        properties = OxmlElement("w:pPr")
+                        node.insert(0, properties)
+                    if properties.find(qn("w:keepNext")) is None:
+                        properties.append(OxmlElement("w:keepNext"))
             elif block.kind == "paragraph":
                 indent = 0 if _is_post_equation_continuation(block, previous_block) else body_first_line_chars
                 for node in nodes:

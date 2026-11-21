@@ -814,7 +814,8 @@ def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> Non
     is where its payload lives, so a value repeated there is a repeated datum rather
     than a rowspan artifact: Table S1 lost four of its values because they matched the
     row above them, and the values were Markdown code spans, so no text pattern
-    distinguishes them from a label. Position does.
+    distinguishes them from a label. Position does. Decimal or delimited
+    numeric measurements are also kept as independent cells.
     """
 
     if len(rows) < 3:
@@ -825,6 +826,13 @@ def _merge_repeated_table_cells(table, rows: tuple[tuple[str, ...], ...]) -> Non
         while start < len(rows):
             value = rows[start][col] if col < len(rows[start]) else ""
             if not value:
+                start += 1
+                continue
+            # Decimal/uncertainty measurements are data even when consecutive
+            # values are identical. Repeating them in both rows avoids making
+            # an auto-inferred rowspan look like a missing measurement.
+            if (any(marker in value for marker in (".", "/", "%", "±"))
+                    and re.fullmatch(r"[0-9.eE+\-−/ %±(),]+", value.strip())):
                 start += 1
                 continue
             end = start + 1
