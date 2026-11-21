@@ -454,3 +454,16 @@ def test_inline_natural_log_survives_word_rendering() -> None:
     assert next(span for span in spans if "k" in span.text).italic is True
     document = render_blocks_to_doc([Block("paragraph", r"Observed $\ln k$ residual.")])
     assert document.paragraphs[0].text == "Observed ln\u2009k residual."
+
+
+def test_inline_calligraphic_symbols_survive_word_rendering() -> None:
+    from docforge.tex.tokenize import tokenize_tex
+
+    spans = tokenize_tex(r"$\mathcal N_i$ and $\mathcal{C}$")
+    assert "".join(span.text for span in spans) == "𝒩i and 𝒞"
+    assert next(span for span in spans if span.text == "i").subscript is True
+    document = render_blocks_to_doc([Block("paragraph", r"Set $\mathcal N_i$ and tensor $\mathcal C$.")])
+    assert "𝒩i" in document.paragraphs[0].text
+    assert "𝒞" in document.paragraphs[0].text
+    assert all(run.font.name == "Cambria Math" for run in document.paragraphs[0].runs
+               if "𝒩" in run.text or "𝒞" in run.text)

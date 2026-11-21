@@ -91,6 +91,7 @@ SPACED_RELATIONS = {
     r"\sim": "∼",
 }
 RELATION_CHARS = "=<>≤≥≠≈∼"
+MATH_SCRIPT_CAPITALS = "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵"
 
 # Commands whose textual content is skipped entirely (kept for compatibility
 # with hand-authored .tex sources).
@@ -758,6 +759,14 @@ def _preprocess(s: str, resolve_ref: Callable[[str], str] | None = None) -> str:
     s = re.sub(r"\\mathbb\{R\}", "ℝ", s)
     for cmd, uni in sorted(GREEK.items(), key=lambda item: len(item[0]), reverse=True):
         s = s.replace(cmd, uni)
+    # Preserve calligraphic symbols in inline formulas, including TeX's
+    # unbraced single-letter form (for example, the neighbor set).
+    script_capitals = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", MATH_SCRIPT_CAPITALS))
+    s = re.sub(
+        r"\\mathcal\s*(?:\{([A-Z])\}|([A-Z]))",
+        lambda match: script_capitals[match.group(1) or match.group(2)],
+        s,
+    )
     # An inline natural-log operator is upright text. Leaving it as an
     # unknown control sequence silently discarded it from Word runs.
     s = re.sub(r"\\ln\b", lambda _: r"\mathrm{ln}" + "\u2009", s)

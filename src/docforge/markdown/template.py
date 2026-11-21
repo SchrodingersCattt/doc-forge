@@ -475,7 +475,7 @@ def _copy_positive_markers(source_rpr, target_rpr):
     if target_rpr is None:
         target_rpr = OxmlElement("w:rPr")
     code_fonts = source_rpr.find(qn("w:rFonts"))
-    if code_fonts is not None and code_fonts.get(qn("w:ascii")) == "Consolas":
+    if code_fonts is not None and code_fonts.get(qn("w:ascii")) in {"Consolas", "Cambria Math"}:
         existing = target_rpr.find(qn("w:rFonts"))
         if existing is not None:
             target_rpr.remove(existing)
@@ -510,7 +510,7 @@ def _override_run_fonts(element, font_family: str | None, east_asia_font: str | 
     for run in element.iter(qn("w:r")):
         properties = run.find(qn("w:rPr"))
         fonts = properties.find(qn("w:rFonts")) if properties is not None else None
-        if fonts is not None and fonts.get(qn("w:ascii")) == "Consolas":
+        if fonts is not None and fonts.get(qn("w:ascii")) in {"Consolas", "Cambria Math"}:
             continue
         if properties is None:
             properties = OxmlElement("w:rPr")

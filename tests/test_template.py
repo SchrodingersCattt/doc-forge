@@ -1087,3 +1087,19 @@ def test_unnumbered_image_does_not_consume_figure_number(tmp_path: Path) -> None
     assert picture_paragraphs[0]._p.find(".//" + qn("w:keepNext")) is None
     assert picture_paragraphs[1]._p.find(".//" + qn("w:keepNext")) is not None
     assert text.index("Abstract text") < text.index("Front graphic") < text.index("Body text")
+
+
+def test_template_preserves_inline_math_script_font(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(r"Set $\mathcal N_i$ and tensor $\mathcal C$.", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    assemble_markdown_template([source], template_path=template, output=output,
+                               metadata_path=metadata, font_family="Times New Roman")
+    paragraph = next(p for p in Document(output).paragraphs if "Set " in p.text)
+    assert all(run.font.name == "Cambria Math" for run in paragraph.runs
+               if "𝒩" in run.text or "𝒞" in run.text)
+    assert "𝒩" in paragraph.text and "𝒞" in paragraph.text
