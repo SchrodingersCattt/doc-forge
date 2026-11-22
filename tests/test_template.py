@@ -1089,6 +1089,37 @@ def test_unnumbered_image_does_not_consume_figure_number(tmp_path: Path) -> None
     assert text.index("Abstract text") < text.index("Front graphic") < text.index("Body text")
 
 
+def test_final_page_graphic_follows_references_at_requested_width(tmp_path: Path) -> None:
+    template = tmp_path / "template.docx"
+    _template(template)
+    image = tmp_path / "graphic.png"
+    Image.new("RGB", (195, 105), "white").save(image)
+    bibliography = tmp_path / "refs.json"
+    bibliography.write_text('{"ref": "Author. Journal. 2026."}', encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        r"Body text \citep{ref}." "\n\n# End graphic\n\nGraphic note.\n\n"
+        "![Graphic|role=unnumbered|placement=final-page|width-in=3.25](graphic.png)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, title="A title",
+        bibliography_path=bibliography, strip_level_one_headings=True,
+    )
+    assert result.figures[0]["placement"] == "final-page"
+    assert result.figures[0]["number"] is None
+    document = Document(output)
+    reference, heading, note, picture = document.paragraphs[-4:]
+    assert "Author. Journal. 2026." in reference.text
+    assert heading.text == "End graphic"
+    assert heading.paragraph_format.page_break_before
+    assert note.text == "Graphic note."
+    assert picture._p.findall(".//" + qn("w:drawing"))
+    assert document.inline_shapes[0].width.inches == 3.25
+    assert document.inline_shapes[0].height.inches == 1.75
+
+
 def test_template_preserves_inline_math_script_font(tmp_path: Path) -> None:
     template = tmp_path / "template.docx"
     _template(template)

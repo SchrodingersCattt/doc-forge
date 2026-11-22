@@ -1887,6 +1887,20 @@ def assemble_markdown_template(
             continue
         retained_blocks.append(block)
     body_blocks = tuple(retained_blocks)
+    final_page = None
+    for index, block in enumerate(body_blocks):
+        if block.kind != "image" or dict(block.options).get("placement") != "final-page":
+            continue
+        if index != len(body_blocks) - 1 or dict(block.options).get("role") != "unnumbered":
+            raise ValueError("A final-page graphic must be unnumbered and be the last Markdown block")
+        start = index
+        while start > 0 and body_blocks[start - 1].kind == "paragraph":
+            start -= 1
+        if start == 0 or body_blocks[start - 1].kind != "heading" or body_blocks[start - 1].level != 1:
+            raise ValueError("A final-page graphic must follow a level-one heading and optional note")
+        final_page = body_blocks[start - 1:]
+        body_blocks = body_blocks[:start - 1]
+        break
     if strip_level_one_headings:
         body_blocks = tuple(
             block for block in body_blocks
@@ -2203,6 +2217,43 @@ def assemble_markdown_template(
                 _override_run_size(reference, reference_font_size)
             output_nodes.append(reference)
     final_region = body_regions[min(body_index, len(body_regions) - 1)]
+    if final_page:
+        heading, *notes, image = final_page
+        final_heading = _terminal_heading(
+            template, styles["heading_1"], heading.text,
+            prototype=prototypes.paragraphs.get("heading_1"), page_break_before=True,
+        )
+        output_nodes.append(final_heading)
+        output_nodes.extend(
+            _new_paragraph(template, "Normal", note.text, uppercase=False)
+            for note in notes
+        )
+        section = adjusted(final_region.section)
+        column_width = _section_width_twips(section)
+        width = round(float(dict(image.options).get("width-in", column_width / 1440)) * 1440)
+        if not 1440 <= width <= column_width:
+            raise ValueError("Final-page graphic width must fit within a column and be at least one inch")
+        picture, _ = _clone_figure(
+            template, image, image.text, None, None, styles["caption"],
+            figure_index + 1, section_width_twips=width,
+        )
+        for doc_pr in picture.iter(qn("wp:docPr")):
+            doc_pr.set("id", str(5000 + len(figures)))
+        output_nodes.append(picture)
+        figures.append({
+            "number": None,
+            "label": image.text,
+            "role": "unnumbered",
+            "path": str(Path(image.path).resolve()),
+            "sha256": sha256_file(Path(image.path)),
+            "caption": image.text,
+            "template_region": None,
+            "placement_after_body_region": final_region.index,
+            "placement": "final-page",
+            "span": "column",
+            "columns": _section_column_count(section),
+            "orientation": "portrait",
+        })
     # The final section belongs to the document body.  A body-level sectPr is
     # required for Word/LibreOffice to balance the last two-column region.
     output_nodes.append(adjusted(final_region.section))
