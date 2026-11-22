@@ -1070,7 +1070,7 @@ def test_unnumbered_image_does_not_consume_figure_number(tmp_path: Path) -> None
     source = tmp_path / "source.md"
     source.write_text(
         "# Abstract\n\nAbstract text.\n\n# Front matter\n\n## Front graphic\n\n"
-        "![Front graphic|role=unnumbered](graphic.png)\n\n"
+        "![Front graphic|role=unnumbered|width-in=3.25](graphic.png)\n\n"
         "# Introduction\n\nBody text.\n\n![Figure 1](graphic.png)\n\nFigure 1. Numbered caption.\n",
         encoding="utf-8",
     )
@@ -1083,6 +1083,7 @@ def test_unnumbered_image_does_not_consume_figure_number(tmp_path: Path) -> None
     assert "Figure 1. Numbered caption." in text
     assert "Figure 2." not in text
     assert len(document.inline_shapes) == 2
+    assert document.inline_shapes[0].width.inches == 3.25
     picture_paragraphs = [p for p in document.paragraphs if p._p.findall(".//" + qn("w:drawing"))]
     assert picture_paragraphs[0]._p.find(".//" + qn("w:keepNext")) is None
     assert picture_paragraphs[1]._p.find(".//" + qn("w:keepNext")) is not None

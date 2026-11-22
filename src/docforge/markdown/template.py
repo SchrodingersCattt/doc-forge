@@ -2132,6 +2132,12 @@ def assemble_markdown_template(
         else:
             render_section = section
 
+        image_width = _section_width_twips(render_section)
+        if "width-in" in image_options:
+            width = round(float(image_options["width-in"]) * 1440)
+            if not 1440 <= width <= image_width:
+                raise ValueError("Image width must fit within its layout and be at least one inch")
+            image_width = width
         figure_nodes = _clone_figure(
             template,
             image,
@@ -2140,7 +2146,7 @@ def assemble_markdown_template(
             prototypes.paragraphs.get("caption"),
             styles["caption"],
             figure_index + 1,
-            section_width_twips=_section_width_twips(render_section),
+            section_width_twips=image_width,
             number_prefix=numbering_prefix,
             caption_font_size=caption_font_size,
         )
