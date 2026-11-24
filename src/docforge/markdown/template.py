@@ -1211,7 +1211,22 @@ CAPTION_LABEL_RE = re.compile(
 )
 
 
+DUAL_CAPTION_LABEL_RE = re.compile(
+    r"^\s*(?P<emphasis>\*{1,3}|_{1,3})?(?P<kind>Figure|Scheme|Chart)\s+"
+    r"(?P<original>[A-Za-z]*\d+)\s*\|\s*(?P<prefix>[A-Za-z]+)\d*\."
+    r"(?(emphasis)(?P=emphasis))\s*",
+    re.IGNORECASE,
+)
+
+
 def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
+    dual = DUAL_CAPTION_LABEL_RE.match(caption)
+    if dual:
+        label = (
+            f"{dual['kind'].capitalize()} {dual['original']} | "
+            f"{dual['prefix']}{number}"
+        )
+        return label, f"{label}. {caption[dual.end():]}".rstrip()
     match = CAPTION_LABEL_RE.match(caption)
     kind = match.group(1).capitalize() if match else "Figure"
     body = caption[match.end():].strip() if match else caption.strip()
@@ -1510,8 +1525,8 @@ def _clone_figure(
         relation_id, _ = target.part.get_or_add_image(BytesIO(image_bytes))
         for blip in paragraph.iter(qn("a:blip")):
             blip.set(qn("r:embed"), relation_id)
-    _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
-    caption_text = re.sub(r"^((?:Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])", r"**\1**", caption_text)
+    label, caption_text = _numbered_caption(caption, figure_number, number_prefix)
+    caption_text = f"**{label}.**{caption_text[len(label) + 1:]}"
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype)
     _format_caption_runs(cap, caption_font_size or 10)
     return [paragraph, cap]
