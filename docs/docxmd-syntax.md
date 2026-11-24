@@ -54,6 +54,13 @@ text. The embedded assembly manifest repeats that choice on `tables[]`
 (`role`, `numbering`, `number`, `label`, `caption`) and records each figure's
 authored alt text on `figures[].alt`.
 
+A template-backed image caption can preserve a source figure number and add a
+document sequence number. Place `Figure S8 | R. Caption text.` below the
+image. The first figure renders as `Figure S8 | R1. Caption text.`. An
+authored suffix such as `R9` keeps its letter prefix and takes its number
+from the figure's position in the document. The full label appears in
+`figures[].label` in the assembly manifest.
+
 For source-package edits, `roundtrip` keeps `source-bundle/baseline.md`,
 `full.md`, and `block-map.json` after the first export. Edit `full.md` and run
 the command again: it patches only matched text paragraphs, preserves opaque

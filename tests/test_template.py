@@ -1003,6 +1003,43 @@ def test_template_assembly_keeps_inline_figure_and_caption_pair(tmp_path: Path) 
     verify_template_output(output, expected_sections=2)
 
 
+def test_template_dual_figure_labels_keep_source_numbers_and_follow_document_order(tmp_path: Path) -> None:
+    image = tmp_path / "source.png"
+    Image.new("RGB", (80, 40), "white").save(image)
+    template = tmp_path / "template.docx"
+    _figure_template(template, image)
+    metadata = tmp_path / "metadata.md"
+    metadata.write_text("# TITLE\n\nA title\n", encoding="utf-8")
+    source = tmp_path / "source.md"
+    source.write_text(
+        "# Introduction\n\n"
+        "![Model comparison](source.png)\n\n"
+        "Figure S8 | R9. Model comparison.\n\n"
+        "![Overview](source.png)\n\n"
+        "Figure 4 | R. Overview.\n\n"
+        "![Control](source.png)\n\n"
+        "Figure 99. Control.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    result = assemble_markdown_template(
+        [source], template_path=template, output=output, metadata_path=metadata,
+    )
+
+    assert [item["label"] for item in result.figures] == [
+        "Figure S8 | R1", "Figure 4 | R2", "Figure 3",
+    ]
+    captions = [p for p in Document(output).paragraphs if p.text.startswith("Figure ")]
+    assert [p.text for p in captions] == [
+        "Figure S8 | R1. Model comparison.",
+        "Figure 4 | R2. Overview.",
+        "Figure 3. Control.",
+    ]
+    for paragraph, figure in zip(captions, result.figures, strict=True):
+        assert paragraph.runs[0].text == f"{figure['label']}."
+        assert paragraph.runs[0].bold
+
+
 def test_replacement_figure_drops_template_crop_and_fills_section_width(tmp_path: Path) -> None:
     template_image = tmp_path / "template.png"
     source_image = tmp_path / "source.png"

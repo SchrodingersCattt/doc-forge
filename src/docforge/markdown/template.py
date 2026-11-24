@@ -1523,7 +1523,22 @@ CAPTION_LABEL_RE = re.compile(
 )
 
 
+DUAL_CAPTION_LABEL_RE = re.compile(
+    r"^\s*(?P<emphasis>\*{1,3}|_{1,3})?(?P<kind>Figure|Scheme|Chart)\s+"
+    r"(?P<original>[A-Za-z]*\d+)\s*\|\s*(?P<prefix>[A-Za-z]+)\d*\."
+    r"(?(emphasis)(?P=emphasis))\s*",
+    re.IGNORECASE,
+)
+
+
 def _numbered_caption(caption: str, number: int, prefix: str) -> tuple[str, str]:
+    dual = DUAL_CAPTION_LABEL_RE.match(caption)
+    if dual:
+        label = (
+            f"{dual['kind'].capitalize()} {dual['original']} | "
+            f"{dual['prefix']}{number}"
+        )
+        return label, f"{label}. {caption[dual.end():]}".rstrip()
     match = CAPTION_LABEL_RE.match(caption)
     raw_kind = match.group(1) if match else "Figure"
     kind = "Supplementary Fig." if raw_kind.lower().startswith("supplementary") else raw_kind.capitalize()
@@ -2043,14 +2058,10 @@ def _clone_figure(
                     other.set("cy", str(limit))
     if not caption.strip():
         return [paragraph]
-    _, caption_text = _numbered_caption(caption, figure_number, number_prefix)
+    label, caption_text = _numbered_caption(caption, figure_number, number_prefix)
     if not image.text.strip():
         _set_drawing_description(paragraph, _drawing_description("", caption_text))
-    caption_text = re.sub(
-        r"^((?:Supplementary Fig\.|Figure|Scheme|Chart)\s+[A-Za-z0-9]+[.:])",
-        r"**\1**",
-        caption_text,
-    )
+    caption_text = f"**{label}.**{caption_text[len(label) + 1:]}"
     preserve = "caption" in getattr(target.part, "_docforge_preserve_caption_roles", ())
     cap = _new_paragraph(target, caption_style_id, caption_text, prototype=caption_prototype,
                          preserve_prototype=preserve)
