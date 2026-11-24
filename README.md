@@ -36,6 +36,8 @@ Details are in `docforge <command> --help`.
 - `slides` — write an editable PPTX from a JSON list of titles and bullets; see [docs/slides.md](docs/slides.md)
 - `check` — check a DOCX
 - `gate abbr`, `gate references`, `gate style` — source checks from a JSON config
+- `gate evidence` — replace numbers and DOIs that are absent from a supplied source pack
+- `gate figures` — check a path and sha256 manifest against exported figure bytes
 - `pipeline` — run a `docforge.pipeline.v1` spec; see [docs/pipeline.md](docs/pipeline.md)
 - `convert`, `restyle`, `audit` — semantic conversion, DOCX restyle, and package audit; see [docs/migration.md](docs/migration.md)
 

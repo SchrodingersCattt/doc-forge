@@ -290,6 +290,14 @@ def build_parser() -> argparse.ArgumentParser:
     style.add_argument("paths", nargs="*", type=Path)
     style.add_argument("--config", type=Path, required=True)
     style.add_argument("--baseline", type=Path)
+    evidence = gate_sub.add_parser("evidence", help="Replace numbers and DOIs that are absent from the source pack")
+    evidence.add_argument("draft", type=Path)
+    evidence.add_argument("--sources", type=Path, action="append", required=True)
+    evidence.add_argument("--repair", action="store_true", help="Write the repaired draft")
+    evidence.add_argument("-o", "--output", type=Path)
+    figures = gate_sub.add_parser("figures", help="Check a figure manifest against exported bytes")
+    figures.add_argument("manifest", type=Path)
+    figures.add_argument("--root", type=Path, default=Path.cwd())
 
     pipeline = sub.add_parser("pipeline", help="Run a versioned, auditable document pipeline spec")
     pipeline.add_argument("spec", type=Path, help="JSON (or optional YAML) docforge.pipeline.v1 spec")
@@ -950,6 +958,28 @@ def _cmd_gate(args: argparse.Namespace) -> int:
         for finding in findings:
             print(f"{finding.path}:{finding.line}: {finding.rule}: {finding.message}", file=sys.stderr)
         return 1 if findings else 0
+    if args.gate_kind == "evidence":
+        from ..gates import read_sources, repair_unattested
+
+        repaired, notes = repair_unattested(args.draft.read_text(encoding="utf-8"), read_sources(args.sources))
+        for note in notes:
+            print(note)
+        if args.repair:
+            if args.output is None:
+                raise ValueError("gate evidence --repair requires --output")
+            args.output.write_text(repaired, encoding="utf-8")
+            print(args.output)
+            return 0
+        return 1 if notes else 0
+    if args.gate_kind == "figures":
+        import json
+        from ..gates import check_figure_freshness
+
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8-sig"))
+        issues = check_figure_freshness(manifest, args.root)
+        for issue in issues:
+            print(issue, file=sys.stderr)
+        return 1 if issues else 0
     raise ValueError(f"Unknown gate: {args.gate_kind}")
 
 
