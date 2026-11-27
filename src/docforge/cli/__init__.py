@@ -62,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     docx_md.add_argument("--track-changes", choices=("accept", "reject", "all"), default="accept")
     docx_md.add_argument("--force", action="store_true", help="Overwrite existing output files")
 
+    colored = sub.add_parser("color-diff", help="Color revised text against a DOCX without Word revisions")
+    colored.add_argument("base", type=Path, help="Reviewed DOCX baseline")
+    colored.add_argument("current", type=Path, help="Clean revised DOCX")
+    colored.add_argument("-o", "--output", type=Path, required=True)
+    colored.add_argument("--color-map", type=Path, help="JSON list of explicit paragraph rules (pattern and color)")
+    colored.add_argument("--default-color", default="FF0000", help="Color for unassigned revisions")
+    colored.add_argument("--force", action="store_true")
+
     md2 = sub.add_parser("redline", help="Create a DOCX with native Word revisions against a reviewed DOCX")
     md2.add_argument("base", type=Path, help="Reviewed DOCX baseline")
     md2.add_argument("current", type=Path, help="Freshly generated DOCX")
@@ -140,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_docx2md(args)
         if args.command == "redline":
             return _cmd_redline(args)
+        if args.command == "color-diff":
+            return _cmd_color_diff(args)
         if args.command == "tex2docx":
             return _cmd_tex2docx(args)
         if args.command == "docx2tex":
@@ -276,6 +286,19 @@ def _cmd_redline(args: argparse.Namespace) -> int:
         workers=args.workers,
     )
     print("tracked revisions: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
+    print(args.output)
+    return 0
+
+
+def _cmd_color_diff(args: argparse.Namespace) -> int:
+    from ..docxdiff.colored import create_colored_docx
+
+    summary = create_colored_docx(
+        args.base, args.current, args.output,
+        color_map_path=args.color_map, default_color=args.default_color,
+        overwrite=args.force,
+    )
+    print("colored changes: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
     print(args.output)
     return 0
 
